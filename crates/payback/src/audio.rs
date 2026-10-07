@@ -6,13 +6,18 @@
 //! `A = vol / d²` (d in world units >> 4), clamped to 255, audible when
 //! `A > 19`; at most 6 voices play at once. Samples are headerless signed
 //! 8-bit PCM, wrapped here as WAVs at 22050 Hz and sped up or down to the
-//! requested rate. Not yet reproduced: stereo panning and Doppler.
+//! requested rate. Mixing is done here (a [`MixerStream`] played as one
+//! endless stereo source), so the original's per-voice left/right volumes
+//! (pan) and Doppler pitch can be reproduced.
 
 use crate::data::GameData;
 use bevy::{
-    audio::{AudioSinkPlayback, Volume},
+    audio::{AddAudioSource, ChannelCount, Decodable, SampleRate, Source},
+    platform::collections::HashMap,
     prelude::*,
 };
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub const MIX_RATE: u32 = 22050;
 /// Max simultaneously audible voices (original mixer limit).
@@ -161,13 +166,14 @@ pub mod id {
     pub const SCREAMS: u16 = 76;
 }
 
+/// Samples by sound id: signed 8-bit PCM.
 #[derive(Resource, Default)]
 pub struct Sounds {
-    by_id: Vec<Option<Handle<AudioSource>>>,
+    by_id: Vec<Option<Arc<[i8]>>>,
 }
 
 impl Sounds {
-    pub fn get(&self, id: u16) -> Option<Handle<AudioSource>> {
+    pub fn get(&self, id: u16) -> Option<Arc<[i8]>> {
         self.by_id.get(id as usize).cloned().flatten()
     }
 }
@@ -242,11 +248,13 @@ pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Listener>()
+        app.add_audio_source::<MixerStream>()
+            .init_resource::<Listener>()
             .init_resource::<OtherListeners>()
             .init_resource::<FxVolume>()
-            .add_systems(Startup, load_sounds)
-            .add_systems(PostUpdate, (start_sounds, mix).chain());
+            .init_resource::<Mixer>()
+            .add_systems(Startup, (load_sounds, start_mixer))
+            .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain());
     }
 }
 
@@ -274,22 +282,17 @@ pub fn wav_from_pcm8(samples: &[u8], rate: u32) -> Vec<u8> {
     w
 }
 
-fn load_sounds(
-    mut commands: Commands,
-    data: Res<GameData>,
-    mut sources: ResMut<Assets<AudioSource>>,
-) {
+fn load_sounds(mut commands: Commands, data: Res<GameData>) {
     let mut sounds = Sounds::default();
     for name in SOUND_FILES {
-        let handle = data.read(format!("Sounds/{name}")).ok().map(|bytes| {
-            sources.add(AudioSource {
-                bytes: wav_from_pcm8(&bytes, MIX_RATE).into(),
-            })
-        });
-        if handle.is_none() {
+        let pcm = data
+            .read(format!("Sounds/{name}"))
+            .ok()
+            .map(|bytes| bytes.iter().map(|&b| b as i8).collect::<Arc<[i8]>>());
+        if pcm.is_none() {
             warn!("missing sound {name}");
         }
-        sounds.by_id.push(handle);
+        sounds.by_id.push(pcm);
     }
     commands.insert_resource(sounds);
 }
@@ -305,62 +308,239 @@ pub fn amplitude(sound: &Sound, listener: Vec3) -> f32 {
     }
 }
 
+/// Pan of a positional sound (`FUN_01007290`): `r = dx / |dy|` (integer,
+/// world units >> 4); the far side gets `A / (|r| + 1)`, the near side `A`;
+/// `r = 0` or `dy = 0` is centred. Returns (left, right) factors.
+pub fn pan(sound: &Sound, listener: Vec3) -> (f32, f32) {
+    let SoundPos::At(p) = sound.pos else {
+        return (1.0, 1.0);
+    };
+    let dx = ((p.x - listener.x) / 16.0) as i32;
+    let dy = ((p.y - listener.y) / 16.0) as i32;
+    if dy == 0 {
+        return (1.0, 1.0);
+    }
+    let r = dx / dy.abs();
+    let far = 1.0 / (r.unsigned_abs() as f32 + 1.0);
+    match r.signum() {
+        1 => (far, 1.0),
+        -1 => (1.0, far),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// One mixer channel.
+struct Voice {
+    pcm: Arc<[i8]>,
+    pos: f64,
+    /// Source samples per output sample.
+    step: f64,
+    left: f32,
+    right: f32,
+    looping: bool,
+    done: bool,
+}
+
+/// Voices shared between the game (which sets volumes and pitch each
+/// frame) and the audio thread (which renders them).
+#[derive(Resource, Clone, Default)]
+pub struct Mixer(Arc<Mutex<HashMap<Entity, Voice>>>);
+
+/// The mixer output: an endless 22050 Hz stereo stream.
+#[derive(Asset, TypePath, Clone)]
+pub struct MixerStream(Mixer);
+
+impl Decodable for MixerStream {
+    type Decoder = MixerDecoder;
+
+    fn decoder(&self) -> MixerDecoder {
+        MixerDecoder {
+            mixer: self.0.clone(),
+            buf: Vec::new(),
+            at: 0,
+        }
+    }
+}
+
+pub struct MixerDecoder {
+    mixer: Mixer,
+    /// Rendered interleaved stereo block and the read position in it.
+    buf: Vec<f32>,
+    at: usize,
+}
+
+/// Frames rendered per lock of the voice table (about 12 ms).
+const BLOCK: usize = 256;
+
+impl Iterator for MixerDecoder {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.at >= self.buf.len() {
+            self.buf.clear();
+            self.buf.resize(BLOCK * 2, 0.0);
+            self.at = 0;
+            if let Ok(mut voices) = self.mixer.0.lock() {
+                for v in voices.values_mut().filter(|v| !v.done) {
+                    for frame in self.buf.chunks_mut(2) {
+                        if v.pos as usize >= v.pcm.len() {
+                            if v.looping && !v.pcm.is_empty() {
+                                v.pos %= v.pcm.len() as f64;
+                            } else {
+                                v.done = true;
+                                break;
+                            }
+                        }
+                        let s = v.pcm[v.pos as usize] as f32 / 128.0;
+                        frame[0] += s * v.left;
+                        frame[1] += s * v.right;
+                        v.pos += v.step;
+                    }
+                }
+            }
+        }
+        let s = self.buf[self.at];
+        self.at += 1;
+        Some(s.clamp(-1.0, 1.0))
+    }
+}
+
+impl Source for MixerDecoder {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        ChannelCount::new(2).expect("non-zero")
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        SampleRate::new(MIX_RATE).expect("non-zero")
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+fn start_mixer(mut commands: Commands, mixer: Res<Mixer>, mut streams: ResMut<Assets<MixerStream>>) {
+    let stream = streams.add(MixerStream(mixer.clone()));
+    commands.spawn((AudioPlayer(stream), PlaybackSettings::LOOP));
+}
+
 #[derive(Component)]
 struct Started;
+
+/// Distance to the listener last frame (Doppler).
+#[derive(Component)]
+struct LastDistance(f32);
 
 fn start_sounds(
     mut commands: Commands,
     sounds: Option<Res<Sounds>>,
+    mixer: Res<Mixer>,
     new: Query<(Entity, &Sound), Without<Started>>,
 ) {
     let Some(sounds) = sounds else { return };
+    let Ok(mut voices) = mixer.0.lock() else { return };
     for (e, s) in &new {
-        let Some(source) = sounds.get(s.id) else {
+        let Some(pcm) = sounds.get(s.id) else {
             commands.entity(e).despawn();
             continue;
         };
-        let settings = if s.looping {
-            PlaybackSettings::LOOP
-        } else {
-            PlaybackSettings::DESPAWN
-        };
-        commands.entity(e).insert((
-            AudioPlayer(source),
-            settings
-                .with_speed(s.hz / MIX_RATE as f32)
-                .with_volume(Volume::Linear(0.0)),
-            Started,
-        ));
+        voices.insert(
+            e,
+            Voice {
+                pcm,
+                pos: 0.0,
+                step: s.hz as f64 / MIX_RATE as f64,
+                left: 0.0,
+                right: 0.0,
+                looping: s.looping,
+                done: false,
+            },
+        );
+        commands.entity(e).insert(Started);
     }
 }
 
-/// Apply the original mixer's voice selection, attenuation and pitch.
+/// Doppler (`FUN_01007290`): the rate byte (Hz / 200) gains
+/// `(prevDist - dist) * 184 / len` per 30 Hz frame of `len` = 1134
+/// samples, clamped to 1..255.
+fn doppler(hz: f32, approach_per_frame: f32) -> f32 {
+    let rate = (hz / 200.0).floor() + (approach_per_frame * 184.0 / 1134.0).trunc();
+    rate.clamp(1.0, 255.0) * 200.0
+}
+
+/// Apply the original mixer's voice selection, attenuation, pan and pitch.
+#[allow(clippy::type_complexity)]
 fn mix(
+    mut commands: Commands,
     listener: Res<Listener>,
     others: Res<OtherListeners>,
     fx: Res<FxVolume>,
-    mut playing: Query<(&Sound, &mut AudioSink)>,
+    time: Res<Time<Real>>,
+    mixer: Res<Mixer>,
+    mut playing: Query<(Entity, &Sound, Option<&mut LastDistance>), With<Started>>,
 ) {
-    let loudest = |s: &Sound| {
-        others.0.iter().fold(amplitude(s, listener.0), |a, &l| a.max(amplitude(s, l)))
+    // The listener a sound is heard best from.
+    let nearest = |s: &Sound| {
+        others.0.iter().fold((amplitude(s, listener.0), listener.0), |best, &l| {
+            let a = amplitude(s, l);
+            if a > best.0 { (a, l) } else { best }
+        })
     };
-    let mut voices: Vec<(f32, Mut<AudioSink>, &Sound)> = playing
+    let Ok(mut voices) = mixer.0.lock() else { return };
+    let mut ranked: Vec<(f32, Vec3, Entity, &Sound, Option<Mut<LastDistance>>)> = playing
         .iter_mut()
-        .map(|(s, sink)| (loudest(s), sink, s))
+        .map(|(e, s, last)| {
+            let (a, l) = nearest(s);
+            (a, l, e, s, last)
+        })
         .collect();
-    voices.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     let master = fx.0 as f32 / 100.0;
-    for (rank, (a, sink, s)) in voices.iter_mut().enumerate() {
-        let audible = rank < MAX_VOICES && *a > AUDIBLE;
-        // Original output: three voices at full amplitude sum to full scale.
-        let gain = if audible {
-            *a / 255.0 / 3.0 * master
-        } else {
-            0.0
-        };
-        sink.set_volume(Volume::Linear(gain));
-        sink.set_speed((s.hz / MIX_RATE as f32).clamp(0.01, 10.0));
+    // Original mixer frames (30 Hz) since the last update.
+    let frames = (time.delta_secs() * 30.0).max(1e-3);
+    for (rank, (a, l, e, s, last)) in ranked.into_iter().enumerate() {
+        let Some(v) = voices.get_mut(&e) else { continue };
+        let audible = rank < MAX_VOICES && a > AUDIBLE;
+        // Three voices at full amplitude sum to full scale.
+        let gain = if audible { a / 255.0 / 3.0 * master } else { 0.0 };
+        let (pl, pr) = pan(s, l);
+        v.left = gain * pl;
+        v.right = gain * pr;
+        let mut hz = s.hz;
+        if let SoundPos::At(p) = s.pos {
+            let dist = (p - l).length() / 16.0;
+            match last {
+                Some(mut last) => {
+                    hz = doppler(s.hz, (last.0 - dist) / frames);
+                    last.0 = dist;
+                }
+                None => {
+                    commands.entity(e).insert(LastDistance(dist));
+                }
+            }
+        }
+        v.step = hz as f64 / MIX_RATE as f64;
     }
+}
+
+/// One-shot sounds end when their sample has played; voices of despawned
+/// sounds are dropped.
+fn end_sounds(mut commands: Commands, mixer: Res<Mixer>, alive: Query<(), With<Sound>>) {
+    let Ok(mut voices) = mixer.0.lock() else { return };
+    voices.retain(|&e, v| {
+        if !alive.contains(e) {
+            return false;
+        }
+        if v.done {
+            commands.entity(e).despawn();
+            return false;
+        }
+        true
+    });
 }
 
 #[cfg(test)]
@@ -384,5 +564,41 @@ mod tests {
         assert!(amplitude(&s, Vec3::new(730.0 * 16.0, 0.0, 0.0)) < AUDIBLE);
         let g = Sound::once(id::BEEP1, 160.0, 4182.0, SoundPos::Global);
         assert_eq!(amplitude(&g, Vec3::splat(1e6)), 160.0);
+    }
+
+    #[test]
+    fn mixer_renders_voices() {
+        let mixer = Mixer::default();
+        let pcm: Arc<[i8]> = Arc::from(vec![64i8; 100]);
+        let voice = |looping, left, right| Voice { pcm: pcm.clone(), pos: 0.0, step: 1.0, left, right, looping, done: false };
+        {
+            let mut v = mixer.0.lock().unwrap();
+            v.insert(Entity::from_raw_u32(1).unwrap(), voice(true, 1.0, 0.0));
+            v.insert(Entity::from_raw_u32(2).unwrap(), voice(false, 0.0, 0.5));
+        }
+        let mut d = MixerStream(mixer.clone()).decoder();
+        let (l, r) = (d.next().unwrap(), d.next().unwrap());
+        assert_eq!((l, r), (0.5, 0.25));
+        // The one-shot (100 samples) is done after the first block; the loop isn't.
+        let _: Vec<f32> = (0..BLOCK * 4).map(|_| d.next().unwrap()).collect();
+        let v = mixer.0.lock().unwrap();
+        assert!(v.values().any(|v| v.looping && !v.done));
+        assert!(v.values().any(|v| !v.looping && v.done));
+    }
+
+    #[test]
+    fn pan_and_doppler() {
+        let at = |x: f32, y: f32| Sound::once(id::THUD, 1e6, 15000.0, SoundPos::At(Vec3::new(x, y, 0.0)));
+        // Within the |dx| < |dy| cone the integer ratio is 0: centred.
+        assert_eq!(pan(&at(-100.0 * 16.0, 200.0 * 16.0), Vec3::ZERO), (1.0, 1.0));
+        // Twice as far east as south: r = 2, left at A/3.
+        assert_eq!(pan(&at(400.0 * 16.0, 200.0 * 16.0), Vec3::ZERO), (1.0 / 3.0, 1.0));
+        assert_eq!(pan(&at(-400.0 * 16.0, -200.0 * 16.0), Vec3::ZERO), (1.0, 1.0 / 3.0));
+        // dy = 0 is centred (quirk of the original).
+        assert_eq!(pan(&at(500.0 * 16.0, 0.0), Vec3::ZERO), (1.0, 1.0));
+        // Approaching 2 x 1134/184 units per frame raises the rate two steps.
+        assert_eq!(doppler(15000.0, 0.0), 15000.0);
+        assert_eq!(doppler(15000.0, 1134.0 / 184.0 * 2.0), 15400.0);
+        assert_eq!(doppler(100.0, -1e6), 200.0);
     }
 }
