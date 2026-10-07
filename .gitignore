@@ -7,3 +7,6 @@
 /analysis/
 
 /target/
+
+# Local saves and settings written by the game.
+/Saves/

@@ -11,6 +11,7 @@ mod camera;
 mod city;
 mod data;
 mod effects;
+mod frontend;
 mod hud;
 mod intro;
 mod level;
@@ -70,6 +71,7 @@ fn main() -> AppExit {
             water::WaterPlugin,
             effects::EffectsPlugin,
             hud::HudPlugin,
+            frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
         ))
@@ -85,7 +87,7 @@ fn main() -> AppExit {
 
 /// With `--screenshot <path>`, capture a frame once rendering has settled
 /// and exit. Used for automated visual checks.
-fn screenshot_and_exit(mut commands: Commands, time: Res<Time>, mut taken: Local<bool>) {
+fn screenshot_and_exit(mut commands: Commands, time: Res<Time<Real>>, mut taken: Local<bool>) {
     let Some(path) = arg("--screenshot") else {
         return;
     };
