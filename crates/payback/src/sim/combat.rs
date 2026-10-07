@@ -983,6 +983,7 @@ fn explosions(
     mut rng: ResMut<Rng>,
     library: Option<Res<ObjectLibrary>>,
     mut effects: ResMut<Effects>,
+    mut flash: ResMut<crate::effects::ScreenFlash>,
     mut panic: MessageWriter<Panic>,
     mut hurt: MessageWriter<Hurt>,
     mut q: Query<(Entity, &mut Obj, Has<Person>, Option<&Projectile>)>,
@@ -993,6 +994,8 @@ fn explosions(
     };
     for ex in events.read() {
         let p = ex.power;
+        // Screen flash proportional to the blast (rendering.md §4).
+        flash.0 += (p / 250_000) as i32;
         let hz = if p < 140_000_000 {
             12000.0 - (p / 20000) as f32
         } else {

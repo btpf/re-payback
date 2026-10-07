@@ -128,7 +128,13 @@ impl Plugin for FrontendPlugin {
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             )
-            .add_systems(Update, (run, model::sync_model).chain());
+            .add_systems(Update, (run, model::sync_model).chain())
+            // The pause menu's FX option drives the lens flares (`--fx` wins).
+            .add_systems(Update, |settings: Res<Settings>, mut mode: ResMut<crate::effects::FxMode>| {
+                if settings.is_changed() && crate::arg("--fx").is_none() && mode.0 != settings.fx {
+                    mode.0 = settings.fx;
+                }
+            });
     }
 }
 

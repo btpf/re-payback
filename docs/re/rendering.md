@@ -310,9 +310,81 @@ LoadMap:
 |---|---|---|
 | 0 | 0, user maps | none |
 | 1 | 1 | **snow**: 250 particles (type 0xC, `Dust`, additive, r 100–150) around the camera; settle as ground marks |
-| 2 | 2 (night) | **rain + lightning**: 250 streaks (type 0xD, additive grey 0x67 lines) + splashes; looping `Rain` sound; random lightning (`rnd(1000) < ticks`) flashes the palette (adds to every RGB, decays ×3/4 per tick) with `Lightning` thunder |
+| 2 | 2 (night) | **rain + lightning**, **level 0 only** (`DAT_0114c558 == 0`; level 1 of map 2 is dry): 250 streaks (type 0xD, additive grey 0x67 lines) + splashes; looping `Rain` sound; random lightning (`rnd(1000) < ticks`) flashes the palette (adds to every RGB, decays ×3/4 per tick) with `Lightning` thunder |
 
-Weather runs only in single player (`DAT_0114c7c8 == 0`).
+All header values verified in the files: `Maps/0.map` 0, `1.map` 1, `2.map` 2 (night 1),
+`UserMaps/*.map` 0. Weather runs only in single player (`DAT_0114c7c8 == 0`).
+
+**Level start** (main loop `FUN_010692bc`, ~0x1069390, after the cameras are placed;
+random numbers from `FUN_0103ac94`, call order x, y, z, vx, vy, vz, size):
+
+```
+cam = (camX >> 5, camY >> 5)                     # object units
+repeat 250:
+  x = cam.x + rand(0x8000) - 0x4000              # ±8 squares
+  y = cam.y + rand(0x5000) - 0x2800              # ±5 squares
+  z = 0x57e4 - rand(25000)                       # 22500 … -2500 (from the ground up to the camera)
+  snow: AddEffect(0xC, Dust, x,y,z, rand(20)+10, rand(20)-10, rand(100)+200, rand(50)+100, list 3, blend 0)
+  rain: AddEffect(0xD, Dust, x,y,z, rand(30)+50, rand(20)-10, rand(200)+1000, 1,          list 3, blend 0)
+rain: PlaySound(61 Rain, loop, vol 0xff, 14000 Hz, non-positional)
+```
+
+(Velocities are /3 inside AddEffect: snow falls ≈ 67–100 z/tick and drifts east, rain
+≈ 333–400 z/tick.)
+
+**Update** (`FUN_010386e8`, types 0xC–0xE, no size change; 0xE gets gravity 17):
+
+* View rectangle (non-rotating view), in object units, with W×H = screen size
+  (320×256): `half = ((camH·16 + 0x2af2)·W + 0x800) >> 9` around `camX >> 5` (likewise
+  y with H). A record outside it is **wrapped** by one rectangle width/height (once
+  per update, x then y) instead of being deleted as other types are.
+* Removal at z > 24000 (H = 0, i.e. *below* the street level of 256; drops fall through
+  roofs and streets alike):
+  * snow: a **mark** `AddEffect(8, Dust, x, y, 0x57e4, 0,0,0, 200+rand(50), list 0,
+    blend 0)` (additive, lives ~225 ticks) and a new flake in list 3 at
+    `x = cam.x + rand(0x10000) − 0x8000` (±16 squares), `y = cam.y + rand(0xa000) −
+    0x5000` (±10), **z = 0x100 − camH·16** (the camera plane), same velocities/size as
+    at level start;
+  * rain: a new drop (±8 × ±5 squares, z = 0x100 − camH·16) and **3 splashes**
+    `AddEffect(0xE, Dust, x, y, 0x5780, rand(100)−50, rand(100)−50, −200−rand(200), 1,
+    list 3)` at the old drop's x, y. These random numbers come from `FUN_0103acc4`.
+* Drawing (software): type 0xC is an ordinary sprite (Dust through table 0, mirrored);
+  type 0xD is a **1-pixel line** (`FUN_010360fc`) from the projection of `pos − v` to
+  that of `pos`, coloured through `T0 + 0x6700` (= adds palette colour 0x67 to the
+  framebuffer); type 0xE is **one pixel** through the same table. As list 3 is drawn
+  after everything, weather is never hidden by the city; rain streaks near the camera
+  plane are long and radiate from the screen centre.
+
+**Lightning** (main loop, once per frame after `FUN_010542b8`; only map weather 2,
+level 0, single player; counter `DAT_0114c58c`, cleared at level start):
+
+```
+flash = flash·(3/4)^ticks                         # DAT_0114c748, every frame, all maps
+if counter == 0 and rand(1000) < ticks:
+    counter = (rand(3)+1)·2                       # 2, 4 or 6
+    4: PlaySound(62 Lightning, vol 0xff, 6500 + rand(500) Hz)
+    2: PlaySound(62 Lightning, vol 0xf0, 7500 + rand(500) Hz)
+    6: PlaySound(62 Lightning, vol 0xa0, 8000 + rand(500) Hz)      # all non-positional
+if counter > 0:
+    if counter even: flash += 100 + rand(150)
+    counter -= 1                                   # per frame, not per tick
+```
+
+So a strike is 1–3 flashes on alternate frames, with thunder at the strike (no delay).
+
+**Palette flash** `DAT_0114c748` (also `+= power/250000` per explosion,
+`FUN_0104405c`): the frame renderer `FUN_0105bd98` (end) calls
+`FUN_0103ad6c(screen, flash)` while it is > 0, and once with 0 when it has just run out
+(`DAT_0114c744` = last frame's value, stored by the main loop). Software: every palette entry becomes `min(255, rgb + flash)` per
+channel (from the unflashed copy at `DAT_012a510c/550c/590c`) and is loaded with
+`LoadRGB32`; Warp3D: a full-screen quad of colour `flash/255` (clamped to 1) drawn
+additively. Nothing is darkened or recoloured per weather apart from this (the night
+remap is the header's night flag, not the weather).
+
+Port: `crates/payback/src/weather.rs` (spawn, lightning), `effects.rs` (wrap, respawn,
+drawing, `ScreenFlash`; the flash is an additive full-screen quad, i.e. added in linear
+light rather than to palette entries). The snow marks are put on the top of cube 0
+under the flake instead of at z 22500 (the port depth-tests list 0).
 
 ---
 
@@ -466,14 +538,19 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   and grow with height.
 * **Lens flares** (`AddFlare` `FUN_0103451c`, max 199/frame; drawn by
   `FUN_01034804` at **fixed screen size**): sources are model faces with mode 6
-  (car lights, lamps, scenery; size 300 → s = 18; blend from face byte +0x152f) and
-  explosions (type 0xB, s = r/16). Software occlusion: a marker pixel is written at
-  the flare centre and the flare is dropped if it was overdrawn by the world. Main
-  glow LensFlare.2xx at the source, half-size (2/3)·s·fx/16; with detail 2, ghosts on
-  the line through the screen centre at `centre + f·d` (d = source − centre):
-  f = 1.5 (.1, s/6), 0.75 (3_4, s/12), 2/3 (3_4, s/7), 0.5 (.5, s/9), 1/3 (6_7, s/40),
-  0.1 (6_7, s/30), −0.1 (.8, s/4), −1/6 (.9, s/9), −1/3 (.10, s/6), −2/3 (11xx, s/2),
-  −1 (12xx, s). No sun flare.
+  (traffic lights, crossing beacons, alarm boxes, police lights, muzzle flashes,
+  missiles — list in §10; size 300 → s = 18; table from face byte +0x152f, 3 → 0) and
+  explosions (type 0xB, s = r/16, never occluded: AddFlare gets −size). Software
+  occlusion: a marker pixel is written at the flare centre and the flare is dropped if
+  it was overdrawn by the world. Option `DAT_0114c428` (`FUN_01035960`): 0 = no flares
+  at all (AddFlare returns), 1 = glow only, 2 = everything (default). Main glow
+  LensFlare.2xx (4 quarters) at the source, half-size (2/3)·s·fx/16; with option 2,
+  ghosts on the line through the screen centre at `centre + f·d` (d = source −
+  centre): f = 1.5 (.1, s/6), 0.75 (3_4, s/12), 2/3 (3_4, s/7), 0.5 (.5, s/9), 1/3
+  (6_7, s/40), 0.1 (6_7, s/30), −0.1 (.8, s/4), −1/6 (.9, s/9), −1/3 (.10, s/6), −2/3
+  (11xx quarters, s/2), −1 (12xx quarters, s); singles are not mirrored. Every element
+  goes through the flare's table: 5–8 add only R / R+G / G / B, so traffic-light
+  flares are red, amber and green. No sun flare.
 * **Blood** → `Blood.dark` at night. `Bubble` is loaded but unused. FadeDarken*,
   HealthBar are HUD textures.
 
@@ -522,3 +599,87 @@ value **is the footstep sound index** (`FUN_0100815c(flag, …)`; sound table
 7. Camera: straight down, HFOV 64° at 4:5 aspect, height B + |c·speed| above the
    followed object, 1/5 positional and 1/3 height smoothing per tick.
 
+Status (port): 1–7 are implemented (`world.rs`, `city.rs`, `water.rs`, `camera.rs`).
+Also done: weather and the palette flash (§4), lens flares with ghosts (§7), and the
+object details of §10. Still missing: Gouraud lighting and the dynamic lights (§4,
+option, off by default on the Amiga), the night headlight polygon (`Lights`,
+`FUN_010bf070`), Blood.dark, the rotating view, mode 3/4/5 object faces (drawn as
+plain textured faces), object textures substituted per vehicle colour (`Cardef.*`), and
+the explosion contribution to the flash (`ScreenFlash += power/250000` belongs in the
+port's Explosion, `sim/combat.rs`).
+
+---
+
+## 10. Object rendering details (models, scenery, damage) — CONFIRMED unless noted
+
+### Face slots and modes (loader `FUN_010bf8bc`, renderer `FUN_010c101c`)
+
+Each `.Obj` face has two 9-byte slots at model `+0x1528 + face·0x12` (u0 v0 u1 v1 u2 v2,
+mode, param, active; v values are halved and clamped to 2…125 at load, u stored raw).
+The renderer picks **slot 0 or 1 by the sign of the projected winding** (the two slots
+are the two sides of the face) and draws it only if its `active` byte is 1 — faces with
+one active slot are single-sided, faces with none are invisible. Low nibble of `mode`:
+
+| mode & 0xf | drawing |
+|---|---|
+| 1 | flat colour: `param` mapped through `General/64->256.dat` (64 palette indices, file name `64-_256.dat` on disk) at load |
+| 2 | textured |
+| 3 | textured, `FUN_0111e410` (INFERRED: texel 0 transparent — trees, radar dish) |
+| 4 | textured, `FUN_011113e0` (INFERRED: translucent/additive — `Lights`, blades, flames) |
+| 5 | a line between the first two vertices, colour `param` |
+| 6 | **lens flare**: `AddFlare(vertex 0, DAT_0114c8dc, param << 16)`; tested on slot 0's mode even when slot 0 is inactive (most flare faces have no active slot, so only the flare shows) |
+
+`mode & 0x10` selects the environment-mapped (`Shine`) path; `& 0x20` its variant.
+`param` is the raw Alpha.256 table for mode 6, otherwise the 64→256 colour.
+
+Mode-6 faces in the shipped models: `TrafficLight1` (table 5 = red), `TrafficLight2`
+(5 red + 6 red+green = amber), `TrafficLight3` (7 green), `TrafficLight4` (6 amber),
+`PedestrianCrossing_flash` (6), `AlarmBox_flash` (8 blue), `Police_red`/`PoliceVan_red`
+(5), `Police_blue`/`PoliceVan_blue` (8), the `*_Fire` people poses (6, muzzle flash),
+`Missile` (3 → drawn as 0), `RocketCar_Thrust1/2` (0), `Torch` (options screen).
+`DAT_0114c8dc` is 300 (radius `300 >> 4` = 18 px) except while an alarm box is drawn.
+Flares are only added for objects that are not burning (`obj+0x33c < 1`).
+
+### Burnt and dented objects
+
+* **Burnt** (`obj+0x33c` burn timer ≥ 1 — set to 100 by Ignite and left at 15 when the
+  fire goes out, so a wreck stays burnt): every face's visible slot is drawn with the
+  object texture `burnt` (`DAT_0114c91c`): mode 1 at the fixed UVs (2,2) (2,125)
+  (125,125), mode 2 at its own UVs; faces of any other mode are not drawn at all.
+* **Dented** (`obj+0x452 = 1`, set with the `Thud2` sound by wall hits ≥ 11 damage
+  `FUN_010cd198` and object hits, never cleared): when the vertices are transformed each
+  vertex n (0-based) is displaced by `FUN_0103ad20(3(n+1)+a, 160) − 80` on x, y, z
+  (a = 0, 1, 2), i.e. `RandomNumbers[3(n+1)+a]·160/512 − 80` in ×16 model units
+  (±5 model units). The table lookup is fixed, so the dent is a static deformation
+  (same shape every frame and for every car of that model); environment-mapped faces
+  then use a second set of normals (`+0x3c70` …).
+
+### Scenery that changes (`FUN_01049374` scenery pass; 68k `FUN_000d1058`)
+
+* **Traffic lights** (scenery 1): `k = special + DAT_0114c750 − 1`, `k −= 6` if > 5,
+  where `DAT_0114c750` is the global light phase 0…5 (68k `DAT_0034c084`, +1 every 61
+  ticks). Model: k < 2 `trafficlight1` (red), k = 2 `trafficlight2` (red+amber), k 3–4
+  `trafficlight3` (green), k = 5 `trafficlight4` (amber). The loader stores the four
+  models at `DAT_012f5ae0…aec`; scenery slot 1 points at `trafficlight1`. The same
+  states (k ∈ {0,1,2,5}) stop traffic.
+* **Pedestrian crossing** (15): `PedestrianCrossing` while the phase sub-counter
+  (`DAT_0114c754`, 68k `DAT_0034c098`, 0…60) is < 25, else `PedestrianCrossing_flash`
+  (amber flare).
+* **Alarm box flashing** (22): `AlarmBox_flash` with flare size
+  `|t − 10|·50 + 200` (200…700), t = `DAT_012e5adc` cycling 0…19 by ticks.
+* **Spinning pickups**: models whose `+0x4908` code is ≥ 0 — bazooka 1, flamethrower 2,
+  grenade 3, minigun 4, shotgun 5, pistol 6, bigbomb 7, radar 100, info 'P', key 'Q' —
+  are drawn at heading `rotation·22.5 + DAT_0114c770`, a global angle advancing 60 per
+  tick (one turn per 96 ticks; 68k `DAT_0034c09c`). The info sign ('P') goes through
+  `FUN_010c7218` with two more angles (68k `DAT_0034c0a4` +30/tick, `DAT_0034c0a0`
+  −45/tick), so it also tumbles (axis order INFERRED). Snowman (0xfe) and the rest stay
+  still.
+* **Chimney** (17): while drawn, each frame with `rand(3) == 1` (one set of random
+  numbers per frame for all chimneys) it adds per tick a type 6 `Dust2` smoke puff
+  (subtractive) at the square centre + (rand(100)−50 + 100·i, rand(100)−50), z = its
+  base z − 2500 + rand(300), v = (150+rand(30), rand(30)−15, rand(30)−250), size
+  300+rand(200), in the list of the layer being drawn.
+
+Port: `crates/payback/src/objects.rs` (slots/modes 1, 6 and inactive faces, burnt and
+dented mesh variants, scenery animation, chimneys, flare sources); flares are drawn by
+`effects.rs` (§7).

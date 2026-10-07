@@ -21,6 +21,7 @@ mod objects;
 mod sim;
 mod vehicles;
 mod water;
+mod weather;
 mod world;
 
 use bevy::{
@@ -69,7 +70,7 @@ fn main() -> AppExit {
             sim::SimPlugin,
             audio::AudioPlugin,
             water::WaterPlugin,
-            effects::EffectsPlugin,
+            (effects::EffectsPlugin, weather::WeatherPlugin),
             hud::HudPlugin,
             frontend::FrontendPlugin,
             mission::MissionPlugin,

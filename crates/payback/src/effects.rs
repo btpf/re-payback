@@ -10,16 +10,23 @@
 //! `FixedPreUpdate`, before the game logic that spawns new records, so a new
 //! record is first drawn where it was spawned, as in the original.
 //!
+//! Weather records (types 12–14, spawned by `crate::weather`) wrap around
+//! the view rectangle of the game camera and respawn when they reach the
+//! ground (OS4 `FUN_010386e8`, rendering.md §4).
+//!
+//! Lens flares (`AddFlare` OS4 `FUN_0103451c`, drawn by `FUN_01034804`) are
+//! collected each frame in [`Flares`] (type 11 records here, model faces in
+//! `crate::objects`) and drawn at a fixed screen size with the ghost chain
+//! through the screen centre, per [`FxMode`]. [`ScreenFlash`] is the palette
+//! brightening of explosions and lightning (`DAT_0114c748`).
+//!
 //! Not reproduced:
 //! - deletion of records outside the view rectangle (the simulation has no
 //!   view; records still expire through size and z);
-//! - weather (types 12–14 wrapping around the view and respawning, spawned
-//!   by OS4 `FUN_010692bc`): here they only move and expire at z > 24000;
 //! - type 15's looping 13 Flames sound and the per-type dynamic lights
 //!   (OS4 `FUN_01036574`);
 //! - debris fragments (`FUN_01035438`), a separate list;
-//! - Blood.dark (gore option / night) and the full lens-flare ghosts; type
-//!   11 is drawn as the LensFlare.2xx glow only.
+//! - Blood.dark (gore option / night).
 //!
 //! Rendering: every (layer, blend) pair, plus one lens-flare pass per layer,
 //! is one mesh rebuilt each frame from horizontal quads ("screen-aligned"
@@ -28,13 +35,14 @@
 //! equation per [`Blend`], which gives the Alpha.256 operations exactly (in
 //! linear colour rather than palette space), including subtraction via
 //! `ReverseSubtract`. Sprites are depth-tested against the city, lifted 16
-//! h-units; flares are not. Layers are drawn bottom to top through the
-//! material's sort bias, after the city's transparent faces.
+//! h-units; flares and weather are not (the original draws list 3 after
+//! everything). Layers are drawn bottom to top through the material's sort
+//! bias, after the city's transparent faces.
 
-use crate::camera::GameCamera;
+use crate::camera::{GameCam, GameCamera};
 use crate::data::GameData;
 use crate::sim::Rng;
-use crate::world::{H_PER_SQUARE, SQUARE, to_render};
+use crate::world::{City, H_PER_SQUARE, SQUARE, to_render, z_of_h};
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
     camera::visibility::NoFrustumCulling,
@@ -64,10 +72,97 @@ const BUBBLE_SURFACE_Z: i32 = 23000;
 /// The original projects effects with depth `z + camH·16 − 256`, i.e. as if
 /// 16 h-units nearer the camera; in render units.
 const NEARER: f32 = 16.0 / H_PER_SQUARE;
-/// Half-size of the type 11 flash glow per unit of its size. The original
-/// draws flares at a fixed screen size, (2/3)·(size/16)·scale/16 pixels;
-/// a world size is an approximation chosen to look similar.
-const FLASH_SCALE: f32 = 2.0;
+/// Weather and snow-mark depth: the ground plane of the weather records
+/// (`0x57e4`, 22500); rain splashes start at `0x5780`.
+const WEATHER_GROUND_Z: i32 = 0x57e4;
+const SPLASH_Z: i32 = 0x5780;
+/// Base screen of the original (320x256): weather wrap rectangle and flare
+/// sizes are in its pixels.
+const SCREEN_W: i64 = 320;
+const SCREEN_H: i64 = 256;
+/// `AddFlare` keeps at most this many flares per frame.
+const MAX_FLARES: usize = 199;
+
+/// Lens-flare option (`DAT_0114c428`, set by `FUN_01035960`): 0 off, 1
+/// glow only (LensFlare.2xx), 2 glow plus the rings and ghosts. The front
+/// end may change it; default 2.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FxMode(pub u8);
+
+impl Default for FxMode {
+    /// 2, or `--fx <n>` on the command line.
+    fn default() -> Self {
+        FxMode(crate::arg("--fx").and_then(|v| v.parse().ok()).unwrap_or(2))
+    }
+}
+
+/// Palette flash (`DAT_0114c748`): added to every palette RGB channel
+/// (clamped to 255) by `FUN_0103ad6c` while positive, and decayed ×3/4 per
+/// game tick (main loop in OS4 `FUN_010692bc`). Explosions add
+/// `power / 250000` (`FUN_0104405c`), lightning `100 + rand(150)` per flash.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct ScreenFlash(pub i32);
+
+/// A lens-flare source for this frame (`AddFlare(x, y, size, blend)`).
+#[derive(Clone, Copy, Debug)]
+pub struct FlareSource {
+    /// Render-space position.
+    pub pos: Vec3,
+    /// `size`; the flare radius is `size >> 4` base-screen pixels.
+    pub size: i32,
+    /// Alpha.256 table of the face (`blend >> 16`; 3 counts as 0).
+    pub table: u8,
+}
+
+/// Flares added this frame; drawn and cleared by the effect renderer.
+#[derive(Resource, Default)]
+pub struct Flares(pub Vec<FlareSource>);
+
+impl Flares {
+    pub fn add(&mut self, f: FlareSource) {
+        if self.0.len() < MAX_FLARES {
+            self.0.push(f);
+        }
+    }
+}
+
+/// Effect drawing (mesh rebuild); flare collectors run before it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectsDraw;
+
+/// The game camera as the effect updater sees it: position in object units
+/// and `camH` (h-units).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct View {
+    x: i32,
+    y: i32,
+    h: i32,
+}
+
+impl View {
+    fn of(cam: &GameCam) -> View {
+        View {
+            x: (cam.x >> 5) as i32,
+            y: (cam.y >> 5) as i32,
+            h: cam.h,
+        }
+    }
+
+    /// The view rectangle `[x0, x1] × [y0, y1]` in object units: the screen
+    /// projected at depth `camH·16 + 0x2af2` plus one square
+    /// (`FUN_010386e8`, non-rotating view).
+    fn rect(&self) -> (i32, i32, i32, i32) {
+        let d = self.h as i64 * 16 + 0x2af2;
+        let (cx, cy) = (self.x as i64 * 512, self.y as i64 * 512);
+        let (hw, hh) = (d * SCREEN_W + 0x800, d * SCREEN_H + 0x800);
+        (
+            ((cx - hw) >> 9) as i32,
+            ((cx + hw) >> 9) as i32,
+            ((cy - hh) >> 9) as i32,
+            ((cy + hh) >> 9) as i32,
+        )
+    }
+}
 
 /// Alpha.256 table an effect is drawn through (rendering.md §3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -224,6 +319,21 @@ impl Effect {
         ))
     }
 
+    /// Weather wrap: a record leaving the view rectangle re-enters at the
+    /// opposite side (`FUN_010386e8`, types 12-14).
+    fn wrap(&mut self, (x0, x1, y0, y1): (i32, i32, i32, i32)) {
+        if self.pos.x < x0 {
+            self.pos.x += x1 - x0;
+        } else if self.pos.x > x1 {
+            self.pos.x -= x1 - x0;
+        }
+        if self.pos.y < y0 {
+            self.pos.y += y1 - y0;
+        } else if self.pos.y > y1 {
+            self.pos.y -= y1 - y0;
+        }
+    }
+
     /// Removal test after the update.
     fn expired(&self) -> bool {
         if self.kind == 5 {
@@ -246,6 +356,8 @@ fn jitter(rand: &mut impl FnMut(i32) -> i32, half: i32) -> IVec3 {
 #[derive(Resource, Default)]
 pub struct Effects {
     lists: [Vec<Effect>; LAYERS],
+    /// Camera for the weather wrap/respawn, set before each tick.
+    view: Option<View>,
 }
 
 impl Effects {
@@ -281,7 +393,6 @@ impl Effects {
     }
 
     /// Remove every effect (OS4 `FUN_01033d14` resets the counts).
-    #[allow(dead_code, reason = "public API; no caller yet")]
     pub fn clear(&mut self) {
         self.lists.iter_mut().for_each(Vec::clear);
     }
@@ -294,11 +405,27 @@ impl Effects {
     /// spawned records are appended, and a removed record is replaced by the
     /// last one (`RemoveEffect`, OS4 `FUN_01035f48`), so neither is updated
     /// again this tick.
+    #[cfg(test)]
     fn tick(&mut self, rand: &mut impl FnMut(i32) -> i32) {
-        for list in &mut self.lists {
-            for i in (0..list.len()).rev() {
+        self.tick_with(rand, &|_, _| None);
+    }
+
+    /// [`Effects::tick`] with the ground height (z) under an (x, y), for
+    /// settling snow.
+    fn tick_with(
+        &mut self,
+        rand: &mut impl FnMut(i32) -> i32,
+        ground: &dyn Fn(i32, i32) -> Option<i32>,
+    ) {
+        let view = self.view;
+        for layer in 0..LAYERS {
+            for i in (0..self.lists[layer].len()).rev() {
+                let list = &mut self.lists[layer];
                 let mut e = list[i];
                 let spawned = e.update(rand);
+                if let (12..=14, Some(v)) = (e.kind, view) {
+                    e.wrap(v.rect());
+                }
                 list[i] = e;
                 if let Some(child) = spawned
                     && list.len() < MAX_PER_LAYER
@@ -307,8 +434,74 @@ impl Effects {
                 }
                 if e.expired() {
                     list.swap_remove(i);
+                    if let Some(v) = view {
+                        self.respawn_weather(&e, v, rand, ground);
+                    }
                 }
             }
+        }
+    }
+
+    fn push(&mut self, layer: usize, e: Effect) {
+        let list = &mut self.lists[layer];
+        if list.len() < MAX_PER_LAYER {
+            list.push(e);
+        }
+    }
+
+    /// A snowflake or raindrop reached the ground (`FUN_010386e8`): snow
+    /// leaves a mark (type 8 Dust, additive, list 0) and a new flake starts
+    /// at the camera; rain starts a new drop and splashes 3 times (type
+    /// 14). New records go to list 3. Values are the call-site ones, /3 on
+    /// entry.
+    fn respawn_weather(
+        &mut self,
+        e: &Effect,
+        v: View,
+        rand: &mut impl FnMut(i32) -> i32,
+        ground: &dyn Fn(i32, i32) -> Option<i32>,
+    ) {
+        // New records start at the camera plane: z = 0x100 - camH*16.
+        let top = 0x100 - v.h * 16;
+        match e.kind {
+            12 => {
+                // The original puts the mark at z 22500 and draws list 0
+                // after the ground tops; here it sits on the ground.
+                let size = rand(50) + 200;
+                let z = ground(e.pos.x, e.pos.y).unwrap_or(WEATHER_GROUND_Z);
+                let pos = IVec3::new(e.pos.x, e.pos.y, z);
+                self.push(
+                    0,
+                    Effect::new(8, Tex::Dust, 0, pos, IVec3::ZERO, size, Blend::Add),
+                );
+                let x = rand(0x10000) + v.x - 0x8000;
+                let y = rand(0xa000) + v.y - 0x5000;
+                let vel = IVec3::new(rand(20) + 10, rand(20) - 10, rand(100) + 200);
+                let size = rand(50) + 100;
+                let flake = Effect::new(
+                    12,
+                    Tex::Dust,
+                    0,
+                    IVec3::new(x, y, top),
+                    vel,
+                    size,
+                    Blend::Add,
+                );
+                self.push(3, flake);
+            }
+            13 => {
+                let x = rand(0x8000) + v.x - 0x4000;
+                let y = rand(0x5000) + v.y - 0x2800;
+                let vel = IVec3::new(rand(30) + 50, rand(20) - 10, rand(200) + 1000);
+                let drop = Effect::new(13, Tex::Dust, 0, IVec3::new(x, y, top), vel, 1, Blend::Add);
+                self.push(3, drop);
+                for _ in 0..3 {
+                    let vel = IVec3::new(rand(100) - 50, rand(100) - 50, -200 - rand(200));
+                    let pos = IVec3::new(e.pos.x, e.pos.y, SPLASH_Z);
+                    self.push(3, Effect::new(14, Tex::Dust, 0, pos, vel, 1, Blend::Add));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -320,16 +513,43 @@ impl Plugin for EffectsPlugin {
         embedded_asset!(app, "shaders/effects.wgsl");
         app.add_plugins(MaterialPlugin::<EffectMaterial>::default())
             .init_resource::<Effects>()
+            .init_resource::<FxMode>()
+            .init_resource::<ScreenFlash>()
+            .init_resource::<Flares>()
             .add_systems(Startup, setup)
             .add_systems(FixedPreUpdate, update_effects)
-            .add_systems(PostUpdate, build_meshes.after(TransformSystems::Propagate));
+            .add_systems(
+                OnExit(crate::level::AppState::Playing),
+                |mut fx: ResMut<Effects>, mut flash: ResMut<ScreenFlash>| {
+                    fx.clear();
+                    flash.0 = 0;
+                },
+            )
+            .configure_sets(PostUpdate, EffectsDraw.after(TransformSystems::Propagate))
+            .add_systems(PostUpdate, build_meshes.in_set(EffectsDraw));
     }
 }
 
-fn update_effects(mut effects: ResMut<Effects>, rng: Option<ResMut<Rng>>) {
+fn update_effects(
+    mut effects: ResMut<Effects>,
+    mut flash: ResMut<ScreenFlash>,
+    rng: Option<ResMut<Rng>>,
+    cam: Res<GameCam>,
+    city: Option<Res<City>>,
+) {
+    // The flash decays x3/4 per tick before anything adds to it.
+    flash.0 = flash.0 * 3 >> 2;
     let Some(mut rng) = rng else { return };
+    effects.view = Some(View::of(&cam));
     if !effects.is_empty() {
-        effects.tick(&mut |n| rng.rand(n));
+        // Top of the ground cube under (x, y), as an object z.
+        let ground = |x: i32, y: i32| {
+            let city = city.as_ref()?;
+            let (sx, sy, fx, fy) = City::locate(x as f32, y as f32)?;
+            let c = city.square_cubes(sx, sy)[0];
+            c.solid.then(|| z_of_h(c.top_at(fx, fy)) as i32)
+        };
+        effects.tick_with(&mut |n| rng.rand(n), &ground);
     }
 }
 
@@ -338,13 +558,14 @@ fn update_effects(mut effects: ResMut<Effects>, rng: Option<ResMut<Rng>>) {
 
 const TILE: usize = 64;
 const ATLAS_COLS: usize = 8;
-const ATLAS_ROWS: usize = 4;
+const ATLAS_ROWS: usize = 6;
 const ATLAS_W: usize = TILE * ATLAS_COLS;
 const ATLAS_H: usize = TILE * ATLAS_ROWS;
 
 /// Atlas tiles, in order. Quartered sprites (`<set>AB`: A = 0 left / 1
-/// right, B = 0 top / 1 bottom) occupy 4 tiles at `first + 2A + B`.
-const FILES: [&str; 31] = [
+/// right, B = 0 top / 1 bottom) occupy 4 tiles at `first + 2A + B`. The
+/// empty name is a solid white tile.
+const FILES: [&str; 47] = [
     "Dust",
     "Flare",
     "Flame.1",
@@ -376,14 +597,56 @@ const FILES: [&str; 31] = [
     "LensFlare.201",
     "LensFlare.210",
     "LensFlare.211",
+    "",
+    "LensFlare.1100",
+    "LensFlare.1101",
+    "LensFlare.1110",
+    "LensFlare.1111",
+    "LensFlare.1200",
+    "LensFlare.1201",
+    "LensFlare.1210",
+    "LensFlare.1211",
+    "LensFlare.1",
+    "LensFlare.3_4",
+    "LensFlare.5",
+    "LensFlare.6_7",
+    "LensFlare.8",
+    "LensFlare.9",
+    "LensFlare.10",
 ];
 const FLAME_TILE: usize = 2;
 const SHOCKWAVE_TILE: usize = 11;
 const LENS_GLOW_TILE: usize = 27;
+/// Solid white: rain streaks, splashes and the screen flash.
+const SOLID_TILE: usize = 31;
+/// LensFlare.11xx and .12xx rings (4 quarters each).
+const LENS_RING_TILE: usize = 32;
+const LENS_HALO_TILE: usize = 36;
+/// LensFlare.1, .3_4, .5, .6_7, .8, .9, .10.
+const GHOST_TILE: usize = 40;
 
-/// Render batch of a sprite: one of the blends, or lens flares (additive
-/// and never occluded: type 11 calls AddFlare with −size, which skips the
-/// occlusion test, and sits at z 21000, below the ground surface).
+/// Full-mode flare elements (`FUN_01034804`): tile, position factor f (the
+/// element sits at `c + f·(p − c)`, c = screen centre, p = flare) and
+/// half-size divisor (half = r/div base-screen pixels, r = size >> 4).
+const GHOSTS: [(usize, f32, f32); 9] = [
+    (GHOST_TILE, 1.5, 6.0),
+    (GHOST_TILE + 1, 0.75, 12.0),
+    (GHOST_TILE + 1, 2.0 / 3.0, 7.0),
+    (GHOST_TILE + 2, 0.5, 9.0),
+    (GHOST_TILE + 3, 1.0 / 3.0, 40.0),
+    (GHOST_TILE + 3, 0.1, 30.0),
+    (GHOST_TILE + 4, -0.1, 4.0),
+    (GHOST_TILE + 5, -1.0 / 6.0, 9.0),
+    (GHOST_TILE + 6, -1.0 / 3.0, 6.0),
+];
+
+/// Rain streak and splash colour: palette colour 0x67 added through table 0
+/// (`DAT_0114c440 + 0x6700`).
+const RAIN_COLOUR: usize = 0x67;
+
+/// Render batch of a sprite: one of the blends, or additive without depth
+/// test (lens flares, weather, the screen flash: the original draws flares
+/// at a fixed screen size after the world, and list 3 after every layer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Pass {
     Blend(Blend),
@@ -419,6 +682,12 @@ enum Sprite {
     Single(usize),
     /// A 128x128 image as 4 quarters meeting at the centre.
     Quarters(usize),
+    /// Type 13 rain: a 1-pixel line from the previous position.
+    Line,
+    /// Type 14 splash: one pixel.
+    Dot,
+    /// Type 11: a lens flare at the centre (`AddFlare(x, y, −size)`).
+    Flare,
 }
 
 impl Effect {
@@ -427,14 +696,10 @@ impl Effect {
         let size = self.size as f32;
         let sprite = match (self.kind, self.tex) {
             (10, _) => Sprite::Quarters(SHOCKWAVE_TILE + 4 * self.frame as usize),
-            // Drawn as a lens flare (AddFlare at the centre).
-            (11, _) => {
-                return (
-                    Sprite::Quarters(LENS_GLOW_TILE),
-                    size * FLASH_SCALE,
-                    Pass::Flare,
-                );
-            }
+            (11, _) => Sprite::Flare,
+            (12, _) => return (Sprite::Single(0), size, Pass::Flare),
+            (13, _) => return (Sprite::Line, size, Pass::Flare),
+            (14, _) => return (Sprite::Dot, size, Pass::Flare),
             (_, Tex::Shockwave) => Sprite::Quarters(SHOCKWAVE_TILE),
             (_, Tex::LensFlare) => Sprite::Quarters(LENS_GLOW_TILE),
             (_, Tex::Dust | Tex::Dust2) => Sprite::Single(0),
@@ -455,6 +720,14 @@ impl Effect {
 fn build_atlas(data: &GameData) -> Image {
     let mut rgba = vec![0u8; ATLAS_W * ATLAS_H * 4];
     for (i, name) in FILES.iter().enumerate() {
+        let (tx, ty) = (i % ATLAS_COLS * TILE, i / ATLAS_COLS * TILE);
+        if name.is_empty() {
+            for j in 0..TILE * TILE {
+                let p = ((ty + j / TILE) * ATLAS_W + tx + j % TILE) * 4;
+                rgba[p..p + 4].fill(255);
+            }
+            continue;
+        }
         let texels = match data.read(format!("EffectTextures/{name}")) {
             Ok(b) if b.len() >= TILE * TILE => b,
             _ => {
@@ -462,7 +735,6 @@ fn build_atlas(data: &GameData) -> Image {
                 continue;
             }
         };
-        let (tx, ty) = (i % ATLAS_COLS * TILE, i / ATLAS_COLS * TILE);
         for (j, &c) in texels[..TILE * TILE].iter().enumerate() {
             let p = ((ty + j / TILE) * ATLAS_W + tx + j % TILE) * 4;
             let c = c as usize;
@@ -580,6 +852,10 @@ struct EffectBatch {
     pass: Pass,
 }
 
+/// Linear RGB of the rain colour.
+#[derive(Resource)]
+struct RainColour([f32; 4]);
+
 fn setup(
     mut commands: Commands,
     data: Res<GameData>,
@@ -603,30 +879,27 @@ fn setup(
             ));
         }
     }
+    let rgb = &data.palette[RAIN_COLOUR * 3..RAIN_COLOUR * 3 + 3];
+    let c = Color::srgb_u8(rgb[0], rgb[1], rgb[2]).to_linear();
+    commands.insert_resource(RainColour([c.red, c.green, c.blue, 1.0]));
 }
+
+const WHITE: [f32; 4] = [1.0; 4];
 
 /// Quads of one batch, in render space.
 #[derive(Default)]
 struct Quads {
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
 impl Quads {
-    /// A quad spanning `[x0, x1] × [y0, y1]` in sprite units (x right, y
-    /// down the screen) around `centre`, textured with atlas tile `tile`.
-    fn push(
-        &mut self,
-        axes: (Vec3, Vec3),
-        centre: Vec3,
-        x: [f32; 2],
-        y: [f32; 2],
-        tile: usize,
-        mirror: bool,
-    ) {
+    /// A quad with corners top-left, top-right, bottom-right, bottom-left
+    /// of atlas tile `tile`, multiplied by `color`.
+    fn push_corners(&mut self, corners: [Vec3; 4], tile: usize, mirror: bool, color: [f32; 4]) {
         const INSET: f32 = 0.01;
-        let (right, down) = axes;
         let (col, row) = (
             (tile % ATLAS_COLS * TILE) as f32,
             (tile / ATLAS_COLS * TILE) as f32,
@@ -643,16 +916,34 @@ impl Quads {
             (row + TILE as f32 - INSET) / ATLAS_H as f32,
         ];
         let base = self.positions.len() as u32;
-        for (i, j) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
-            self.positions
-                .push((centre + right * x[i] + down * y[j]).to_array());
+        for (corner, (i, j)) in corners.into_iter().zip([(0, 0), (1, 0), (1, 1), (0, 1)]) {
+            self.positions.push(corner.to_array());
             self.uvs.push([u[i], v[j]]);
+            self.colors.push(color);
         }
         self.indices.extend([0, 1, 2, 0, 2, 3].map(|k| base + k));
     }
 
+    /// A quad spanning `[x0, x1] × [y0, y1]` in sprite units (x right, y
+    /// down the screen) around `centre`, textured with atlas tile `tile`.
+    fn push(
+        &mut self,
+        axes: (Vec3, Vec3),
+        centre: Vec3,
+        x: [f32; 2],
+        y: [f32; 2],
+        tile: usize,
+        mirror: bool,
+    ) {
+        let (right, down) = axes;
+        let at = |i: usize, j: usize| centre + right * x[i] + down * y[j];
+        let corners = [at(0, 0), at(1, 0), at(1, 1), at(0, 1)];
+        self.push_corners(corners, tile, mirror, WHITE);
+    }
+
     /// Emit the sprite of `e` (`FUN_010386e8` draw part).
-    fn effect(&mut self, axes: (Vec3, Vec3), e: &Effect, sprite: Sprite, half: f32) {
+    fn effect(&mut self, view: &ViewInfo, e: &Effect, sprite: Sprite, half: f32, rain: [f32; 4]) {
+        let axes = view.axes;
         let centre = to_render(e.pos.as_vec3()) + Vec3::Y * NEARER;
         let h = half / SQUARE;
         match sprite {
@@ -666,7 +957,41 @@ impl Quads {
                     }
                 }
             }
+            Sprite::Line => {
+                let from = to_render((e.pos - e.vel).as_vec3()) + Vec3::Y * NEARER;
+                self.line(view, from, centre, rain);
+            }
+            Sprite::Dot => {
+                let w = view.pixel(centre) * 0.5;
+                if w > 0.0 {
+                    let (r, d) = axes;
+                    let corners = [
+                        centre - r * w - d * w,
+                        centre + r * w - d * w,
+                        centre + r * w + d * w,
+                        centre - r * w + d * w,
+                    ];
+                    self.push_corners(corners, SOLID_TILE, false, rain);
+                }
+            }
+            Sprite::Flare => {}
         }
+    }
+
+    /// A one-pixel-wide line from `a` to `b`, facing the camera.
+    fn line(&mut self, view: &ViewInfo, a: Vec3, b: Vec3, color: [f32; 4]) {
+        let mid = (a + b) * 0.5;
+        let w = view.pixel(mid) * 0.5;
+        if w <= 0.0 {
+            return;
+        }
+        let side = (b - a).cross(mid - view.pos).normalize_or(view.axes.0) * w;
+        self.push_corners(
+            [a - side, a + side, b + side, b - side],
+            SOLID_TILE,
+            false,
+            color,
+        );
     }
 
     fn into_mesh(self) -> Mesh {
@@ -676,31 +1001,187 @@ impl Quads {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
         .with_inserted_indices(Indices::U32(self.indices))
     }
 }
 
-/// Rebuild the batch meshes from the effect lists.
+/// The game camera, for screen-aligned geometry.
+struct ViewInfo {
+    pos: Vec3,
+    forward: Vec3,
+    /// Sprite axes: right and down the screen, horizontal.
+    axes: (Vec3, Vec3),
+    /// tan of half the vertical field of view.
+    tan_half: f32,
+}
+
+impl ViewInfo {
+    /// Size of one base-screen pixel (1/256 of the screen height) at the
+    /// depth of `p`; 0 behind the camera.
+    fn pixel(&self, p: Vec3) -> f32 {
+        let depth = (p - self.pos).dot(self.forward);
+        (depth * 2.0 * self.tan_half / SCREEN_H as f32).max(0.0)
+    }
+}
+
+/// Screen-space quads (lens flares, the flash) on a plane just in front of
+/// the camera. Positions are NDC; sizes are base-screen pixels, kept
+/// square.
+struct Screen<'a> {
+    camera: &'a Camera,
+    transform: &'a GlobalTransform,
+    /// NDC per base-screen pixel, (x, y).
+    px: Vec2,
+}
+
+impl Screen<'_> {
+    /// NDC depth of the overlay plane (reverse Z: twice the near distance).
+    const DEPTH: f32 = 0.5;
+
+    fn world(&self, ndc: Vec2) -> Option<Vec3> {
+        self.camera
+            .ndc_to_world(self.transform, ndc.extend(Self::DEPTH))
+    }
+
+    fn quad(&self, q: &mut Quads, min: Vec2, max: Vec2, tile: usize, color: [f32; 4]) {
+        let corners = [Vec2::new(min.x, max.y), max, Vec2::new(max.x, min.y), min];
+        let mut world = [Vec3::ZERO; 4];
+        for (w, c) in world.iter_mut().zip(corners) {
+            let Some(p) = self.world(c) else { return };
+            *w = p;
+        }
+        q.push_corners(world, tile, false, color);
+    }
+
+    /// A single sprite of half-size `half` pixels at `c` (not mirrored:
+    /// `FUN_01033d50(tex, 1, …)`).
+    fn single(&self, q: &mut Quads, c: Vec2, half: f32, tile: usize, color: [f32; 4]) {
+        let h = self.px * half;
+        self.quad(q, c - h, c + h, tile, color);
+    }
+
+    /// Four quarters meeting at `c` (`FUN_010345ec`).
+    fn quarters(&self, q: &mut Quads, c: Vec2, half: f32, first: usize, color: [f32; 4]) {
+        let h = self.px * half;
+        for a in 0..2 {
+            for b in 0..2 {
+                // b = 0 is the top half: +y in NDC.
+                let x0 = c.x + (a as f32 - 1.0) * h.x;
+                let y0 = c.y - b as f32 * h.y;
+                let min = Vec2::new(x0, y0);
+                let max = Vec2::new(x0 + h.x, y0 + h.y);
+                self.quad(q, min, max, first + 2 * a + b, color);
+            }
+        }
+    }
+
+    /// One flare (`FUN_01034804`): radius `r` pixels at NDC `p`.
+    fn flare(&self, q: &mut Quads, p: Vec2, r: f32, color: [f32; 4], full: bool) {
+        if full {
+            for (tile, f, div) in GHOSTS {
+                self.single(q, p * f, r / div, tile, color);
+            }
+            self.quarters(q, p * (-2.0 / 3.0), r / 2.0, LENS_RING_TILE, color);
+            self.quarters(q, -p, r, LENS_HALO_TILE, color);
+        }
+        self.quarters(q, p, 2.0 * r / 3.0, LENS_GLOW_TILE, color);
+    }
+}
+
+/// Colour mask of the Alpha.256 table a flare is drawn through: tables 5–8
+/// add red / red+green / green / blue only (rendering.md §3).
+fn table_colour(table: u8) -> [f32; 4] {
+    match table {
+        5 => [1.0, 0.0, 0.0, 1.0],
+        6 => [1.0, 1.0, 0.0, 1.0],
+        7 => [0.0, 1.0, 0.0, 1.0],
+        8 => [0.0, 0.0, 1.0, 1.0],
+        _ => WHITE,
+    }
+}
+
+/// Rebuild the batch meshes from the effect lists, the frame's flares and
+/// the screen flash.
+#[allow(clippy::too_many_arguments)]
 fn build_meshes(
     mut commands: Commands,
     effects: Res<Effects>,
-    camera: Query<&GlobalTransform, With<GameCamera>>,
+    mode: Res<FxMode>,
+    flash: Res<ScreenFlash>,
+    rain: Option<Res<RainColour>>,
+    mut flares: ResMut<Flares>,
+    camera: Query<(&Camera, &GlobalTransform, &Projection), With<GameCamera>>,
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let mut sources = std::mem::take(&mut flares.0);
+    let Ok((cam, cam_tf, projection)) = camera.single() else {
+        return;
+    };
     // Sprites face up, with their top towards the top of the screen.
-    let right = camera
-        .single()
-        .map(|t| t.right().with_y(0.0).normalize_or(Vec3::X))
-        .unwrap_or(Vec3::X);
-    let axes = (right, right.cross(Vec3::Y));
+    let right = cam_tf.right().with_y(0.0).normalize_or(Vec3::X);
+    let tan_half = match projection {
+        Projection::Perspective(p) => (p.fov * 0.5).tan(),
+        _ => 0.5,
+    };
+    let view = ViewInfo {
+        pos: cam_tf.translation(),
+        forward: cam_tf.forward().into(),
+        axes: (right, right.cross(Vec3::Y)),
+        tan_half,
+    };
+    let rain = rain.map_or(WHITE, |r| r.0);
 
     let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();
     for (layer, list) in effects.lists.iter().enumerate() {
         for e in list {
             let (sprite, half, pass) = e.sprite();
-            quads[layer][pass.rank()].effect(axes, e, sprite, half);
+            if sprite == Sprite::Flare {
+                // AddFlare with −size: never occluded.
+                let pos = to_render(e.pos.as_vec3()) + Vec3::Y * NEARER;
+                if sources.len() < MAX_FLARES {
+                    sources.push(FlareSource {
+                        pos,
+                        size: e.size,
+                        table: 0,
+                    });
+                }
+                continue;
+            }
+            quads[layer][pass.rank()].effect(&view, e, sprite, half, rain);
         }
+    }
+
+    // Flares and the flash go last, in the top list's additive batch.
+    let top = &mut quads[LAYERS - 1][Pass::Flare.rank()];
+    let aspect = cam
+        .logical_viewport_size()
+        .map_or(1.6, |s| s.x / s.y.max(1.0));
+    let ky = 2.0 / SCREEN_H as f32;
+    let screen = Screen {
+        camera: cam,
+        transform: cam_tf,
+        px: Vec2::new(ky / aspect, ky),
+    };
+    if mode.0 > 0 {
+        for f in &sources {
+            let Some(ndc) = cam.world_to_ndc(cam_tf, f.pos) else {
+                continue;
+            };
+            let on_screen = ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0;
+            if !on_screen || ndc.z <= 0.0 || ndc.z > 1.0 {
+                continue;
+            }
+            let r = (f.size >> 4) as f32;
+            screen.flare(top, ndc.truncate(), r, table_colour(f.table), mode.0 >= 2);
+        }
+    }
+    if flash.0 > 0 {
+        let v = (flash.0.min(255) as f32) / 255.0;
+        let c = Color::srgb(v, v, v).to_linear();
+        let color = [c.red, c.green, c.blue, 1.0];
+        screen.quad(top, Vec2::NEG_ONE, Vec2::ONE, SOLID_TILE, color);
     }
 
     for (entity, batch, mesh, mut visibility) in &mut batches {
@@ -946,5 +1427,52 @@ mod tests {
         let list = &fx.lists[0];
         assert_eq!(list.len(), 2);
         assert_eq!(list[1].size, 400);
+    }
+
+    #[test]
+    fn weather_wraps_and_respawns() {
+        let mut fx = Effects::default();
+        fx.view = Some(View {
+            x: 100_000,
+            y: 100_000,
+            h: 1000,
+        });
+        let (x0, x1, _, _) = fx.view.unwrap().rect();
+        // A drop just past the right edge wraps to the left side.
+        fx.add(
+            13,
+            Tex::Dust,
+            Vec3::new(x1 as f32, 100_000.0, 0.0),
+            Vec3::new(30.0, 0.0, 300.0),
+            1.0,
+            3,
+            Blend::Add,
+        );
+        fx.tick(&mut never);
+        assert!(fx.lists[3][0].pos.x < x0 + 100);
+        // A drop hitting the ground becomes a new drop and 3 splashes.
+        fx.lists[3][0].pos.z = 23_950;
+        fx.tick(&mut never);
+        let kinds: Vec<u8> = fx.lists[3].iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [13, 14, 14, 14]);
+        assert_eq!(fx.lists[3][0].pos.z, 0x100 - 16_000);
+        // Snow leaves a mark in list 0.
+        let mut fx = Effects::default();
+        fx.view = Some(View {
+            x: 0,
+            y: 0,
+            h: 1000,
+        });
+        fx.add(
+            12,
+            Tex::Dust,
+            Vec3::new(0.0, 0.0, 23_990.0),
+            Vec3::new(0.0, 0.0, 300.0),
+            120.0,
+            3,
+            Blend::Add,
+        );
+        fx.tick(&mut never);
+        assert_eq!((fx.lists[0][0].kind, fx.lists[3][0].kind), (8, 12));
     }
 }
