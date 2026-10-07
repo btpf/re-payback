@@ -100,6 +100,10 @@ impl<'w> Script<'w> {
                 let mut ta = t.clone();
                 ta.actor = Some(actor);
                 self.apply_actor_setup(&ta, actor);
+                if ty == kind::ACTOR_GOTO_DIRECT {
+                    // 0x32 also sets the sticky "race driver" flag +0x49e.
+                    crate::sim::ai::set_direct(self.world, actor);
+                }
                 self.triggers().queue_add(ta);
             }
             return;

@@ -1,13 +1,14 @@
 //! Scripted actor orders (docs/re/people.md §7.1, script_api.md §5,
 //! progression notes D.2-D.5): the AI states mission scripts put actors in.
 //! People execute them here; vehicles steer with the same orders in
-//! `vehicles`.
+//! `vehicle_ai`.
 
 use super::combat::{Arsenal, Weapon};
 use super::people::Person;
 use super::{Obj, Rng, State, Stick, angle_diff, heading_of};
 use crate::camera::CameraTarget;
 use crate::mission::{Triggers, kind};
+use crate::vehicles::Vehicle;
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,6 +46,10 @@ pub struct Ai {
     /// `+0x386`: maximum speed.
     pub max_speed: i32,
     pub follow: Option<Entity>,
+    /// `+0x49e`: set by trigger 0x32 and never cleared ("race driver"):
+    /// steers straight at the goal, ignores the corner speeds and honks
+    /// at nothing (vehicles.md §6.3).
+    pub direct: bool,
 }
 
 impl Default for Ai {
@@ -54,6 +59,7 @@ impl Default for Ai {
             aggro: 0,
             max_speed: i32::MAX,
             follow: None,
+            direct: false,
         }
     }
 }
@@ -79,25 +85,38 @@ pub fn give_order(world: &mut World, e: Entity, order: Order) {
         }
         return;
     }
+    let vehicle = world.get::<Vehicle>(e).is_some();
     if let Some(mut ai) = ai_mut(world, e) {
         ai.order = order;
     }
     let state = match order {
         Order::Park => State::Parked,
         Order::Ambient => State::Wander,
-        Order::Flee => State::Flee,
+        Order::Flee if !vehicle => State::Flee,
         _ => State::Idle,
     };
-    if let Order::Attack { .. } = order {
+    if vehicle {
+        // A fresh order restarts route following; ambient cars go back to
+        // the traffic driver (state 3).
+        let aggro = world.get::<Ai>(e).map_or(0, |a| a.aggro);
+        let mut ent = world.entity_mut(e);
+        ent.insert(super::vehicle_ai::Nav::default());
+        if order == Order::Ambient {
+            if let Some(o) = ent.get::<Obj>() {
+                let tr = super::traffic::resume(o, aggro);
+                ent.insert((tr, super::people::Ambient));
+            }
+        }
+    } else if let Order::Attack { .. } = order {
         // Attackers get a shotgun with 100 shells.
         let mut ars = Arsenal::default();
         ars.current = Weapon::Shotgun;
         ars.ammo[Weapon::Shotgun as usize] = 100;
         world.entity_mut(e).insert(ars);
+    }
+    if let Order::Attack { aggro, .. } = order {
         if let Some(mut ai) = world.get_mut::<Ai>(e) {
-            if let Order::Attack { aggro, .. } = order {
-                ai.aggro = aggro;
-            }
+            ai.aggro = aggro;
         }
     }
     if let Some(mut o) = world.get_mut::<Obj>(e) {
@@ -120,6 +139,13 @@ pub fn set_aggro(world: &mut World, e: Entity, v: i32) {
 pub fn set_max_speed(world: &mut World, e: Entity, v: i32) {
     if let Some(mut ai) = ai_mut(world, e) {
         ai.max_speed = v;
+    }
+}
+
+/// Trigger 0x32 (`AddTrigger` case at 68k `0xb3866`): `+0x49e = 1`.
+pub fn set_direct(world: &mut World, e: Entity) {
+    if let Some(mut ai) = ai_mut(world, e) {
+        ai.direct = true;
     }
 }
 
@@ -187,7 +213,8 @@ pub fn people_orders(
         match ai.order {
             Order::Idle | Order::Park | Order::Ambient | Order::Follow(_) => {}
             Order::Goto(goal, radius) => {
-                if (goal - obj.pos.truncate()).abs().max_element() < radius {
+                let d = (goal - obj.pos.truncate()).abs();
+                if d.x + d.y <= radius {
                     triggers.report_actor(kind::ACTOR_GOTO, e);
                     ai.order = Order::Idle;
                     *stick = Stick::default();

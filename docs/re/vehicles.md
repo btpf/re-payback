@@ -467,7 +467,103 @@ See §3 (damage and collisions).
 
 ## 6. Traffic AI
 
-(See below.)
+### 6.1 Which vehicles the AI drives (C, 68k `FUN_000e3a58` ~124165-124810)
+
+The vehicle branch of the main update runs one shared driver for every vehicle whose state byte `+0x426` is
+3, 8, 9, 10, 11, 0x0f, 0x14 or 0x15 (the state-2 branch reads the player's keys; state 0x0c police cars only
+keep their siren on). Every other state (4 idle, 5 parked, 0x0e, 0x10, 0x11, 0x12) gives **no input**: the car
+coasts to a stop. So `Actor_Attack`, `Actor_Follow`, plain flee (0x12) and goto-and-vanish (0x0e) only work on
+people; a vehicle given them just stops. State 8 is never written anywhere (only 10 by the police code), so
+"script chase" 8/9 is dead code.
+
+Steering target `+0x2e6/+0x2ea` per state:
+
+| State | Target |
+|---|---|
+| 3 | traffic lane choice `FUN_000a143e` (square centres, junction picks) |
+| 8 / 10 | route node `node.xy << 3` (combat_police.md §1, §2.2) |
+| 9 / 11 | the target object (`+0x41e`); police lead it by `v·(5−aggr)·3` |
+| 0x0f / 0x15 | the script point, written once by trigger types 0x17 / 0x32 / 0x44 |
+| 0x14 | route toward the node farthest from the player (`+0x3ba`) |
+
+There is **no path finding for scripted gotos**: states 0x0f/0x15 aim straight at the point. The scripts give
+chains of nearby waypoints instead (races, convoys). Only police pursuit (10) and flee (0x14) use the route
+graph. On reaching the goal node, 0x14 falls into the 8/10 transition code and becomes state 11 (straight chase
+of `+0x41e`); this looks unintended.
+
+**Arrival (0x0f / 0x15).** The test point is the bonnet: `p = pos + (sin h, cos h)·front·3/4` (front =
+`+0x48c8`, `sin·front·3 >> 10`). It has arrived when `|p.x − x| + |p.y − y| <= 2·r`, with r = `+0x444` (1000 for
+trigger types 0x17 and 0x44; the 4th argument for 0x32). Then `FUN_000a6640` fires the 0x17/0x44 trigger and
+sets state 4. People use `|dx| + |dy| <= r` from their position instead.
+
+**`+0x49e` "direct" flag.** Set only by trigger type 0x32 (`AddTrigger` 68k `0xb3866`) and never cleared. With it:
+the aim offset is not clamped, the corner speeds are not used, the uncapped speed branch is open to non-police
+drivers, and blocked drivers do not honk or push on (below). The race scripts (levels 10 and 21) use 0x32.
+
+### 6.2 The driver (C)
+
+Per frame (ticks = frame tick count):
+
+```
+d = pos − aim
+if not +0x49e and state in (8,10,0xf,0x14,0x15): clamp d.x, d.y to ±1500     # far goals: approach at 45°
+want = atan2(d)
+e = want − heading (shortest way)
+steer = e > 0 ? −1 (heading up) : +1, only if |e| > ticks·yaw/2               # dead zone, yaw = +0x48e4
+
+# look-ahead, skipped when skill(+0x346) >= 99 and health >= 50 ("ramming" drivers)
+look  = heading + ticks·yawrate·2
+reach = max(front + speed²·4/brake + 0x400, 0x800)
+for dist = 0x800, 0x1000, … <= reach: square of pos + dist·(sin, cos)(look)
+    blocked if off the map or occupied (grid DAT_003178a0, own bits masked out)
+traffic light: on the last square scanned, if cube byte +4 is 1..6: v = byte + phase (wrapped to 1..6);
+    blocked if skill < 70 and v in {1, 2, 3, 6}                                 # skill >= 70 runs red lights
+```
+
+Not blocked: cruise band by skill, `lo = max(V − ticks·accel, L)`, `hi = V + ticks·brake`; throttle forward
+if speed < lo, brake if speed > hi. "Corner" = steer ≠ 0 and not `+0x49e`.
+
+| Skill | Straight V / L | Corner V / L |
+|---|---|---|
+| ≥ 98 and (police or `+0x49e`) | 730 / 500 | 240 / 120 |
+| ≥ 95 | 330 / 220 | 200 / 100 |
+| 91–94 | 230 / 150 | 180 / 90 |
+| 51–90 | 200 / 100 | 140 / 70 |
+| ≤ 50 | 150 / 80 | 100 / 50 |
+
+For skill ≤ 50 the code subtracts **brake** instead of accel from V (sic). The car's top speed still limits
+everything (§2.3).
+
+Blocked: non-police drivers without `+0x49e` count an impatience timer `+0x450` (−ticks per frame, floor 0):
+
+| Skill | When the timer is 0 | Honk while timer > |
+|---|---|---|
+| ≤ 30 | timer = 100 + rand(50), push on | never |
+| 31–60 | honk, timer = 100 + rand(50), push on | 80 |
+| 61–90 | honk, timer = 50 + rand(50), push on | 40 |
+| ≥ 91 | honk, timer = 20 + rand(20), push on | 10 |
+
+"Push on" clears the blocked flag and drives forward this frame. Still blocked: brake if speed > ticks·brake/2,
+throttle if speed < −ticks·accel. "Honk" is the horn/fire input `_DAT_0034c3b4`, which plays the horn sound
+(`+0x491a`). On the tank it fires the cannon instead (`FUN_000e2a50`), so a stuck AI tank shoots.
+
+Anti-spin: below skill 81 the driver does not steer while the J-turn latch `+0x3c1` is set or while braking;
+from 81 it only drops steering that fights the current yaw rate during a J-turn.
+
+Last, the script speed cap: `if speed > +0x386: speed = +0x386` (default 1000000; `Actor_SetMaxSpeed`). The
+helicopter (`+0x4928`) never honks; a flying model (`+0x492a`) gets no input while `+0x338` is 0.
+
+Default skill: traffic `clamp(rand(90) + aggr·8 − 30, 0, 99)` (§1.4); police in pursuit `wanted + 0x5c`
+(`+0x5e` when aggr ≥ 4); script actors keep the object default (0) until `Actor_SetAggro`. The race scripts set
+95–100, so the leaders (98+) run the uncapped band and the 99/100 cars skip the look-ahead.
+
+### 6.3 Port notes (I)
+
+The port follows §6.1–6.2 for states 0x0f/0x15/0x14 and police 10/11 (`sim/vehicle_ai.rs`,
+`sim/pursuit.rs`). Where the original leaves a vehicle idle, the port drives it: attack = ram the target like
+state 9 (an attacking tank fires within 6000 with the guards' `rand(101 − aggro)` rule when facing it), follow =
+drive at the leader until within 0xc00, plain flee = flee by route, goto-and-vanish = goto, then remove. At the
+farthest flee node the port stops instead of switching to state 11.
 
 ---
 

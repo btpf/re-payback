@@ -343,6 +343,12 @@ else: target = player; skill = wanted + (aggr < 4 ? 0x5c : 0x5e); if state not i
 - Drivers with skill ≥ 99 and hp ≥ 50 skip the obstacle / traffic-light look-ahead, so they ram.
   Skill < 70 stops at red lights. Police (≥ 95) ignore lights.
 - Skill ≥ 98 uses the uncapped speed branch.
+- The driver itself (steering dead zone, look-ahead, cruise bands, the ±1500 aim clamp on route legs) is
+  shared with traffic and script gotos: vehicles.md §6.2. Consequence: at skill 95–97 (wanted 3–5 with
+  aggr < 4) the look-ahead sees the player's car as an obstacle, so the car brakes behind it and then drops
+  a cop; only skill ≥ 99 cars ram. [C]
+- Port (`sim/pursuit.rs`): the target's nearest node is cached per chaser (refreshed every 20 ticks) instead
+  of on the target object; a missing route file sends pursuers straight to state 11. [I]
 
 **Flee (0x14).** The target is the route node farthest from the player (`FarthestNode`, stored at
 +0x3ba). Used by script objects. [C]
@@ -371,8 +377,11 @@ Spawning (68k `FUN_000cfe0c`, OS4 `FUN_01047134`) runs only at **wanted ≥ 5**.
 squares of the spawn edge.
 
 Requirements:
-- The square has bit 0x40.
+- The square has bit 0x40, x in 1..0x7e and y in 1..0x7e.
+- In-memory cube byte +8 is non-zero (the port tests "top face visible" instead [I]).
 - The square and its 4 neighbours are unoccupied.
+- The run is extended in both directions while the neighbours have 0x40; only the first square is tested
+  for occupancy.
 
 Layout:
 - Flow N/S (bits 1|4) → the line runs along x. Otherwise (E/W) it runs along y.

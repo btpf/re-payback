@@ -45,8 +45,14 @@ pub struct Traffic {
 #[derive(Resource, Default, Clone, Copy)]
 pub struct LightPhase {
     pub phase: i32,
-    sub: i32,
+    /// Ticks into the phase, 0..60 (`DAT_0034c098`); pedestrian-crossing
+    /// beacons show their flash model from 25 on.
+    pub sub: i32,
 }
+
+/// The traffic update chain (vehicle AI runs after it).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrafficSet;
 
 pub struct TrafficPlugin;
 
@@ -56,6 +62,7 @@ impl Plugin for TrafficPlugin {
             FixedUpdate,
             (advance_lights, spawn_traffic, drive_traffic)
                 .chain()
+                .in_set(TrafficSet)
                 .after(super::people::PeopleThink)
                 .before(super::driving::DrivingSet),
         );
@@ -75,6 +82,22 @@ fn flags_at(city: &City, sq: IVec2, level: usize) -> u8 {
         return 0;
     }
     city.map.square(sq.x as usize, sq.y as usize).cubes[level].flags
+}
+
+/// Hand a vehicle (back) to the traffic driver: aim at the next square in
+/// the lane direction nearest its heading.
+pub fn resume(obj: &Obj, aggro: i32) -> Traffic {
+    let (_, dx, dy, _, dir) = *EXITS
+        .iter()
+        .min_by_key(|x| angle_diff(obj.heading, x.3).abs())
+        .unwrap_or(&EXITS[2]);
+    Traffic {
+        target: IVec2::new((obj.pos.x >> 11) + dx, (obj.pos.y >> 11) + dy),
+        dir,
+        aggro,
+        horn: 0,
+        horn_sound: None,
+    }
 }
 
 fn centre(sq: IVec2) -> IVec2 {

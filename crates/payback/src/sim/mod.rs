@@ -13,8 +13,10 @@ pub mod contact;
 pub mod driving;
 pub mod people;
 pub mod police;
+pub mod pursuit;
 pub mod score;
 pub mod traffic;
+pub mod vehicle_ai;
 
 use crate::data::GameData;
 use bevy::prelude::*;
@@ -128,6 +130,10 @@ pub enum State {
     Parked = 5,
     Removed = 6,
     Dead = 7,
+    /// Police pursuit along the route graph (10) / straight at the target
+    /// (11) (combat_police.md §2.2).
+    PursuitRoute = 0xa,
+    Pursuit = 0xb,
     Barrier = 0xc,
     Flee = 0x12,
 }
@@ -296,6 +302,8 @@ impl Plugin for SimPlugin {
                 traffic::TrafficPlugin,
                 contact::ContactPlugin,
                 score::ScorePlugin,
+                vehicle_ai::VehicleAiPlugin,
+                pursuit::PursuitPlugin,
             ));
     }
 }

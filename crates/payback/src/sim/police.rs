@@ -2,8 +2,9 @@
 //! 68k `FUN_000ccc96` Crime, decay in `FUN_000e3a58`, cop AI ~121928).
 
 use super::combat::{Arsenal, Weapon};
+use super::driving::Drive;
 use super::people::{Person, PlayerSession};
-use super::{Obj, Rng, State, Stick, angle_diff, heading_of};
+use super::{Obj, Rng, State, Stick, Trig, angle_diff, heading_of};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::hud::{BigTitle, Dialog, Speaker, Texts, Voice};
@@ -12,6 +13,9 @@ use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::vehicles::Vehicle;
 use bevy::prelude::*;
+
+/// People model index of `policemale1` (PEOPLE_MODELS).
+pub const COP: usize = 7;
 
 /// Police aggressiveness 0..5: the level number in story mode, 2 on user
 /// maps, the menu setting in rampage (§2.0).
@@ -76,9 +80,15 @@ impl Plugin for PolicePlugin {
                         .add_systems(OnExit(AppState::Playing), reset_police)
             .add_systems(
                 FixedUpdate,
-                (crimes, decay_wanted, cops)
+                (crimes, decay_wanted)
                     .chain()
                     .after(super::combat::CombatSet),
+            )
+            // Cops steer after the ambient ped AI has reset their sticks.
+            .add_systems(
+                FixedUpdate,
+                cops.in_set(super::people::PeopleThink)
+                    .after(super::ai::people_orders),
             );
     }
 }
@@ -222,31 +232,40 @@ fn decay_wanted(
 }
 
 /// Police on foot: chase, arrest and shoot when the player is wanted
-/// (§2.4).
+/// (§2.4; 68k ~121928-122130). A driving player is arrested from the
+/// driver's door: the cop opens it 100 per tick (the player's door shuts 50
+/// per tick) and busts him when it is fully open.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn cops(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
+    trig: Res<Trig>,
     aggr: Option<Res<Aggressiveness>>,
-    library: Option<Res<ObjectLibrary>>,
+    library: Option<ResMut<ObjectLibrary>>,
     texts: Option<Res<Texts>>,
     mut record: ResMut<Crimes>,
     mut session: ResMut<PlayerSession>,
     mut title: ResMut<BigTitle>,
     mut dialog: ResMut<Dialog>,
-    mut player: Query<(Entity, &mut Obj, Has<Person>), (With<CameraTarget>, Without<Busted>)>,
+    mut player: Query<
+        (Entity, &mut Obj, Has<Person>, Option<&mut Drive>),
+        (With<CameraTarget>, Without<Busted>),
+    >,
     mut q: Query<(&mut Obj, &mut Stick, &Person, Option<&mut Arsenal>), Without<CameraTarget>>,
 ) {
-    let Some(library) = library else { return };
+    let Some(mut library) = library else { return };
     let aggr = aggr.map(|a| a.0).unwrap_or(2);
-    let Ok((pe, mut p, p_on_foot)) = player.single_mut() else {
+    let Ok((pe, mut p, p_on_foot, mut door)) = player.single_mut() else {
         return;
     };
     let wanted = p.wanted;
+    let p_info = library.model(p.model).info.clone();
     for (cop, mut stick, person, ars) in &mut q {
-        if !library.model(cop.model).info.police || cop.state == State::Player {
+        if person.kind != COP || cop.state == State::Player {
             continue;
         }
+        // policemale1 is a police model (+0x490a) for the crime table.
+        library.model_mut(cop.model).info.police = true;
         if wanted < 3
             || person.stun > 0
             || cop.health < 1
@@ -255,9 +274,16 @@ fn cops(
         {
             continue;
         }
-        // Head for the player, leading by (5 - aggr) * 3 ticks.
+        // Head for the player (his driver's door when driving), leading
+        // by (5 - aggr) * 3 ticks.
         let lead = (5 - aggr).max(0) * 3;
-        let goal = p.pos + p.vel * lead;
+        let mut goal = p.pos + p.vel * lead;
+        if !p_on_foot {
+            let (s, c) = (trig.sin(p.heading), trig.cos(p.heading));
+            let lat = -(p_info.radius + 192);
+            let lon = p_info.max_y / 2;
+            goal += IVec3::new((c * lat + s * lon) >> 8, (-s * lat + c * lon) >> 8, 0);
+        }
         let want = heading_of(goal.x - cop.pos.x, goal.y - cop.pos.y);
         let err = angle_diff(cop.heading, want);
         *stick = Stick {
@@ -276,25 +302,36 @@ fn cops(
             ..default()
         };
         // Arrest: close, the player nearly stopped, same level.
-        let d = (p.pos - cop.pos).truncate() / 16;
+        let d = (goal - cop.pos).truncate() / 16;
         let reach = if p_on_foot {
             (192 + 192) * 3 / 32
         } else {
             192 / 8
         };
         if d.length_squared() < reach * reach && p.speed.abs() < 0x1e && p.level == cop.level {
-            bust(
-                &mut commands,
-                pe,
-                &mut p,
-                &mut session,
-                &mut record,
-                texts.as_deref(),
-                &mut title,
-                &mut dialog,
-                &mut rng,
-            );
-            return;
+            stick.throttle = 0;
+            let open = match door.as_deref_mut() {
+                Some(dr) if !p_on_foot => {
+                    dr.door = (dr.door + 100).min(0x370);
+                    dr.door >= 0x370
+                }
+                _ => true,
+            };
+            if open {
+                info!("busted by a cop (wanted {wanted})");
+                bust(
+                    &mut commands,
+                    pe,
+                    &mut p,
+                    &mut session,
+                    &mut record,
+                    texts.as_deref(),
+                    &mut title,
+                    &mut dialog,
+                    &mut rng,
+                );
+                return;
+            }
         }
         // Shooting chance per tick.
         let n = if aggr < 2 {
