@@ -147,3 +147,17 @@ fn routes_parse_and_connect() {
         assert_eq!(at, dest, "map {n}");
     }
 }
+
+#[test]
+fn intro_video_decodes_and_loops() {
+    let Some(dir) = data_dir() else { return };
+    let Ok(bytes) = std::fs::read(dir.join("Videos/intro.video")) else { return };
+    let mut flc = payback_formats::flc::Flc::parse(bytes).unwrap();
+    assert_eq!((flc.frames, flc.width, flc.height), (450, 320, 200));
+    assert!(flc.next_frame(false).unwrap());
+    let first = flc.pixels.clone();
+    while flc.next_frame(true).unwrap() {}
+    // The ring frame after the last one reproduces frame 0 exactly.
+    assert_eq!(flc.position(), 451);
+    assert_eq!(flc.pixels, first);
+}

@@ -3,6 +3,7 @@
 //! Everything here is engine-agnostic: plain Rust types, no Bevy. Formats are
 //! documented in each module and in `docs/formats.md`.
 
+pub mod flc;
 pub mod map;
 pub mod motion;
 pub mod obj;
