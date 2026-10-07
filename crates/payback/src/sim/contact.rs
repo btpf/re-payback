@@ -190,6 +190,7 @@ fn vehicle_damage(
     mut triggers: ResMut<Triggers>,
     mut session: ResMut<PlayerSession>,
     mut explode: MessageWriter<Explode>,
+    mut killed: MessageWriter<super::score::Killed>,
     mut q: Query<(Entity, &mut Obj, &Vehicle, Has<CameraTarget>)>,
 ) {
     let Some(library) = library else { return };
@@ -204,6 +205,10 @@ fn vehicle_damage(
         };
         // Blown apart.
         if o.health < -70 && o.state != State::Removed {
+            // Destroyed outright, without burning first.
+            if o.burn == 0 && !matches!(o.state, State::Dead | State::Parked) {
+                killed.write(super::score::Killed { victim: e, police: info.police });
+            }
             if is_player {
                 say(&mut title, 2025);
                 session.foot_health = -71;
@@ -237,6 +242,10 @@ fn vehicle_damage(
             }
             // Wrecked: set alight, hop, explode (Ignite).
             if o.health < 1 && o.burn == 0 && o.state != State::Dead {
+                // An occupied vehicle counts as a kill (parked ones don't).
+                if o.state != State::Parked {
+                    killed.write(super::score::Killed { victim: e, police: info.police });
+                }
                 o.burn = 100;
                 o.speed = 0;
                 o.vel += IVec3::new(rng.rand(100) - 50, rng.rand(100) - 50, -(200 + rng.rand(300)));

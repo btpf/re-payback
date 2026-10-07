@@ -13,6 +13,7 @@ pub mod contact;
 pub mod driving;
 pub mod people;
 pub mod police;
+pub mod score;
 pub mod traffic;
 
 use crate::data::GameData;
@@ -294,6 +295,7 @@ impl Plugin for SimPlugin {
                 boarding::BoardingPlugin,
                 traffic::TrafficPlugin,
                 contact::ContactPlugin,
+                score::ScorePlugin,
             ));
     }
 }

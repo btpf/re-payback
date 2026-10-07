@@ -12,6 +12,7 @@ mod city;
 mod data;
 mod effects;
 mod hud;
+mod intro;
 mod level;
 mod mapedit;
 mod mission;
@@ -70,6 +71,7 @@ fn main() -> AppExit {
             effects::EffectsPlugin,
             hud::HudPlugin,
             mission::MissionPlugin,
+            intro::IntroPlugin,
         ))
                 .add_systems(Update, screenshot_and_exit)
         // `--map` starts a level directly; otherwise the menus come first.

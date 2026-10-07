@@ -1104,9 +1104,13 @@ fn deaths(
     mut rng: ResMut<Rng>,
     mut effects: ResMut<Effects>,
     mut triggers: ResMut<Triggers>,
+    library: Option<Res<ObjectLibrary>>,
+    mut killed: MessageWriter<super::score::Killed>,
     mut q: Query<(Entity, &mut Obj, &Person)>,
 ) {
     for (e, mut o, _) in &mut q {
+        let police = library.as_ref().is_some_and(|l| l.model(o.model).info.police);
+        let was_alive = !matches!(o.state, State::Dead | State::Removed);
         if o.burn > 0 {
             o.burn -= 1;
             if rng.rand(3) == 0 {
@@ -1148,6 +1152,9 @@ fn deaths(
                 Blend::Tint,
             );
             o.state = State::Removed;
+            if was_alive {
+                killed.write(super::score::Killed { victim: e, police });
+            }
             triggers.report_actor(kind::ACTOR_KILLED, e);
             triggers.report_actor(kind::ACTOR_GONE, e);
             if o.player.is_none() {
@@ -1155,6 +1162,7 @@ fn deaths(
             }
         } else if o.health <= 0 && !matches!(o.state, State::Dead | State::Removed) {
             o.state = State::Dead;
+            killed.write(super::score::Killed { victim: e, police });
             triggers.report_actor(kind::ACTOR_KILLED, e);
             triggers.report_actor(kind::ACTOR_GONE, e);
             commands.spawn(Sound::once(
