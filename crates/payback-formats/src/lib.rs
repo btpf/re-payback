@@ -9,7 +9,9 @@ pub mod motion;
 pub mod obj;
 pub mod palette;
 pub mod phrases;
+pub mod replay;
 pub mod route;
+pub mod scores;
 pub mod sound;
 pub mod texture;
 

@@ -161,3 +161,19 @@ fn intro_video_decodes_and_loops() {
     assert_eq!(flc.position(), 451);
     assert_eq!(flc.pixels, first);
 }
+
+#[test]
+fn shipped_replays_parse() {
+    let Some(dir) = data_dir() else { return };
+    for (name, city, records, ticks) in [("Race for the prize", 1, 1211, 5337), ("Tanks a lot", 0, 1650, 7586)] {
+        let Ok(bytes) = std::fs::read(dir.join("Replays").join(name)) else { continue };
+        let r = payback_formats::replay::Replay::parse(&bytes).unwrap();
+        assert_eq!(r.header.version, 3);
+        assert_eq!(r.city(), Some(city));
+        assert_eq!(r.records.len(), records);
+        let players = r.header.players.max(1) as usize;
+        let sum: i32 = r.records.iter().step_by(players).map(|x| x.input.ticks as i32).sum();
+        assert_eq!(sum, ticks);
+        assert_eq!(r.header.duration, ticks);
+    }
+}
