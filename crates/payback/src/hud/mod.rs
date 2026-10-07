@@ -200,6 +200,8 @@ impl Plugin for HudPlugin {
             .init_resource::<BigTitle>()
             .init_resource::<Banner>()
             .add_systems(Startup, setup)
+            .add_systems(OnEnter(crate::level::AppState::Playing), load_level_texts.in_set(crate::level::LevelLoaded))
+            .add_systems(OnExit(crate::level::AppState::Playing), reset_hud)
             .add_systems(FixedUpdate, (collect, tick_dialog, tick_title, tick_banner))
             .add_systems(PostUpdate, draw);
     }
@@ -211,25 +213,73 @@ fn setup(
     spec: Res<LevelSpec>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    commands.insert_resource(HudIcons::load(&data));
-    let language = "English";
-    let level = data
-        .read(format!(
-            "Phrases/{}{}.{language}.phrases",
-            spec.map, spec.level
-        ))
-        .ok()
-        .and_then(|b| Phrases::parse(&b).ok())
-        .unwrap_or_default();
+        commands.insert_resource(HudIcons::load(&data));
     let global = data
-        .read(format!("Phrases/Global.{language}.phrases"))
+        .read(format!("Phrases/Global.{LANGUAGE}.phrases"))
         .ok()
         .and_then(|b| Phrases::parse(&b).ok())
         .unwrap_or_default();
-    commands.insert_resource(Texts { level, global });
+    commands.insert_resource(Texts { level: Phrases::default(), global });
 
-    // Minimap: 65x65 cropped to 64x64, red north arrow at the top centre.
-    let minimap = data.read(format!("Maps/{}.mini", spec.map)).ok().map(|b| {
+
+        let _ = &spec;
+    let w = 320;
+    let image = images.add(blank(w));
+    commands.insert_resource(Canvas { image: image.clone(), w, frame: 0, minimap: None });
+    commands.spawn((
+        ImageNode::new(image),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        HudNode,
+    ));
+}
+
+/// The HUD overlay node (hidden outside levels).
+#[derive(Component)]
+pub struct HudNode;
+
+/// UI language (phrase file suffix).
+pub const LANGUAGE: &str = "English";
+
+/// Level phrases and the minimap at level start.
+fn load_level_texts(
+    data: Res<GameData>,
+    spec: Res<LevelSpec>,
+    mut texts: ResMut<Texts>,
+    mut canvas: ResMut<Canvas>,
+    mut node: Query<&mut Visibility, With<HudNode>>,
+) {
+    texts.level = data
+        .read(format!("Phrases/{}{}.{LANGUAGE}.phrases", spec.map, spec.level))
+        .ok()
+        .and_then(|b| Phrases::parse(&b).ok())
+        .unwrap_or_default();
+    canvas.minimap = load_minimap(&data, &spec.map);
+    for mut v in &mut node {
+        *v = Visibility::Inherited;
+    }
+}
+
+/// Hide the HUD and clear per-level HUD state.
+fn reset_hud(mut commands: Commands, mut node: Query<&mut Visibility, With<HudNode>>) {
+    for mut v in &mut node {
+        *v = Visibility::Hidden;
+    }
+    commands.insert_resource(HudData::default());
+    commands.insert_resource(Dialog::default());
+    commands.insert_resource(BigTitle::default());
+    commands.insert_resource(Banner::default());
+}
+
+/// Minimap: 65x65 cropped to 64x64, red north arrow at the top centre.
+fn load_minimap(data: &GameData, map: &str) -> Option<Icon> {
+    data.read(format!("Maps/{map}.mini")).ok().map(|b| {
         let mut px = vec![0u8; 64 * 64];
         for y in 0..64 {
             for x in 0..64 {
@@ -248,28 +298,8 @@ fn setup(
                 }
             }
         }
-        Icon { w: 64, h: 64, px }
-    });
-
-    let w = 320;
-    let image = images.add(blank(w));
-    commands.insert_resource(Canvas {
-        image: image.clone(),
-        w,
-        frame: 0,
-        minimap,
-    });
-    commands.spawn((
-        ImageNode::new(image),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            top: Val::Px(0.0),
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-    ));
+                Icon { w: 64, h: 64, px }
+    })
 }
 
 fn blank(w: usize) -> Image {

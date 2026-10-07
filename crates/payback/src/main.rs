@@ -51,7 +51,7 @@ fn main() -> AppExit {
             ..default()
         }))
         .insert_resource(data)
-        .insert_resource(level::LevelSpec {
+                .insert_resource(level::LevelSpec {
             map: arg("--map").unwrap_or_else(|| "0".into()),
             level: arg("--level").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
@@ -71,7 +71,13 @@ fn main() -> AppExit {
             hud::HudPlugin,
             mission::MissionPlugin,
         ))
-        .add_systems(Update, screenshot_and_exit)
+                .add_systems(Update, screenshot_and_exit)
+        // `--map` starts a level directly; otherwise the menus come first.
+        .add_systems(Startup, |mut next: ResMut<NextState<level::AppState>>| {
+            if arg("--map").is_some() {
+                next.set(level::AppState::Playing);
+            }
+        })
         .run()
 }
 

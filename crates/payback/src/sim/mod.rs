@@ -9,6 +9,7 @@ pub mod ai;
 pub mod boarding;
 pub mod collide;
 pub mod combat;
+pub mod contact;
 pub mod driving;
 pub mod people;
 pub mod police;
@@ -292,6 +293,7 @@ impl Plugin for SimPlugin {
                 driving::DrivingPlugin,
                 boarding::BoardingPlugin,
                 traffic::TrafficPlugin,
+                contact::ContactPlugin,
             ));
     }
 }

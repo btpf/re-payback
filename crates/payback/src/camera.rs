@@ -103,6 +103,9 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GameCam>()
             .add_systems(Startup, spawn_camera)
+            .add_systems(OnEnter(crate::level::AppState::Playing), |mut cam: ResMut<GameCam>| {
+                *cam = GameCam::default();
+            })
             .add_systems(FixedUpdate, follow_tick)
             .add_systems(
                 PostUpdate,

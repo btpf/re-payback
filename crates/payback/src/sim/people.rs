@@ -9,7 +9,7 @@ use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of, wrap};
 use crate::audio::{Listener, Sound, SoundPos, id};
 use crate::camera::{CameraTarget, GameCam};
 use crate::data::GameData;
-use crate::level::{LevelEntity, StartPoints};
+use crate::level::{AppState, LevelEntity, LevelLoaded, StartPoints};
 use crate::objects::{ObjectLibrary, corner_positions};
 use crate::world::{City, heading_to_render, to_render};
 use bevy::{mesh::VertexAttributeValues, prelude::*};
@@ -135,6 +135,10 @@ pub struct PlayerInput {
 #[derive(Resource)]
 pub struct HumanMotion(pub Motion);
 
+/// The player has been spawned at level start.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlayerSpawned;
+
 /// People decide what to do (controls and AI fill the stick).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeopleThink;
@@ -150,7 +154,15 @@ impl Plugin for PeoplePlugin {
         app.init_resource::<PlayerSession>()
             .init_resource::<PlayerInput>()
             .add_message::<Panic>()
-            .add_systems(Startup, (load_motion, spawn_player).chain())
+            .add_systems(Startup, load_motion)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                spawn_player.in_set(LevelLoaded).in_set(PlayerSpawned),
+            )
+            .add_systems(OnExit(AppState::Playing), |mut commands: Commands| {
+                commands.insert_resource(PlayerSession::default());
+                commands.insert_resource(PlayerInput::default());
+            })
             .add_systems(PreUpdate, read_keyboard)
             .add_systems(
                 FixedUpdate,

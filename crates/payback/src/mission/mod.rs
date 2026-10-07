@@ -109,7 +109,11 @@ impl Plugin for MissionPlugin {
             .init_resource::<MissionState>()
             .insert_resource(ActiveLevel(None))
             .add_message::<LevelOutcome>()
-            .add_systems(PostStartup, start_level)
+            .add_systems(
+                OnEnter(crate::level::AppState::Playing),
+                start_level.after(crate::sim::people::PlayerSpawned),
+            )
+            .add_systems(OnExit(crate::level::AppState::Playing), reset_missions)
             .add_systems(
                 FixedUpdate,
                 eval::run_triggers.after(crate::sim::combat::CombatSet),
@@ -140,4 +144,16 @@ fn start_level(world: &mut World) {
     }
     script.init(&mut Script::new(world));
     world.resource_mut::<ActiveLevel>().0 = Some(script);
+}
+
+/// Clear the level script and every trigger when the level is left.
+fn reset_missions(world: &mut World) {
+    let sounds = world.resource_mut::<Triggers>().clear();
+    for e in sounds {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    world.insert_resource(MissionState::default());
+    world.resource_mut::<ActiveLevel>().0 = None;
 }

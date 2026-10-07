@@ -33,12 +33,42 @@ pub struct StartPoints {
 #[derive(Component)]
 pub struct LevelEntity;
 
+/// Top-level game state.
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AppState {
+    /// Menus (title, game menu, level select, ...).
+    #[default]
+    Frontend,
+    /// A level is loaded and running.
+    Playing,
+}
+
+/// Runs on entering `Playing` once the level is loaded; later setup
+/// orders itself after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LevelLoaded;
+
 pub struct LevelPlugin;
 
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, load_level);
+        app.init_state::<AppState>()
+            .add_systems(OnEnter(AppState::Playing), load_level.before(LevelLoaded))
+            .add_systems(OnExit(AppState::Playing), unload_level);
     }
+}
+
+/// Despawn the level and drop its resources; per-level game state is reset
+/// by the plugins that own it (`OnExit(AppState::Playing)`).
+fn unload_level(mut commands: Commands, entities: Query<Entity, With<LevelEntity>>) {
+    for e in &entities {
+        commands.entity(e).despawn();
+    }
+    commands.remove_resource::<City>();
+    commands.remove_resource::<CityRender>();
+    commands.remove_resource::<StartPoints>();
+    commands.remove_resource::<Water>();
+    commands.remove_resource::<ObjectLibrary>();
 }
 
 #[allow(clippy::too_many_arguments)]

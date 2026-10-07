@@ -7,7 +7,7 @@ use super::{Obj, Rng, State, Stick, angle_diff, heading_of};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::hud::{BigTitle, Dialog, Speaker, Texts, Voice};
-use crate::level::LevelSpec;
+use crate::level::{AppState, LevelSpec};
 use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::vehicles::Vehicle;
@@ -64,7 +64,7 @@ impl Plugin for PolicePlugin {
         app.add_message::<Hurt>()
             .init_resource::<WantedTimer>()
             .init_resource::<Crimes>()
-            .add_systems(Startup, |mut commands: Commands, spec: Res<LevelSpec>| {
+            .add_systems(OnEnter(AppState::Playing), |mut commands: Commands, spec: Res<LevelSpec>| {
                 let city: i32 = spec.map.parse().unwrap_or(-1);
                 let aggr = if (0..3).contains(&city) {
                     city * 2 + spec.level as i32
@@ -73,6 +73,7 @@ impl Plugin for PolicePlugin {
                 };
                 commands.insert_resource(Aggressiveness(aggr));
             })
+                        .add_systems(OnExit(AppState::Playing), reset_police)
             .add_systems(
                 FixedUpdate,
                 (crimes, decay_wanted, cops)
@@ -379,4 +380,10 @@ pub fn crime_summary(t: &Texts, c: &Crimes, arrested: bool) -> String {
         ),
     };
     format!("{head} {body}.")
+}
+
+/// Reset per-level police state.
+pub fn reset_police(mut commands: Commands) {
+    commands.insert_resource(WantedTimer::default());
+    commands.insert_resource(Crimes::default());
 }
