@@ -128,12 +128,34 @@ impl MaterialExtension for EnvMapped {
     fn vertex_shader() -> ShaderRef {
         "embedded://payback/shaders/objects.wgsl".into()
     }
+
+    fn fragment_shader() -> ShaderRef {
+        "embedded://payback/shaders/objects.wgsl".into()
+    }
 }
 
-/// Environment-map centres (texels, rows) of `FUN_010c101c`: per-vertex
-/// normals for mode & 0x20, the face normal otherwise.
+/// Reflection centres (texels, rows) of `FUN_010c101c`: per-vertex normal
+/// mapping (mode & 0x20) and screen-space mapping (otherwise); see
+/// `shaders/objects.wgsl`.
 const ENV_CENTRE_SMOOTH: (f32, f32) = (127.0, 63.0);
-const ENV_CENTRE_FLAT: (f32, f32) = (88.0, 52.0);
+const ENV_CENTRE_SCREEN: (f32, f32) = (88.0, 52.0);
+
+/// How a "Shine" face (mode & 0x10) is drawn (`FUN_010c101c`; kinds as in
+/// `shaders/objects.wgsl`): 0x32 normal-mapped slot texture, 0x12/0x14
+/// screen-mapped slot texture, 0x31 / 0x11 the file-UV texture with
+/// CloudsReflect (`DAT_0114c904`) blended over it, normal- / screen-mapped.
+fn shine_kind(mode: i32) -> Option<u32> {
+    if mode & 0x10 == 0 {
+        return None;
+    }
+    let smooth = mode & 0x20 != 0;
+    Some(match (mode & 0xf == 1, smooth) {
+        (false, true) => 1,
+        (false, false) => 2,
+        (true, true) => 3,
+        (true, false) => 4,
+    })
+}
 
 /// How a model's faces are textured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -423,6 +445,7 @@ impl ObjectLibrary {
         let mut env = Vec::new();
         let mut face_normals = Vec::new();
         let burnt = self.slots.get("burnt").copied();
+        let reflect = self.slots.get("cloudsreflect").copied();
         // Smooth vertex normals: sum of the unit normals of the drawn faces
         // using the vertex (loader `FUN_010bf8bc`), each facing its visible side.
         let placed: Vec<Vec3> =
@@ -460,7 +483,7 @@ impl ObjectLibrary {
             let order = side_order(side);
             let [a, b, c] = order.map(|k| face.indices[k]);
             let flat = (placed[b] - placed[a]).cross(placed[c] - placed[a]).normalize_or_zero();
-            let shine = skin == Skin::Normal && slot.mode & 0x10 != 0;
+            let shine = if skin == Skin::Normal { shine_kind(slot.mode) } else { None };
             let smooth_env = slot.mode & 0x20 != 0;
             let tex = match skin {
                 Skin::Burnt => burnt,
@@ -478,16 +501,20 @@ impl ObjectLibrary {
             for k in order {
                 let (vi, (u, v)) = (face.indices[k], slot.uv[k]);
                 positions.push(place(&obj.vertices[vi], vi));
-                let n = if shine && smooth_env { smooth[vi].normalize_or_zero() } else { flat };
+                let n = if shine.is_some() && smooth_env { smooth[vi].normalize_or_zero() } else { flat };
                 face_normals.push(n.to_array());
-                env.push(match (shine, tex) {
-                    (true, Some(t)) => {
-                        let (cu, cv) = if smooth_env { ENV_CENTRE_SMOOTH } else { ENV_CENTRE_FLAT };
+                // Replacement kinds map the slot texture; overlays CloudsReflect.
+                let source = match shine {
+                    Some(1 | 2) => tex,
+                    Some(_) => reflect,
+                    None => None,
+                };
+                env.push(match (shine, source) {
+                    (Some(kind), Some(t)) => {
+                        let (cu, cv) = if smooth_env { ENV_CENTRE_SMOOTH } else { ENV_CENTRE_SCREEN };
                         let ox = (t % ATLAS_COLS * TEX_W) as f32 + cu + 0.5;
-                        let oy = (t / ATLAS_COLS * TEX_H + if keyed { 0 } else { ATLAS_H }) as f32
-                            + cv
-                            + 0.5;
-                        [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
+                        let oy = (t / ATLAS_COLS * TEX_H + ATLAS_H) as f32 + cv + 0.5;
+                        [ox / ATLAS_W as f32 + 2.0 * kind as f32, oy / ATLAS_FULL_H as f32]
                     }
                     _ => [-1.0, -1.0],
                 });
@@ -1048,10 +1075,11 @@ pub fn spawn_scenery(
     }
 }
 
-/// `--damaged`: park two cars (Mundaneo, Evo) beside the player once, to
-/// show the damage skins.
+/// `--damaged` / `--park <kinds>`: park vehicles beside the player once,
+/// for visual checks of skins and damage.
 fn spawn_damage_check(world: &mut World, mut done: Local<bool>) {
-    if *done || !std::env::args().any(|a| a == "--damaged") {
+    let park = crate::arg("--park");
+    if *done || (park.is_none() && !std::env::args().any(|a| a == "--damaged")) {
         return;
     }
     let player = world
@@ -1061,10 +1089,14 @@ fn spawn_damage_check(world: &mut World, mut done: Local<bool>) {
         .map(|o| o.pos);
     let Some(pos) = player else { return };
     *done = true;
-    for (i, kind) in [0usize, 12].into_iter().enumerate() {
-        let at = pos + IVec3::new(700 + 900 * i as i32, 0, 0);
-        // Red and blue paint.
-        crate::vehicles::spawn_vehicle_world(world, kind as i32, at, 0, [4, 1][i]);
+    // `--park 13,9,3`: those vehicle types in a row (wide spacing for
+    // buses); otherwise a red Mundaneo and a blue Evo.
+    let kinds: Vec<i32> = park
+        .map(|p| p.split(',').filter_map(|k| k.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![0, 12]);
+    for (i, &kind) in kinds.iter().enumerate() {
+        let at = pos + IVec3::new(700 + 1100 * i as i32, 0, 0);
+        crate::vehicles::spawn_vehicle_world(world, kind, at, 0, [4, 1][i % 2]);
     }
 }
 
