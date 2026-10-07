@@ -645,9 +645,17 @@ fn move_people(
             if next.z < DROWN_Z {
                 next.z += 24;
             } else if obj.state != State::Dead {
-                obj.state = State::Removed;
-                commands.entity(e).despawn();
-                continue;
+                if obj.player.is_some() {
+                    // A drowned player stays (hidden) as a corpse so the
+                    // respawn timer starts like any other death.
+                    obj.state = State::Dead;
+                    obj.health = obj.health.min(0);
+                    commands.entity(e).insert(Visibility::Hidden);
+                } else {
+                    obj.state = State::Removed;
+                    commands.entity(e).despawn();
+                    continue;
+                }
             }
         }
 
