@@ -185,7 +185,7 @@ impl Plugin for CameraPlugin {
             .add_systems(FixedUpdate, follow_tick)
             .add_systems(
                 PostUpdate,
-                (toggle_mode, place_game_camera, place_extra_views, free_controls, layout_views)
+                (toggle_mode, place_game_camera, place_extra_views, free_controls, layout_views, separators)
                     .chain()
                     .before(TransformSystems::Propagate),
             );
@@ -347,9 +347,45 @@ fn place_extra_views(views: Res<ViewCams>, mut q: Query<(&ExtraView, &mut Transf
     }
 }
 
+/// Black window areas between split-screen views (the separators, and the
+/// sides of the centred third view), drawn on the overlay.
+#[derive(Component)]
+struct Separator;
+
+/// Window areas no view covers, as fractions (x, y, w, h).
+fn gaps(n: usize, w: u32, h: u32) -> Vec<(f32, f32, f32, f32)> {
+    let rects = view_rects(n, w, h);
+    if rects.len() < 2 {
+        return Vec::new();
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    // Scan in bands between the views' edges; anything uncovered is a gap.
+    let mut ys: Vec<u32> = rects.iter().flat_map(|r| [r.1, r.1 + r.3]).chain([0, h]).collect();
+    ys.sort();
+    ys.dedup();
+    let mut out = Vec::new();
+    for band in ys.windows(2) {
+        let (y0, y1) = (band[0], band[1]);
+        let mut xs: Vec<(u32, u32)> = rects
+            .iter()
+            .filter(|r| r.1 < y1 && r.1 + r.3 > y0)
+            .map(|r| (r.0, r.0 + r.2))
+            .collect();
+        xs.sort();
+        let mut x = 0;
+        for (a, b) in xs.into_iter().chain([(w, w)]) {
+            if a > x {
+                out.push((x as f32 / wf, y0 as f32 / hf, (a - x) as f32 / wf, (y1 - y0) as f32 / hf));
+            }
+            x = x.max(b);
+        }
+    }
+    out
+}
+
 /// Split-screen viewports from the window size; the whole window (order
-/// 0, sky clear colour) otherwise. In split screen the first view clears
-/// the window to black, which leaves the separators black.
+/// 0) otherwise. The first view clears the window to the sky colour (as in
+/// single player) and the separators are black overlay rectangles.
 fn layout_views(
     mode: Res<GameMode>,
     state: Res<State<AppState>>,
@@ -369,7 +405,7 @@ fn layout_views(
         })
     };
     let (order, clear, vp) = if split {
-        (-10, ClearColorConfig::Custom(Color::BLACK), viewport(0))
+        (-10, ClearColorConfig::Default, viewport(0))
     } else {
         (0, ClearColorConfig::Default, None)
     };
@@ -447,4 +483,42 @@ fn free_controls(
     }
     rig.distance = (rig.distance * (1.0 + zoom)).clamp(2.0, 200.0);
     *transform = rig.transform();
+}
+
+/// Keep the black separator rectangles in step with the split-screen
+/// layout (none outside multiplayer).
+fn separators(
+    mut commands: Commands,
+    mode: Res<GameMode>,
+    state: Res<State<AppState>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    existing: Query<Entity, With<Separator>>,
+    mut last: Local<Vec<(f32, f32, f32, f32)>>,
+) {
+    let split = mode.is_multiplayer() && *state.get() == AppState::Playing;
+    let size = window.single().map(|w| w.physical_size()).unwrap_or(UVec2::new(1280, 800));
+    let want = if split { gaps(mode.players(), size.x.max(2), size.y.max(2)) } else { Vec::new() };
+    if *last == want && existing.iter().count() == want.len() {
+        return;
+    }
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    for &(x, y, w, h) in &want {
+        commands.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(x * 100.0),
+                top: Val::Percent(y * 100.0),
+                width: Val::Percent(w * 100.0),
+                height: Val::Percent(h * 100.0),
+                ..default()
+            },
+            BackgroundColor(Color::BLACK),
+            GlobalZIndex(-1),
+            Separator,
+            LevelEntity,
+        ));
+    }
+    *last = want;
 }
