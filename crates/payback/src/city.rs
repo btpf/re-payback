@@ -106,7 +106,8 @@ impl Pass {
 
 fn pass_of(kind: FaceType, is_top: bool) -> Option<Pass> {
     match kind {
-        FaceType::Off => None,
+        // Type 5 is an open door (set at runtime): not drawn.
+        FaceType::Off | FaceType::Unknown(5) => None,
         FaceType::Normal | FaceType::Unknown(_) => Some(Pass::Opaque),
         FaceType::Genlocked => Some(Pass::Masked),
         // Alpha and Reflect only apply to tops; sides draw as Normal.

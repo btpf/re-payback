@@ -12,6 +12,7 @@ use crate::data::GameData;
 use crate::effects::{Blend, Effects, Tex};
 use crate::hud::{Banner, Texts};
 use crate::level::LevelEntity;
+use crate::mission::{MissionState, Triggers, kind};
 use crate::objects::{ObjectLibrary, SetScenery};
 use crate::world::{City, heading_to_render, to_render};
 use bevy::{math::I64Vec3, prelude::*};
@@ -32,6 +33,35 @@ pub enum Weapon {
 }
 
 impl Weapon {
+    /// Weapon id in the original numbering (`+0x35e`): 0 fist, 1 bazooka,
+    /// 2 flamethrower, 3 grenade, 4 minigun, 5 shotgun, 0xd pistol, 0xe bomb.
+    pub fn original_id(self) -> i32 {
+        match self {
+            Weapon::Fist => 0,
+            Weapon::Bazooka => 1,
+            Weapon::Flamethrower => 2,
+            Weapon::Grenade => 3,
+            Weapon::Minigun => 4,
+            Weapon::Shotgun => 5,
+            Weapon::Pistol => 0xd,
+            Weapon::Bomb => 0xe,
+        }
+    }
+
+    /// Weapon code reported to "weapon fired" triggers (type 0x22).
+    fn fired_code(self) -> i32 {
+        match self {
+            Weapon::Bazooka => 1,
+            Weapon::Flamethrower => 2,
+            Weapon::Grenade => 3,
+            Weapon::Minigun => 4,
+            Weapon::Shotgun => 5,
+            Weapon::Pistol => 7,
+            Weapon::Bomb => 8,
+            Weapon::Fist => 0,
+        }
+    }
+
     pub const ALL: [Weapon; 8] = [
         Weapon::Fist,
         Weapon::Pistol,
@@ -200,6 +230,7 @@ impl Plugin for CombatPlugin {
 fn select_weapon(
     mut commands: Commands,
     mut input: ResMut<PlayerInput>,
+    mut triggers: ResMut<Triggers>,
     mut q: Query<(&Obj, &mut Arsenal, &mut Person), With<CameraTarget>>,
 ) {
     let Some(slot) = input.weapon_pressed.take() else {
@@ -221,6 +252,7 @@ fn select_weapon(
                 14000.0,
                 SoundPos::Global,
             ));
+            triggers.report(kind::WEAPON_SWITCHED, 0, 0, 0);
         }
     }
 }
@@ -297,6 +329,8 @@ fn fire_weapons(
     city: Option<Res<City>>,
     mut panic: MessageWriter<Panic>,
     mut hurt: MessageWriter<Hurt>,
+    mut triggers: ResMut<Triggers>,
+    mission: Res<MissionState>,
 ) {
     let (Some(mut library), Some(city)) = (library, city) else {
         return;
@@ -529,6 +563,15 @@ fn fire_weapons(
                         is_player,
                     );
                     ars.ammo[slot] -= 1;
+                    // Scripts tag the player's bombs (`SetProjectileId`).
+                    if let (Some(b), true) = (ars.bomb, is_player && mission.projectile_id != -1) {
+                        let id = mission.projectile_id;
+                        commands.queue(move |world: &mut World| {
+                            if let Some(mut o) = world.get_mut::<Obj>(b) {
+                                o.script_id = id;
+                            }
+                        });
+                    }
                 }
             }
             Weapon::Grenade => {}
@@ -538,6 +581,9 @@ fn fire_weapons(
                 at: obj.pos,
                 from: e,
             });
+            if is_player {
+                triggers.report(kind::WEAPON_FIRED, w.fired_code(), 0, 0);
+            }
         }
     }
     // Apply punches: 30 damage, flat.
@@ -1057,6 +1103,7 @@ fn deaths(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
     mut effects: ResMut<Effects>,
+    mut triggers: ResMut<Triggers>,
     mut q: Query<(Entity, &mut Obj, &Person)>,
 ) {
     for (e, mut o, _) in &mut q {
@@ -1101,11 +1148,15 @@ fn deaths(
                 Blend::Tint,
             );
             o.state = State::Removed;
+            triggers.report_actor(kind::ACTOR_KILLED, e);
+            triggers.report_actor(kind::ACTOR_GONE, e);
             if o.player.is_none() {
                 commands.entity(e).despawn();
             }
         } else if o.health <= 0 && !matches!(o.state, State::Dead | State::Removed) {
             o.state = State::Dead;
+            triggers.report_actor(kind::ACTOR_KILLED, e);
+            triggers.report_actor(kind::ACTOR_GONE, e);
             commands.spawn(Sound::once(
                 id::LONG_AAAH,
                 10e6,

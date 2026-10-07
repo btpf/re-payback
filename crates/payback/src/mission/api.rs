@@ -119,6 +119,10 @@ impl<'w> Script<'w> {
             kind::ACTOR_GOTO_15 => Some(crate::sim::ai::Order::Goto(goal, 1000)),
             kind::ACTOR_BOARDS_PLAYER => Some(crate::sim::ai::Order::BoardPlayer),
             kind::ACTOR_FLEES => Some(crate::sim::ai::Order::FleeFar),
+            kind::ACTOR_BOARDS_ACTOR => self
+                .actors(t.b)
+                .first()
+                .map(|&target| crate::sim::ai::Order::BoardActor(target)),
             _ => None,
         };
         if let Some(order) = order {
@@ -461,6 +465,8 @@ impl<'w> Script<'w> {
                         )
                     })
                 })
+        } else if model >= 1000 {
+            vehicles::spawn_prop_world(self.world, model - 1000, pos, angle)
         } else {
             vehicles::spawn_vehicle_world(self.world, model, pos, angle, colour)
         }?;
@@ -1027,5 +1033,46 @@ fn face_code(f: payback_formats::map::FaceType) -> i32 {
         Alpha => 3,
         Reflect => 4,
         Unknown(n) => n as i32,
+    }
+}
+
+impl Script<'_> {
+    /// Garage drop-off (trigger type 4): the player's car is taken and the
+    /// player stands 0x800 outside side `d` (0 -y, 1 +x, 2 +y, 3 -x),
+    /// keeping weapons, money, wanted level and on-foot health.
+    pub fn garage_dropoff(&mut self, sx: i32, sy: i32, floor: i32, side: i32) {
+        let Some(car) = self.player() else { return };
+        let Some((score, wanted)) = self.world.get::<Obj>(car).map(|o| (o.score, o.wanted)) else {
+            return;
+        };
+        let ars = self
+            .world
+            .get::<crate::sim::combat::Arsenal>(car)
+            .cloned()
+            .unwrap_or_default();
+        let (dx, dy, heading) = match side {
+            0 => (0, -0x800, 0xb40),
+            1 => (0x800, 0, 0x5a0),
+            2 => (0, 0x800, 0),
+            _ => (-0x800, 0, 0x10e0),
+        };
+        let (x, y) = ((sx << 11 | 0x400) + dx, (sy << 11 | 0x400) + dy);
+        self.world.entity_mut(car).despawn();
+        let Some(p) = self.create_actor(-1, -1, x, y, floor, heading, 0) else {
+            return;
+        };
+        let health = self.world.resource::<PlayerSession>().foot_health;
+        if let Some(mut o) = self.world.get_mut::<Obj>(p) {
+            o.state = State::Player;
+            o.player = Some(0);
+            o.score = score;
+            o.wanted = wanted;
+            o.health = health;
+        }
+        if let Some(mut person) = self.world.get_mut::<crate::sim::people::Person>(p) {
+            person.follows_weapon = true;
+            person.kind = ars.current.person_model();
+        }
+        self.world.entity_mut(p).insert((CameraTarget, ars));
     }
 }

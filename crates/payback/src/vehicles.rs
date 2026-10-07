@@ -485,3 +485,43 @@ pub fn set_controls(world: &mut World, e: Entity, on: bool) {
         v.controls = on;
     }
 }
+
+/// Special objects created by scripts (model >= 1000; table `0x30c3c0`):
+/// barrier, cone, dummy, bullet. (path, mass)
+pub const PROPS: [(&str, i32); 4] = [
+    ("misc/barrier.obj", 50),
+    ("misc/cone.obj", 20),
+    ("misc/dummy.obj", 115),
+    ("weapons/bullet.obj", 1),
+];
+
+/// Spawn a static prop (special object `index`).
+pub fn spawn_prop_world(world: &mut World, index: i32, pos: IVec3, heading: i32) -> Option<Entity> {
+    let (path, mass) = *PROPS.get(usize::try_from(index).ok()?)?;
+    let data = world.resource::<GameData>().clone();
+    let (model, mesh, material) =
+        world.resource_scope(|world, mut library: Mut<ObjectLibrary>| {
+            let mut meshes = world.resource_mut::<Assets<Mesh>>();
+            let model = library.load(&data, &mut meshes, path)?;
+            library.model_mut(model).info.mass = mass;
+            Some((
+                model,
+                library.model(model).mesh.clone(),
+                library.material.clone(),
+            ))
+        })?;
+    let mut obj = Obj::new(crate::sim::Class::Projectile, model, pos, heading);
+    obj.state = State::Barrier;
+    Some(
+        world
+            .spawn((
+                obj,
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::from_translation(to_render(pos.as_vec3()))
+                    .with_rotation(heading_to_render(heading as f32)),
+                LevelEntity,
+            ))
+            .id(),
+    )
+}

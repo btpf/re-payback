@@ -25,6 +25,8 @@ pub enum Order {
     GotoVanish(IVec2),
     /// State 0xd: walk to the player's vehicle and get in; reports 0x0c.
     BoardPlayer,
+    /// State 0x13: walk to actor `0`'s vehicle and get in; reports 0x3d.
+    BoardActor(Entity),
     /// State 0x10/0x11: attack the player (`None`) or an actor.
     Attack { aggro: i32, target: Option<Entity> },
     /// State 0x12: flee from the player.
@@ -209,6 +211,17 @@ pub fn people_orders(
                 if let Ok((_, v)) = player.single() {
                     if (v.pos - obj.pos).truncate().abs().max_element() < 512 {
                         triggers.report_actor(kind::ACTOR_BOARDS_PLAYER, e);
+                        obj.state = State::Removed;
+                        commands.entity(e).despawn();
+                    } else {
+                        *stick = steer_to(&obj, v.pos.truncate(), cap);
+                    }
+                }
+            }
+            Order::BoardActor(target) => {
+                if let Ok(v) = others.get(target) {
+                    if (v.pos - obj.pos).truncate().abs().max_element() < 512 {
+                        triggers.report_actor(kind::ACTOR_BOARDS_ACTOR, e);
                         obj.state = State::Removed;
                         commands.entity(e).despawn();
                     } else {

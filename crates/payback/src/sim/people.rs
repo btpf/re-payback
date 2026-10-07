@@ -870,6 +870,9 @@ fn despawn_far(mut commands: Commands, cam: Res<GameCam>, q: Query<(Entity, &Obj
     let h = cam.window();
     for (e, obj) in &q {
         let sq = IVec2::new(obj.pos.x >> 11, obj.pos.y >> 11);
+        if obj.script_id != -1 {
+            continue;
+        }
         let gone = matches!(
             obj.state,
             State::Wander | State::Parked | State::Dead | State::Flee | State::Removed

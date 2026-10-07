@@ -6,7 +6,9 @@ use super::{ActiveLevel, MissionState};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::hud::HudData;
+use crate::mapedit::{EditOp, MapEdit};
 use crate::objects::SetScenery;
+use crate::sim::combat::Arsenal;
 use crate::sim::people::{Person, PlayerSession};
 use crate::sim::{Obj, State, angle_diff, heading_of};
 use crate::vehicles::Vehicle;
@@ -25,6 +27,10 @@ struct PlayerView {
     vehicle_type: i32,
     money: i32,
     down: bool,
+    /// Selected weapon in the original numbering (`+0x35e`).
+    weapon_id: i32,
+    /// Ammo by HUD slot.
+    ammo: [i32; 8],
 }
 
 struct ActorView {
@@ -42,7 +48,14 @@ fn within(a: IVec3, b: IVec2, r: i32) -> bool {
 
 /// Run the evaluator and dispatch fired events to the level handler.
 pub fn run_triggers(world: &mut World) {
-    if world.resource::<ActiveLevel>().0.is_none() || world.resource::<MissionState>().finished {
+    if world.resource::<ActiveLevel>().0.is_none() {
+        return;
+    }
+    if world.resource::<MissionState>().finished {
+        // `Mission_Shutdown` once the level is over.
+        if let Some(mut level) = world.resource_mut::<ActiveLevel>().0.take() {
+            level.shutdown(&mut Script::new(world));
+        }
         return;
     }
     let Some(player) = player_view(world) else {
@@ -81,9 +94,15 @@ fn dispatch(world: &mut World, ev: i32) {
 
 fn player_view(world: &mut World) -> Option<PlayerView> {
     let session_down = world.resource::<PlayerSession>().respawn_timer > 0;
-    let mut q =
-        world.query_filtered::<(Entity, &Obj, Has<Person>, Option<&Vehicle>), With<CameraTarget>>();
-    let (entity, o, on_foot, veh) = q.iter(world).next()?;
+    let mut q = world.query_filtered::<(
+        Entity,
+        &Obj,
+        Has<Person>,
+        Option<&Vehicle>,
+        Option<&Arsenal>,
+    ), With<CameraTarget>>();
+    let (entity, o, on_foot, veh, ars) = q.iter(world).next()?;
+    let ars = ars.cloned().unwrap_or_default();
     Some(PlayerView {
         entity,
         pos: o.pos,
@@ -94,6 +113,8 @@ fn player_view(world: &mut World) -> Option<PlayerView> {
         vehicle_type: veh.map(|v| v.kind as i32).unwrap_or(-1),
         money: o.score,
         down: session_down || matches!(o.state, State::Dead | State::Removed),
+        weapon_id: ars.current.original_id(),
+        ammo: ars.ammo,
     })
 }
 
@@ -113,7 +134,7 @@ fn actor_view(world: &World, e: Entity) -> Option<ActorView> {
 /// queue their removal.
 fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
     let mut triggers = std::mem::take(&mut world.resource_mut::<Triggers>().list);
-    let reports = std::mem::take(&mut world.resource_mut::<Triggers>().reports);
+    let mut reports = std::mem::take(&mut world.resource_mut::<Triggers>().reports);
     let actor_reports = std::mem::take(&mut world.resource_mut::<Triggers>().actor_reports);
     let city_scenery = |world: &World, x: i32, y: i32, c: i32| -> Option<u8> {
         let city = world.get_resource::<City>()?;
@@ -129,14 +150,24 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
         let actor = t.actor.and_then(|e| actor_view(world, e));
         // Actor gone: most actor triggers silently vanish; "gone/killed"
         // ones fire.
+        // Actor gone: only a reported death fires the "destroyed/killed"
+        // types (0xa653a is called from damage code); removal on arrival or
+        // boarding drops the trigger silently.
         if t.actor.is_some() && actor.is_none() {
-            if matches!(
-                t.kind,
-                kind::ACTOR_GONE
-                    | kind::ACTOR_KILLED
-                    | kind::ACTOR_ATTACKED
-                    | kind::ACTOR_ATTACKED_QUIET
-            ) {
+            let killed = t.actor.is_some_and(|e| {
+                actor_reports
+                    .iter()
+                    .any(|r| r.0 == kind::ACTOR_KILLED && r.1 == e)
+            });
+            if killed
+                && matches!(
+                    t.kind,
+                    kind::ACTOR_GONE
+                        | kind::ACTOR_KILLED
+                        | kind::ACTOR_ATTACKED
+                        | kind::ACTOR_ATTACKED_QUIET
+                )
+            {
                 fired.push((t.event, t.kind));
             }
             stopped.extend(t.sound);
@@ -147,7 +178,7 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
             &mut t,
             p,
             actor.as_ref(),
-            &reports,
+            &mut reports,
             &actor_reports,
             &city_scenery,
         );
@@ -173,7 +204,7 @@ fn condition(
     t: &mut Trigger,
     p: &PlayerView,
     actor: Option<&ActorView>,
-    reports: &[(u8, i32, i32, i32)],
+    reports: &mut Vec<(u8, i32, i32, i32)>,
     actor_reports: &[(u8, Entity)],
     city_scenery: &dyn Fn(&World, i32, i32, i32) -> Option<u8>,
 ) -> bool {
@@ -254,13 +285,31 @@ fn condition(
         PLAYER_Y_LE => p.pos.y <= t.a,
         PLAYER_Y_GT => p.pos.y > t.a,
         WEAPON_FIRED => reports.iter().any(|r| r.0 == WEAPON_FIRED && r.1 == t.a),
-        WEAPON_SELECTED => reports.iter().any(|r| r.0 == WEAPON_SELECTED && r.1 == t.a),
+        WEAPON_SELECTED => p.weapon_id == t.a,
         WEAPON_SWITCHED => reported(WEAPON_SWITCHED),
         SCENERY_GONE | SCENERY_GONE_QUIET => city_scenery(world, t.a, t.b, t.c) == Some(0),
-        OUT_OF_AMMO => reports.iter().any(|r| r.0 == OUT_OF_AMMO && r.1 == t.a),
+        // Weapon slots 1 bazooka, 2 flamethrower, 3 grenade, 4 minigun,
+        // 5 shotgun -> HUD slots.
+        OUT_OF_AMMO => {
+            let slot = match t.a {
+                1 => 6,
+                2 => 3,
+                3 => 4,
+                4 => 5,
+                _ => 2,
+            };
+            p.ammo[slot] <= 0
+        }
         HANDBRAKE => reported(HANDBRAKE),
         ACTOR_KILLED => actor.is_some_and(|a| !a.alive),
-        COP_KILLED => reported(COP_KILLED),
+        // Each cop kill fires only the first matching trigger.
+        COP_KILLED => match reports.iter().position(|r| r.0 == COP_KILLED) {
+            Some(i) => {
+                reports.remove(i);
+                true
+            }
+            None => false,
+        },
         CUBE_SMASHED => reports
             .iter()
             .any(|r| r.0 == CUBE_SMASHED && (r.1, r.2, r.3) == (t.a, t.b, t.c)),
@@ -288,14 +337,17 @@ fn condition(
         ACTOR_GOTO_VANISH | ACTOR_GOTO | ACTOR_GOTO_15 | ACTOR_BOARDS_PLAYER
         | ACTOR_BOARDS_ACTOR => actor_reported(t.kind),
         GARAGE => {
-            p.controlled
+            let centre = IVec2::new(t.a << 11 | 0x400, t.b << 11 | 0x400);
+            garage_door(world, t, within(p.pos, centre, 6 * 0x800));
+            let arrived = p.controlled
                 && !p.on_foot
-                && within(
-                    p.pos,
-                    IVec2::new(t.a << 11 | 0x400, t.b << 11 | 0x400),
-                    1000,
-                )
-                && p.level as i32 == t.c - 1
+                && within(p.pos, centre, 1000)
+                && p.level as i32 == t.c - 1;
+            if arrived {
+                garage_door(world, t, false);
+                Script::new(world).garage_dropoff(t.a, t.b, t.c - 1, t.d);
+            }
+            arrived
         }
         _ => false,
     }
@@ -370,5 +422,61 @@ pub fn flash_phones(
                 }
             }
         }
+    }
+}
+
+/// Open (face type 5, sound 0x16) or close the door face of a garage
+/// trigger's square; the original face type is kept in the trigger's
+/// counter while open.
+fn garage_door(world: &mut World, t: &mut Trigger, open: bool) {
+    let is_open = t.counter != 0;
+    if open == is_open {
+        return;
+    }
+    let (sx, sy, cube) = (t.a, t.b, t.c.clamp(0, 2));
+    if !(0..MAP_SIZE as i32).contains(&sx) || !(0..MAP_SIZE as i32).contains(&sy) {
+        return;
+    }
+    let face = (t.d.clamp(0, 3) + 1) as usize;
+    let current = world
+        .get_resource::<City>()
+        .map(|c| c.map.square(sx as usize, sy as usize).cubes[cube as usize].faces[face]);
+    let Some(current) = current else { return };
+    let kind = if open {
+        t.counter = face_code(current.kind) as i64 + 1;
+        5
+    } else {
+        let k = (t.counter - 1).max(0) as u8;
+        t.counter = 0;
+        k
+    };
+    world.write_message(MapEdit {
+        sx: sx as usize,
+        sy: sy as usize,
+        cube: cube as usize,
+        op: EditOp::Face {
+            face,
+            kind,
+            texture: current.texture,
+            flip: current.flipped,
+        },
+    });
+    let at = Vec3::new(
+        ((sx << 11) | 0x400) as f32,
+        ((sy << 11) | 0x400) as f32,
+        0.0,
+    );
+    world.spawn(Sound::once(id::GARAGE_DOOR, 8e6, 10500.0, SoundPos::At(at)));
+}
+
+fn face_code(f: payback_formats::map::FaceType) -> u8 {
+    use payback_formats::map::FaceType::*;
+    match f {
+        Off => 0,
+        Normal => 1,
+        Genlocked => 2,
+        Alpha => 3,
+        Reflect => 4,
+        Unknown(n) => n,
     }
 }

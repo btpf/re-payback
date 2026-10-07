@@ -117,6 +117,7 @@ fn crimes(
         if !h.by_player {
             continue;
         }
+        triggers.report_actor(kind::ACTOR_ATTACKED, h.victim);
         let Ok((v, is_person, veh, counted)) = victims.get(h.victim) else {
             continue;
         };
