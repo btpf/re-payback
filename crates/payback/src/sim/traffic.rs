@@ -216,8 +216,10 @@ fn spawn_traffic(world: &mut World) {
                 };
                 let top_h = city.square_cubes(sq.x as usize, sq.y as usize)[level].top_at(0.5, 0.5);
                 let pos = centre(sq).extend(z_of_h(top_h) as i32 - 0x200);
-                // The white van's drivers skip the -30.
-                let aggro = if kind == 7 {
+                // Paint (`FUN_01047af4` tail): Shine/Cardef pair `random(8)`;
+                // white vans' drivers skip the -30.
+                let colour = rng.rand(8);
+                let aggro = if kind == 7 && colour == 7 {
                     (rng.rand(90) + aggr * 8).min(99)
                 } else {
                     (rng.rand(90) + aggr * 8 - 30).clamp(0, 99)
@@ -230,14 +232,15 @@ fn spawn_traffic(world: &mut World) {
                     sq + IVec2::new(dx, dy),
                     aggro,
                     level,
+                    colour,
                 ));
                 break;
             }
         }
         spawns
     });
-    for (kind, pos, heading, dir, target, aggro, level) in spawns {
-        if let Some(e) = vehicles::spawn_vehicle_world(world, kind as i32, pos, heading, 0) {
+    for (kind, pos, heading, dir, target, aggro, level, colour) in spawns {
+        if let Some(e) = vehicles::spawn_vehicle_world(world, kind as i32, pos, heading, colour) {
             if let Some(mut o) = world.get_mut::<Obj>(e) {
                 o.state = State::Wander;
                 o.level = level;

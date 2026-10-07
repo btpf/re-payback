@@ -34,6 +34,17 @@ pub fn to_render(p: Vec3) -> Vec3 {
     Vec3::new(p.x / SQUARE, h_of_z(p.z) / H_PER_SQUARE, p.y / SQUARE)
 }
 
+/// Objects and effects are drawn as if 16 h-units nearer the camera than
+/// the city (rendering.md §0: `FUN_01049374` projects them at
+/// `camH*16 - 0x100`), so models whose lowest vertices sit below their origin
+/// (e.g. Mundaneo, Pug: model z up to +20) still clear the road.
+pub const OBJECT_LIFT: f32 = 16.0 / H_PER_SQUARE;
+
+/// [`to_render`] for objects (vehicles, people, projectiles).
+pub fn object_to_render(p: Vec3) -> Vec3 {
+    to_render(p) + Vec3::Y * OBJECT_LIFT
+}
+
 /// Original heading (5760 units/turn, 0 = south, 0x5a0 = east) to a Bevy
 /// rotation about +Y for models whose forward axis is object +y.
 pub fn heading_to_render(heading: f32) -> Quat {

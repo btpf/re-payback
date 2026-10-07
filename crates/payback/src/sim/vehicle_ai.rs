@@ -21,7 +21,7 @@ use crate::level::{AppState, LevelEntity, LevelSpec};
 use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::vehicles::{TYPES, Vehicle, VehicleType, kind as vk};
-use crate::world::{City, to_render};
+use crate::world::{City, object_to_render};
 use bevy::prelude::*;
 use payback_formats::map::MAP_SIZE;
 use payback_formats::route::Route;
@@ -563,7 +563,7 @@ fn tank_cannon(
             },
             Mesh3d(library.model(model).mesh.clone()),
             MeshMaterial3d(library.material.clone()),
-            Transform::from_translation(to_render(pos.as_vec3())),
+            Transform::from_translation(object_to_render(pos.as_vec3())),
             LevelEntity,
         ));
         commands.spawn(Sound::once(

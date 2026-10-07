@@ -15,7 +15,7 @@ use crate::camera::CameraTarget;
 use crate::data::GameData;
 use crate::mission::{Triggers, kind};
 use crate::vehicles::{TYPES, Vehicle, VehicleType, kind as vk};
-use crate::world::{City, heading_to_render, to_render};
+use crate::world::{City, heading_to_render, object_to_render};
 use bevy::prelude::*;
 use payback_formats::map::{self, MAP_SIZE};
 
@@ -451,7 +451,7 @@ fn vehicle_sounds(
 /// Vehicle transforms, with a slight body roll into turns.
 fn sync_vehicles(mut q: Query<(&Obj, &Drive, &mut Transform), With<Vehicle>>) {
     for (obj, d, mut tf) in &mut q {
-        tf.translation = to_render(obj.posf());
+        tf.translation = object_to_render(obj.posf());
         let roll = d.lean as f32 / 256.0 * 0.08;
         tf.rotation = heading_to_render(obj.heading as f32) * Quat::from_rotation_z(roll);
     }

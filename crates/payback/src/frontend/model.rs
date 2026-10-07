@@ -78,7 +78,7 @@ pub fn sync_model(
     mut cache: ResMut<ModelCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<crate::objects::ObjectMaterial>>,
     mut model: Query<(Entity, &mut Mesh3d, &mut Transform), With<MenuModel>>,
 ) {
     let Some(view) = current.0 else {

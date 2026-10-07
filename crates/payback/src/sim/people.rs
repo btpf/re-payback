@@ -11,7 +11,7 @@ use crate::camera::{CameraTarget, GameCam};
 use crate::data::GameData;
 use crate::level::{AppState, LevelEntity, LevelLoaded, StartPoints};
 use crate::objects::{ObjectLibrary, corner_positions};
-use crate::world::{City, heading_to_render, to_render};
+use crate::world::{City, heading_to_render, object_to_render};
 use bevy::{mesh::VertexAttributeValues, prelude::*};
 use payback_formats::map::{self, FaceType, MAP_SIZE, Slope};
 use payback_formats::{Motion, obj::Vertex};
@@ -244,7 +244,7 @@ pub fn spawn_person(
             Stick::default(),
             Mesh3d(mesh),
             MeshMaterial3d(library.material.clone()),
-            Transform::from_translation(to_render(pos.as_vec3())),
+            Transform::from_translation(object_to_render(pos.as_vec3())),
             LevelEntity,
         ))
         .id();
@@ -948,7 +948,7 @@ fn pose_people(
         return;
     };
     for (obj, mut p, mut tf) in &mut q {
-        tf.translation = to_render(obj.posf());
+        tf.translation = object_to_render(obj.posf());
         tf.rotation = heading_to_render(obj.heading as f32);
         let path = p.pose_model.unwrap_or(PEOPLE_MODELS[p.kind]);
         let Some(shown) = library.load(&data, &mut meshes, path) else {

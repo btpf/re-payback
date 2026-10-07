@@ -42,7 +42,7 @@
 use crate::camera::{GameCam, GameCamera};
 use crate::data::GameData;
 use crate::sim::Rng;
-use crate::world::{City, H_PER_SQUARE, SQUARE, to_render, z_of_h};
+use crate::world::{City, SQUARE, to_render, z_of_h};
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
     camera::visibility::NoFrustumCulling,
@@ -71,7 +71,7 @@ const Z_LIMIT: i32 = 24000;
 const BUBBLE_SURFACE_Z: i32 = 23000;
 /// The original projects effects with depth `z + camH·16 − 256`, i.e. as if
 /// 16 h-units nearer the camera; in render units.
-const NEARER: f32 = 16.0 / H_PER_SQUARE;
+const NEARER: f32 = crate::world::OBJECT_LIFT;
 /// Weather and snow-mark depth: the ground plane of the weather records
 /// (`0x57e4`, 22500); rain splashes start at `0x5780`.
 const WEATHER_GROUND_Z: i32 = 0x57e4;

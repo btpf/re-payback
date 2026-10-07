@@ -80,6 +80,7 @@ pub fn load_level(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
+    mut object_materials: ResMut<Assets<objects::ObjectMaterial>>,
     mut scenery: ResMut<SceneryIndex>,
 ) {
     let path = format!("Maps/{}.map", spec.map);
@@ -148,7 +149,7 @@ pub fn load_level(
     let city = City::new(map);
     mapedit::spawn_all_chunks(&mut commands, &mut render, &mut meshes, &city);
     commands.insert_resource(render);
-    let mut library = ObjectLibrary::new(&data, &mut images, &mut materials, city.map.night);
+    let mut library = ObjectLibrary::new(&data, &mut images, &mut object_materials, city.map.night);
     objects::spawn_scenery(
         &mut commands,
         &data,

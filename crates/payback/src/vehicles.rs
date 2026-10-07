@@ -6,7 +6,7 @@ use crate::data::GameData;
 use crate::level::LevelEntity;
 use crate::objects::ObjectLibrary;
 use crate::sim::{Class, Obj, State};
-use crate::world::{heading_to_render, to_render};
+use crate::world::{heading_to_render, object_to_render};
 use bevy::prelude::*;
 
 /// Static data per vehicle type (OS4 loader `FUN_0104e13c`; field offsets
@@ -459,7 +459,7 @@ pub fn spawn_vehicle_world(
                 crate::sim::Stick::default(),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::from_translation(to_render(pos.as_vec3()))
+                Transform::from_translation(object_to_render(pos.as_vec3()))
                     .with_rotation(heading_to_render(heading as f32)),
                 LevelEntity,
             ))
@@ -518,7 +518,7 @@ pub fn spawn_prop_world(world: &mut World, index: i32, pos: IVec3, heading: i32)
                 obj,
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::from_translation(to_render(pos.as_vec3()))
+                Transform::from_translation(object_to_render(pos.as_vec3()))
                     .with_rotation(heading_to_render(heading as f32)),
                 LevelEntity,
             ))

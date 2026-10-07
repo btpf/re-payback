@@ -30,10 +30,14 @@ use crate::sim::{ModelInfo, Obj as SimObj, Rng};
 use crate::vehicles::Vehicle;
 use crate::world::{City, H_PER_SQUARE, heading_to_render, z_of_h};
 use bevy::{
-    asset::RenderAssetUsages,
+    asset::{RenderAssetUsages, embedded_asset},
     image::{ImageSampler, ImageSamplerDescriptor},
+    pbr::{ExtendedMaterial, MaterialExtension},
     prelude::*,
-    render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
+    render::render_resource::{
+        AsBindGroup, Extent3d, PrimitiveTopology, TextureDimension, TextureFormat,
+    },
+    shader::ShaderRef,
 };
 use payback_formats::{IndexedImage, Obj, map::MAP_SIZE, obj::Vertex};
 use std::collections::HashMap;
@@ -85,6 +89,10 @@ const ATLAS_COLS: u32 = 8;
 const ATLAS_ROWS: u32 = 16;
 const ATLAS_W: u32 = TEX_W * ATLAS_COLS;
 const ATLAS_H: u32 = TEX_H * ATLAS_ROWS;
+/// The atlas holds every texture twice: with texel 0 transparent (top
+/// half, for mode 3/4 faces) and opaque (bottom half, everything else; the
+/// renderer only keys colour 0 for mode 3).
+const ATLAS_FULL_H: u32 = 2 * ATLAS_H;
 /// Atlas slot of the flat palette colours (mode 1 faces): colour c is the
 /// 8x16 cell at (c % 32, c / 32).
 const PALETTE_SLOT: u32 = ATLAS_COLS * ATLAS_ROWS - 1;
@@ -93,6 +101,39 @@ const PALETTE_SLOT: u32 = ATLAS_COLS * ATLAS_ROWS - 1;
 const BURNT_FIXED_UV: [(i32, i32); 3] = [(2, 4), (2, 250), (125, 250)];
 /// Lens-flare size of model faces (`DAT_0114c8dc`, default 300).
 const FLARE_SIZE: i32 = 300;
+
+/// Paint colours (`FUN_01047af4`; instance `+0x3c4` Shine, `+0x3c8`
+/// Cardef): faces textured `Shine.All` / `Cardef` are drawn with the
+/// vehicle's pair instead (`FUN_010c101c`). Index 3 pairs purple with orange.
+const PAINTS: [(&str, &str); 8] = [
+    ("shine.black", "cardef.black"),
+    ("shine.blue", "cardef.blue"),
+    ("shine.green", "cardef.green"),
+    ("shine.purple", "cardef.orange"),
+    ("shine.red", "cardef.red"),
+    ("shine.silver", "cardef.silver"),
+    ("shine.yellow", "cardef.yellow"),
+    ("shine.white", "cardef.white"),
+];
+
+/// The object material: unlit atlas texture with environment-mapped faces
+/// (`shaders/objects.wgsl`).
+pub type ObjectMaterial = ExtendedMaterial<StandardMaterial, EnvMapped>;
+
+/// Vertex-shader extension that maps "Shine" faces by their normal.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+pub struct EnvMapped {}
+
+impl MaterialExtension for EnvMapped {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://payback/shaders/objects.wgsl".into()
+    }
+}
+
+/// Environment-map centres (texels, rows) of `FUN_010c101c`: per-vertex
+/// normals for mode & 0x20, the face normal otherwise.
+const ENV_CENTRE_SMOOTH: (f32, f32) = (127.0, 63.0);
+const ENV_CENTRE_FLAT: (f32, f32) = (88.0, 52.0);
 
 /// How a model's faces are textured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,7 +152,7 @@ pub struct ObjectLibrary {
     slots: HashMap<String, u32>,
     /// `General/64->256.dat`: flat-colour `param` -> palette index.
     flat_colours: [u8; 64],
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<ObjectMaterial>,
     by_path: HashMap<String, Option<usize>>,
     models: Vec<LoadedModel>,
 }
@@ -120,10 +161,10 @@ impl ObjectLibrary {
     pub fn new(
         data: &GameData,
         images: &mut Assets<Image>,
-        materials: &mut Assets<StandardMaterial>,
+        materials: &mut Assets<ObjectMaterial>,
         night: bool,
     ) -> ObjectLibrary {
-        let mut rgba = vec![0u8; (ATLAS_W * ATLAS_H * 4) as usize];
+        let mut rgba = vec![0u8; (ATLAS_W * ATLAS_FULL_H * 4) as usize];
         let mut slots = HashMap::new();
         let mut entries: Vec<_> = std::fs::read_dir(data.root.join("ObjectTextures"))
             .map(|d| {
@@ -201,10 +242,17 @@ impl ObjectLibrary {
             Ok(b) if b.len() >= 64 => flat_colours.copy_from_slice(&b[..64]),
             _ => warn!("missing General/64->256.dat"),
         }
+        // Opaque copy in the bottom half.
+        let half = (ATLAS_W * ATLAS_H * 4) as usize;
+        let (keyed, opaque) = rgba.split_at_mut(half);
+        opaque.copy_from_slice(keyed);
+        for px in opaque.chunks_mut(4) {
+            px[3] = 255;
+        }
         let mut atlas = Image::new(
             Extent3d {
                 width: ATLAS_W,
-                height: ATLAS_H,
+                height: ATLAS_FULL_H,
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
@@ -213,13 +261,17 @@ impl ObjectLibrary {
             RenderAssetUsages::RENDER_WORLD,
         );
         atlas.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
-        let material = materials.add(StandardMaterial {
+        let material = materials.add(ExtendedMaterial {
+            base: StandardMaterial {
             base_color_texture: Some(images.add(atlas)),
             unlit: true,
             alpha_mode: AlphaMode::Mask(0.5),
-            double_sided: true,
-            cull_mode: None,
-            ..default()
+            // Faces are one-sided; see `face_sides`.
+            double_sided: false,
+            cull_mode: Some(bevy::render::render_resource::Face::Back),
+                ..default()
+            },
+            extension: EnvMapped::default(),
         });
         ObjectLibrary {
             slots,
@@ -306,9 +358,10 @@ impl ObjectLibrary {
         i: usize,
         skin: Skin,
         dent: Option<&Rng>,
+        paint: Option<usize>,
     ) -> Handle<Mesh> {
-        let key = (skin, dent.is_some());
-        if key == (Skin::Normal, false) {
+        let key = (skin, dent.is_some(), paint);
+        if key == (Skin::Normal, false, None) {
             return self.models[i].mesh.clone();
         }
         if let Some(h) = self.models[i].variants.get(&key) {
@@ -324,7 +377,7 @@ impl ObjectLibrary {
                 None => [0.0; 3],
             })
             .collect();
-        let mesh = self.build_mesh_skin(obj, skin, |v, n| {
+        let mesh = self.build_mesh_skin(obj, skin, paint, |v, n| {
             let [dx, dy, dz] = offsets[n];
             let (sh, sv) = (2.0 / H_PER_SQUARE, 1.0 / H_PER_SQUARE);
             [
@@ -342,16 +395,17 @@ impl ObjectLibrary {
     /// object-local: +X left, +Y up, +Z forward). Vertices are emitted per
     /// face corner, in face order.
     pub fn build_mesh(&self, obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Mesh {
-        self.build_mesh_skin(obj, Skin::Normal, |v, _| place(v))
+        self.build_mesh_skin(obj, Skin::Normal, None, |v, _| place(v))
     }
 
-    /// Atlas UV of texel (u, v in file units) in slot `t`.
-    fn atlas_uv(t: u32, u: i32, v: i32) -> [f32; 2] {
+    /// Atlas UV of texel (u, v in file units) in slot `t`, from the keyed
+    /// (colour 0 transparent) or the opaque half.
+    fn atlas_uv(t: u32, u: i32, v: i32, keyed: bool) -> [f32; 2] {
         let ox = (t % ATLAS_COLS * TEX_W) as f32;
-        let oy = (t / ATLAS_COLS * TEX_H) as f32;
+        let oy = (t / ATLAS_COLS * TEX_H + if keyed { 0 } else { ATLAS_H }) as f32;
         [
             (ox + u as f32 + 0.5) / ATLAS_W as f32,
-            (oy + v as f32 / 2.0 + 0.5) / ATLAS_H as f32,
+            (oy + v as f32 / 2.0 + 0.5) / ATLAS_FULL_H as f32,
         ]
     }
 
@@ -361,44 +415,97 @@ impl ObjectLibrary {
         &self,
         obj: &Obj,
         skin: Skin,
+        paint: Option<usize>,
         place: impl Fn(&Vertex, usize) -> [f32; 3],
     ) -> Mesh {
         let mut positions = Vec::new();
         let mut uvs = Vec::new();
+        let mut env = Vec::new();
+        let mut face_normals = Vec::new();
         let burnt = self.slots.get("burnt").copied();
-        for face in &obj.faces {
-            let slot = face.active_slot();
-            let mode = slot.mode & 0xf;
-            let drawn = face.slots.iter().any(|s| s.active)
-                && (skin == Skin::Normal || matches!(mode, 1 | 2));
-            if !drawn {
+        // Smooth vertex normals: sum of the unit normals of the drawn faces
+        // using the vertex (loader `FUN_010bf8bc`), each facing its visible side.
+        let placed: Vec<Vec3> =
+            obj.vertices.iter().enumerate().map(|(i, v)| Vec3::from(place(v, i))).collect();
+        let mut smooth = vec![Vec3::ZERO; obj.vertices.len()];
+        for (face, side) in face_sides(obj) {
+            if let Some(side) = side {
+                let [a, b, c] = side_order(side).map(|k| face.indices[k]);
+                let n = (placed[b] - placed[a]).cross(placed[c] - placed[a]).normalize_or_zero();
+                for i in [a, b, c] {
+                    smooth[i] += n;
+                }
+            }
+        }
+        for (face, side) in face_sides(obj) {
+            let Some(side) = side else {
                 // Not drawn: a degenerate triangle keeps the layout.
                 let p = place(&obj.vertices[face.indices[0]], face.indices[0]);
                 positions.extend([p; 3]);
                 uvs.extend([[0.0; 2]; 3]);
+                env.extend([[-1.0; 2]; 3]);
+                face_normals.extend([[0.0, 1.0, 0.0]; 3]);
+                continue;
+            };
+            let slot = &face.slots[side];
+            let mode = slot.mode & 0xf;
+            if skin == Skin::Burnt && !matches!(mode, 1 | 2) {
+                let p = place(&obj.vertices[face.indices[0]], face.indices[0]);
+                positions.extend([p; 3]);
+                uvs.extend([[0.0; 2]; 3]);
+                env.extend([[-1.0; 2]; 3]);
+                face_normals.extend([[0.0, 1.0, 0.0]; 3]);
                 continue;
             }
+            let order = side_order(side);
+            let [a, b, c] = order.map(|k| face.indices[k]);
+            let flat = (placed[b] - placed[a]).cross(placed[c] - placed[a]).normalize_or_zero();
+            let shine = skin == Skin::Normal && slot.mode & 0x10 != 0;
+            let smooth_env = slot.mode & 0x20 != 0;
             let tex = match skin {
                 Skin::Burnt => burnt,
-                Skin::Normal => self.slots.get(&slot.texture.to_lowercase()).copied(),
+                Skin::Normal => {
+                    let name = slot.texture.to_lowercase();
+                    let name = match (paint.and_then(|p| PAINTS.get(p)), name.as_str()) {
+                        (Some(&(shine, _)), "shine.all") => shine,
+                        (Some(&(_, cardef)), "cardef") => cardef,
+                        _ => name.as_str(),
+                    };
+                    self.slots.get(name).copied()
+                }
             };
-            for (k, (&vi, &(u, v))) in face.indices.iter().zip(&slot.uv).enumerate() {
+            let keyed = skin == Skin::Normal && matches!(mode, 3 | 4);
+            for k in order {
+                let (vi, (u, v)) = (face.indices[k], slot.uv[k]);
                 positions.push(place(&obj.vertices[vi], vi));
+                let n = if shine && smooth_env { smooth[vi].normalize_or_zero() } else { flat };
+                face_normals.push(n.to_array());
+                env.push(match (shine, tex) {
+                    (true, Some(t)) => {
+                        let (cu, cv) = if smooth_env { ENV_CENTRE_SMOOTH } else { ENV_CENTRE_FLAT };
+                        let ox = (t % ATLAS_COLS * TEX_W) as f32 + cu + 0.5;
+                        let oy = (t / ATLAS_COLS * TEX_H + if keyed { 0 } else { ATLAS_H }) as f32
+                            + cv
+                            + 0.5;
+                        [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
+                    }
+                    _ => [-1.0, -1.0],
+                });
                 uvs.push(match (skin, slot.mode, tex) {
                     (Skin::Burnt, _, Some(t)) if mode == 1 => {
                         let (u, v) = BURNT_FIXED_UV[k];
-                        Self::atlas_uv(t, u, v)
+                        Self::atlas_uv(t, u, v, false)
                     }
                     // Flat colour: the centre of the palette cell.
                     (Skin::Normal, 1, _) => {
                         let c = self.flat_colours[(slot.param & 63) as usize] as u32;
                         let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
                         let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
-                        [ox / ATLAS_W as f32, oy / ATLAS_H as f32]
+                        [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
                     }
-                    (_, _, Some(t)) => Self::atlas_uv(t, u, v),
+                    (_, _, Some(t)) => Self::atlas_uv(t, u, v, keyed),
                     // Unknown/empty texture: sample a corner of slot 0.
-                    (_, _, None) => [0.5 / ATLAS_W as f32, 0.5 / ATLAS_H as f32],
+                    (_, _, None) => [0.5 / ATLAS_W as f32, 0.5 / ATLAS_FULL_H as f32],
                 });
             }
         }
@@ -407,8 +514,9 @@ impl ObjectLibrary {
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.compute_flat_normals();
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, env)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, face_normals);
         mesh
     }
 }
@@ -423,35 +531,65 @@ pub fn static_vertex(p: &Vertex) -> [f32; 3] {
 
 /// Positions in the order `build_mesh` emits them, for re-posing a mesh.
 pub fn corner_positions(obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Vec<[f32; 3]> {
-    let place = &place;
-    obj.faces
-        .iter()
-        .flat_map(|f| {
-            let drawn = f.slots.iter().any(|s| s.active);
-            f.indices.iter().map(move |&vi| {
-                let vi = if drawn { vi } else { f.indices[0] };
-                place(&obj.vertices[vi])
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    for (f, side) in face_sides(obj) {
+        match side {
+            Some(side) => out.extend(side_order(side).map(|k| place(&obj.vertices[f.indices[k]]))),
+            None => out.extend([place(&obj.vertices[f.indices[0]]); 3]),
+        }
+    }
+    out
+}
+
+/// The triangles a model is drawn with: one per active slot (`None` for a
+/// face with no active slot, kept as a degenerate triangle). The renderer
+/// draws slot 0 when the face winds one way on screen and slot 1 when it
+/// winds the other (`FUN_010c101c`), so each slot is a one-sided triangle
+/// and slot 1 faces the opposite way.
+fn face_sides(obj: &Obj) -> impl Iterator<Item = (&payback_formats::obj::Face, Option<usize>)> {
+    obj.faces.iter().flat_map(|f| {
+        let sides: Vec<Option<usize>> = match (f.slots[0].active, f.slots[1].active) {
+            (false, false) => vec![None],
+            (a, b) => [(a, 0), (b, 1)].into_iter().filter(|s| s.0).map(|s| Some(s.1)).collect(),
+        };
+        sides.into_iter().map(move |s| (f, s))
+    })
+}
+
+/// Corner order of a slot's triangle (slot 1 reversed).
+fn side_order(side: usize) -> [usize; 3] {
+    if side == 0 { [0, 1, 2] } else { [0, 2, 1] }
 }
 
 /// A lens-flare face: mode 6 in slot 0 (`FUN_010c101c` calls
 /// `AddFlare(vertex 0, DAT_0114c8dc, param << 16)`).
 #[derive(Clone, Copy, Debug)]
 pub struct FlareFace {
+    /// Index of the face's first triangle in the mesh.
     pub face: usize,
     pub vertex: usize,
     pub table: u8,
 }
 
 fn flare_faces(obj: &Obj) -> Vec<FlareFace> {
+    // First emitted triangle of each face; its corner 0 is the face's vertex 0.
+    let mut first = vec![0; obj.faces.len()];
+    let mut seen = 0;
+    let mut tri = 0;
+    for (f, _) in face_sides(obj) {
+        let i = obj.faces.iter().position(|g| std::ptr::eq(g, f)).unwrap_or(0);
+        if i >= seen {
+            first[i] = tri;
+            seen = i + 1;
+        }
+        tri += 1;
+    }
     obj.faces
         .iter()
         .enumerate()
         .filter(|(_, f)| f.slots[0].mode == 6)
         .map(|(i, f)| FlareFace {
-            face: i,
+            face: first[i],
             vertex: f.indices[0],
             table: f.slots[0].param.clamp(0, 255) as u8,
         })
@@ -464,8 +602,8 @@ pub struct LoadedModel {
     pub info: ModelInfo,
     /// Lens-flare faces.
     pub flares: Vec<FlareFace>,
-    /// Burnt / dented meshes, by (skin, dented).
-    variants: HashMap<(Skin, bool), Handle<Mesh>>,
+    /// Burnt / dented / painted meshes, by (skin, dented, paint).
+    variants: HashMap<(Skin, bool, Option<usize>), Handle<Mesh>>,
 }
 
 /// AmigaOS paths are case-insensitive; the extracted files keep the CD's case.
@@ -506,7 +644,9 @@ pub struct SceneryPlugin;
 
 impl Plugin for SceneryPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SceneryIndex>()
+        embedded_asset!(app, "shaders/objects.wgsl");
+        app.add_plugins(MaterialPlugin::<ObjectMaterial>::default())
+            .init_resource::<SceneryIndex>()
             .init_resource::<SceneryClock>()
             .add_message::<SetScenery>()
             .add_systems(FixedPostUpdate, apply_scenery_changes)
@@ -688,12 +828,13 @@ fn chimney_smoke(
 
 /// Vehicles show the burnt skin from ignition on (the burn timer stays at
 /// 15 once the fire is out) and the dented mesh after a hard hit.
-/// `--damaged [burnt]` forces them, for visual checks.
+/// `--damaged [burnt|clean]` forces them (`clean`: just park the cars),
+/// for visual checks.
 fn vehicle_skins(
     library: Option<ResMut<ObjectLibrary>>,
     rng: Option<Res<Rng>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut q: Query<(&SimObj, Option<&Drive>, &mut Mesh3d), With<Vehicle>>,
+    mut q: Query<(&SimObj, &Vehicle, Option<&Drive>, &mut Mesh3d)>,
 ) {
     let (Some(mut library), Some(rng)) = (library, rng) else {
         return;
@@ -702,15 +843,13 @@ fn vehicle_skins(
     let forced = std::env::args()
         .any(|a| a == "--damaged")
         .then(|| crate::arg("--damaged").unwrap_or_default());
-    for (obj, drive, mut mesh) in &mut q {
+    for (obj, vehicle, drive, mut mesh) in &mut q {
+        let paint = usize::try_from(vehicle.colour).ok().filter(|&c| c < PAINTS.len());
         let burnt = obj.burn > 0 || forced.as_deref() == Some("burnt");
         let skin = if burnt { Skin::Burnt } else { Skin::Normal };
-        let dented = drive.is_some_and(|d| d.dented) || forced.is_some();
+        let dented = drive.is_some_and(|d| d.dented) || forced.as_deref().is_some_and(|f| f != "clean");
         let dent = dented.then_some(&*rng);
-        if skin == Skin::Normal && dent.is_none() && mesh.0 == library.model(obj.model).mesh {
-            continue;
-        }
-        let h = library.variant_mesh(&mut meshes, obj.model, skin, dent);
+        let h = library.variant_mesh(&mut meshes, obj.model, skin, dent, paint);
         if mesh.0 != h {
             mesh.0 = h;
         }
@@ -924,7 +1063,8 @@ fn spawn_damage_check(world: &mut World, mut done: Local<bool>) {
     *done = true;
     for (i, kind) in [0usize, 12].into_iter().enumerate() {
         let at = pos + IVec3::new(700 + 900 * i as i32, 0, 0);
-        crate::vehicles::spawn_vehicle_world(world, kind as i32, at, 0, 0);
+        // Red and blue paint.
+        crate::vehicles::spawn_vehicle_world(world, kind as i32, at, 0, [4, 1][i]);
     }
 }
 

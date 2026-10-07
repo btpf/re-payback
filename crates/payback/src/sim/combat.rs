@@ -14,7 +14,7 @@ use crate::hud::{Banner, Texts};
 use crate::level::LevelEntity;
 use crate::mission::{MissionState, Triggers, kind};
 use crate::objects::{ObjectLibrary, SetScenery};
-use crate::world::{City, heading_to_render, to_render};
+use crate::world::{City, heading_to_render, object_to_render};
 use bevy::{math::I64Vec3, prelude::*};
 use payback_formats::map::MAP_SIZE;
 
@@ -307,7 +307,7 @@ fn spawn_projectile(
                 },
                 Mesh3d(mesh),
                 MeshMaterial3d(library.material.clone()),
-                Transform::from_translation(to_render(pos.as_vec3())),
+                Transform::from_translation(object_to_render(pos.as_vec3())),
                 LevelEntity,
             ))
             .id(),
@@ -1276,7 +1276,7 @@ fn respawn_pickups(
 
 fn sync_projectiles(mut q: Query<(&Obj, &mut Transform), With<Projectile>>) {
     for (o, mut tf) in &mut q {
-        tf.translation = to_render(o.posf());
+        tf.translation = object_to_render(o.posf());
         tf.rotation = heading_to_render(o.heading as f32);
     }
 }
