@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/payback-formats", "crates/payback"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+# Bevy is slow in debug builds; optimise dependencies but keep our code debuggable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

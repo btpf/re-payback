@@ -1,0 +1,9 @@
+[package]
+name = "payback-formats"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Parsers for the original Amiga Payback data files"
+
+[dependencies]
+thiserror = "2"
