@@ -17,6 +17,8 @@
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
 //! | `cd_mode` | CD playback 0 off, 1 radio, 2 continuous, 3 disabled |
+//! | `police` | Rampage police aggressiveness 0..5 (`DAT_0114c2ec`) |
+//! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`) |
 //! | `key.<action>` | Bevy `KeyCode` name per action (phrases 2457–2467) |
 
 use bevy::prelude::*;
@@ -206,6 +208,10 @@ pub struct Settings {
     pub gouraud: bool,
     pub rotating_view: bool,
     pub cd_mode: u8,
+    /// Rampage police aggressiveness 0..5 (config field 13).
+    pub police: u8,
+    /// Rampage city (config field 11).
+    pub rampage_city: u8,
     pub keys: [String; 11],
 }
 
@@ -219,6 +225,8 @@ impl Default for Settings {
             gouraud: true,
             rotating_view: false,
             cd_mode: 3,
+            police: 2,
+            rampage_city: 0,
             keys: DEFAULT_KEYS.map(String::from),
         }
     }
@@ -252,6 +260,8 @@ impl Settings {
                 "gouraud" => s.gouraud = v == "1",
                 "rotating_view" => s.rotating_view = v == "1",
                 "cd_mode" => s.cd_mode = num(3).unwrap_or(s.cd_mode),
+                "police" => s.police = num(5).unwrap_or(s.police),
+                "city" => s.rampage_city = num(2).unwrap_or(s.rampage_city),
                 _ => {
                     if let Some(a) = k.strip_prefix("key.") {
                         if let Some(i) = ACTIONS.iter().position(|x| *x == a) {
@@ -274,6 +284,8 @@ impl Settings {
         t += &format!("gouraud = {}\n", b(self.gouraud));
         t += &format!("rotating_view = {}\n", b(self.rotating_view));
         t += &format!("cd_mode = {}\n", self.cd_mode);
+        t += &format!("police = {}\n", self.police);
+        t += &format!("city = {}\n", self.rampage_city);
         for (a, k) in ACTIONS.iter().zip(&self.keys) {
             t += &format!("key.{a} = {k}\n");
         }

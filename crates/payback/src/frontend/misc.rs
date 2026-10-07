@@ -1,8 +1,7 @@
 //! Sub-screens: text entry (`FUN_01012e38`), message box (`FUN_0101dc60`),
-//! load/save (`FUN_0101f1a4` / `FUN_0101f738`), replay list
-//! (`FUN_0101fdcc`), credits (`FUN_010206bc`), language chooser
+//! load/save (`FUN_0101f1a4` / `FUN_0101f738`), credits (`FUN_010206bc`), language chooser
 //! (`FUN_0101267c`), control setup (`FUN_0102e75c`) and CD audio setup
-//! (`FUN_0102dd30`).
+//! (`FUN_0102dd30`). The replay list is in `replays.rs`.
 
 use super::progress::{self, Profile, SLOTS};
 use super::ui::*;
@@ -246,77 +245,6 @@ impl Screen for SaveGame {
         ui.picture(0, true);
         ui.title(&cx.g(2089));
         draw_slots(ui, cx, &self.names, self.sel);
-    }
-}
-
-/// "SELECT REPLAY": the files in `Replays/`. The shipped replays are
-/// version 3, which this version of the game rejects with "WRONG VERSION
-/// NUMBER" (0x3F2 expected); replay playback is not implemented.
-pub struct ReplayList {
-    files: Vec<(String, Option<u32>)>,
-    sel: usize,
-    top: usize,
-}
-
-impl ReplayList {
-    pub fn new(cx: &Ctx) -> ReplayList {
-        let mut files: Vec<(String, Option<u32>)> = std::fs::read_dir(cx.data.root.join("Replays"))
-            .map(|d| {
-                d.flatten()
-                    .filter(|e| e.path().is_file())
-                    .map(|e| {
-                        let version = std::fs::read(e.path())
-                            .ok()
-                            .filter(|b| b.len() >= 4)
-                            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-                        (e.file_name().to_string_lossy().into_owned(), version)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        files.sort();
-        ReplayList { files, sel: 0, top: 0 }
-    }
-}
-
-impl Screen for ReplayList {
-    fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
-        let n = self.files.len() + 1;
-        pick(&mut self.sel, n, cx, input);
-        self.top = self.top.min(self.sel).max(self.sel.saturating_sub(13));
-        if input.back || (input.fire && self.sel == n - 1) {
-            cx.sound(Sfx::Select);
-            return Step::Pop(Outcome::Cancel);
-        }
-        if !input.fire {
-            return Step::Stay;
-        }
-        match self.files[self.sel].1 {
-            None => {
-                cx.sound(Sfx::Refuse);
-                Step::Push(Box::new(Message::new(cx.g(2115))))
-            }
-            Some(v) if v != 0x3f2 => {
-                cx.sound(Sfx::Refuse);
-                Step::Push(Box::new(Message::new(cx.g(2116))))
-            }
-            Some(_) => {
-                cx.sound(Sfx::Refuse);
-                Step::Stay
-            }
-        }
-    }
-
-    fn draw(&self, ui: &mut Ui, cx: &Ctx) {
-        ui.picture(0, true);
-        ui.title(&cx.g(2113));
-        let n = self.files.len();
-        for (row, i) in (self.top..n).take(14).enumerate() {
-            let c = if i == self.sel { ui.flash() } else { 2 };
-            ui.centred(&self.files[i].0, 0x20 + 14 * row as i32, c);
-        }
-        let c = if self.sel == n { ui.flash() } else { 2 };
-        ui.centred(&cx.g(2114), 0xeb, c);
     }
 }
 

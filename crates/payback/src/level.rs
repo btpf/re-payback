@@ -18,6 +18,27 @@ pub struct LevelSpec {
     pub level: u8,
 }
 
+/// How the level is played: a story level with its mission script, or
+/// single-player Rampage (`DAT_0114c7c6 = 1`, set by the game menu's
+/// "Single player rampage", `FUN_0102a428`): no level script, police
+/// aggressiveness from the setup screen (`DAT_0114c2ec`), score kept for
+/// the high-score table.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GameMode {
+    #[default]
+    Story,
+    Rampage {
+        /// Police aggressiveness 0..5 (phrases 2491..2496).
+        police: u8,
+    },
+}
+
+impl GameMode {
+    pub fn is_rampage(&self) -> bool {
+        matches!(self, GameMode::Rampage { .. })
+    }
+}
+
 /// Start positions (original units: x, y, z-down) from squares with no
 /// scenery and flags exactly 0x20, per LoadMap (OS4 `FUN_01079300`):
 /// special 1 squares form a list of up to 100 (multiplayer starts,
@@ -53,6 +74,7 @@ pub struct LevelPlugin;
 impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
+            .init_resource::<GameMode>()
             .add_systems(OnEnter(AppState::Playing), load_level.before(LevelLoaded))
             .add_systems(OnExit(AppState::Playing), unload_level);
     }

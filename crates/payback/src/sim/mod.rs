@@ -115,8 +115,16 @@ impl Rng {
         self.table[i & 0xffff] * n >> 9
     }
 
+    /// Restart the sequence at table index `s`. The table is fixed, so the
+    /// index is the whole generator state: replays store it as their
+    /// random seed and restore it at level start.
     pub fn seed(&mut self, s: u16) {
         self.idx = s as usize;
+    }
+
+    /// Current table index (the value [`Rng::seed`] restores).
+    pub fn index(&self) -> u16 {
+        self.idx as u16
     }
 }
 

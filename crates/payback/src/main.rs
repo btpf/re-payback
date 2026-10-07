@@ -1,7 +1,10 @@
 //! Payback reimplementation (Bevy).
 //!
 //! Usage: `payback [--data <dir>] [--map <n>] [--level <0|1>] [--free]
-//!                 [--screenshot <out.png>]`
+//!                 [--rampage <police 0..5>] [--screenshot <out.png>]
+//!                 [--record <file> | --play <file>] [--ticks <n>]`
+//!
+//! `--record`/`--play` are the replay determinism check (see `replay.rs`).
 //!
 //! Controls: arrows/WASD move the player. F2 toggles the free camera
 //! (WASD pan, Q/E rotate, R/F tilt, wheel or Z/X zoom).
@@ -18,6 +21,8 @@ mod level;
 mod mapedit;
 mod mission;
 mod objects;
+mod rampage;
+mod replay;
 mod sim;
 mod vehicles;
 mod water;
@@ -75,11 +80,12 @@ fn main() -> AppExit {
             frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
+            (rampage::RampagePlugin, replay::ReplayPlugin),
         ))
                 .add_systems(Update, screenshot_and_exit)
         // `--map` starts a level directly; otherwise the menus come first.
         .add_systems(Startup, |mut next: ResMut<NextState<level::AppState>>| {
-            if arg("--map").is_some() {
+            if arg("--map").is_some() || arg("--play").is_some() {
                 next.set(level::AppState::Playing);
             }
         })

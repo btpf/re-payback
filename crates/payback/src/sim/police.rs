@@ -8,7 +8,7 @@ use super::{Obj, Rng, State, Stick, Trig, angle_diff, heading_of};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::hud::{BigTitle, Dialog, Speaker, Texts, Voice};
-use crate::level::{AppState, LevelSpec};
+use crate::level::{AppState, GameMode, LevelSpec};
 use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::vehicles::Vehicle;
@@ -68,16 +68,19 @@ impl Plugin for PolicePlugin {
         app.add_message::<Hurt>()
             .init_resource::<WantedTimer>()
             .init_resource::<Crimes>()
-            .add_systems(OnEnter(AppState::Playing), |mut commands: Commands, spec: Res<LevelSpec>| {
-                let city: i32 = spec.map.parse().unwrap_or(-1);
-                let aggr = if (0..3).contains(&city) {
-                    city * 2 + spec.level as i32
-                } else {
-                    2
-                };
-                commands.insert_resource(Aggressiveness(aggr));
-            })
-                        .add_systems(OnExit(AppState::Playing), reset_police)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                |mut commands: Commands, spec: Res<LevelSpec>, mode: Res<GameMode>| {
+                    let city: i32 = spec.map.parse().unwrap_or(-1);
+                    let aggr = match *mode {
+                        GameMode::Rampage { police } => police.min(5) as i32,
+                        _ if (0..3).contains(&city) => city * 2 + spec.level as i32,
+                        _ => 2,
+                    };
+                    commands.insert_resource(Aggressiveness(aggr));
+                },
+            )
+            .add_systems(OnExit(AppState::Playing), reset_police)
             .add_systems(
                 FixedUpdate,
                 (crimes, decay_wanted)

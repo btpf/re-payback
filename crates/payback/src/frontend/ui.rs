@@ -10,6 +10,7 @@ use crate::data::GameData;
 use crate::hud::icons::{HudIcons, Icon};
 use crate::hud::paint::{Blend, CANVAS_H, Painter, text_len};
 use crate::hud::{Language, Texts};
+use payback_formats::replay::Replay;
 
 /// Menu ticks per second (the OS4 build's 30 Hz frame tick).
 pub const MENU_HZ: f64 = 30.0;
@@ -61,6 +62,10 @@ impl Sfx {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     StartLevel { city: u8, level: u8 },
+    /// Rampage on `city` with police aggressiveness 0..5.
+    StartRampage { city: u8, police: u8 },
+    /// Play a replay; afterwards return to the game menu or the main menu.
+    PlayReplay { replay: Box<Replay>, back_to_game: bool },
     Exit,
     PlayIntro,
     /// Leave the pause menu.
@@ -75,6 +80,10 @@ pub enum Outcome {
     Cancel,
     Done,
     Level(u8, u8),
+    /// Rampage setup "Play": city, police aggressiveness.
+    Rampage(u8, u8),
+    /// Replay info "View Replay".
+    Replay(Box<Replay>),
     Text(String),
 }
 
@@ -97,6 +106,8 @@ pub struct Ctx<'a> {
     /// Pause menu: the level's money goal (<= 0 = escape) and ticks.
     pub goal: i32,
     pub level_ticks: u32,
+    /// The last game played (game menu "View replay" / "Save replay").
+    pub last_replay: Option<&'a Replay>,
     pub sfx: Vec<Sfx>,
     pub requests: Vec<Request>,
 }
@@ -324,6 +335,34 @@ impl Ui<'_> {
                     y - size / 2 + dy,
                     [pal[c * 3], pal[c * 3 + 1], pal[c * 3 + 2]],
                 );
+            }
+        }
+    }
+}
+
+impl Ui<'_> {
+    /// A palette picture on a square of corner radius `r` centred at
+    /// (x, y), rotated by `angle` (`FUN_010c3e10(tex, x, y, r, angle)`:
+    /// corners at `angle + k·0x5a0`).
+    pub fn rotated(&mut self, pic: &Picture, x: i32, y: i32, r: i32, angle: i32) {
+        let a = angle as f32 * std::f32::consts::TAU / TURN as f32;
+        // Corner k sits at angle a + k·90°, so the edges are at a ± 45°.
+        let (s, c) = (a - std::f32::consts::FRAC_PI_4).sin_cos();
+        let half = r as f32 / std::f32::consts::SQRT_2;
+        let pal = self.front.pal;
+        for py in y - r..=y + r {
+            for px in x - r..=x + r {
+                let (dx, dy) = ((px - x) as f32, (py - y) as f32);
+                // Into the square's own axes, -half..half.
+                let u = dx * c + dy * s;
+                let v = -dx * s + dy * c;
+                if u.abs() >= half || v.abs() >= half {
+                    continue;
+                }
+                let sx = ((u + half) / (2.0 * half) * pic.w as f32) as usize;
+                let sy = ((v + half) / (2.0 * half) * pic.h as f32) as usize;
+                let col = pic.px[sy.min(pic.h - 1) * pic.w + sx.min(pic.w - 1)] as usize;
+                self.front.put_rgb(px, py, [pal[col * 3], pal[col * 3 + 1], pal[col * 3 + 2]]);
             }
         }
     }

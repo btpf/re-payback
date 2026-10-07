@@ -2,7 +2,9 @@
 //! pause menu (`FUN_0101a7dc`).
 
 use super::levels::LevelSelect;
-use super::misc::{CdSetup, ControlSetup, Credits, LanguageChooser, LoadGame, ReplayList, SaveGame, TextEntry};
+use super::misc::{CdSetup, ControlSetup, Credits, LanguageChooser, LoadGame, Message, SaveGame, TextEntry};
+use super::rampage::RampageSetup;
+use super::replays::{ReplayInfo, ReplayList};
 use super::progress::Profile;
 use super::ui::*;
 
@@ -204,6 +206,19 @@ impl Screen for MainMenu {
                 self.leave(Request::StartLevel { city, level });
                 Step::Stay
             }
+            (Waiting::Game, Outcome::Rampage(city, police)) => {
+                self.leave(Request::StartRampage { city, police });
+                Step::Stay
+            }
+            // "View replay" in the game menu (-2 from `FUN_0102ca08`) or
+            // "View saved replay" here.
+            (w @ (Waiting::Game | Waiting::None), Outcome::Replay(replay)) => {
+                self.leave(Request::PlayReplay {
+                    replay,
+                    back_to_game: w == Waiting::Game,
+                });
+                Step::Stay
+            }
             _ => Step::Stay,
         }
     }
@@ -232,10 +247,23 @@ impl Screen for MainMenu {
     }
 }
 
+/// What the game menu is waiting for from a pushed screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GameWait {
+    None,
+    /// High-score name for (city, police, score).
+    ScoreName(usize, u8, i32),
+    ReplayName,
+}
+
 pub struct GameMenu {
     sel: usize,
     obj: OptionObj,
     confirm: Option<Confirm>,
+    /// Rampage just ended: (city, police, score) to check against the
+    /// table before anything else.
+    high_score: Option<(usize, u8, i32)>,
+    wait: GameWait,
 }
 
 impl GameMenu {
@@ -244,6 +272,18 @@ impl GameMenu {
             sel: 0,
             obj: OptionObj::new(MAIN_MODELS[0], 600, 6000),
             confirm: None,
+            high_score: None,
+            wait: GameWait::None,
+        }
+    }
+
+    /// Back from a Rampage: the high-score entry runs first
+    /// (`FUN_0102ca08` with `DAT_0114c7c4` set: the score `DAT_0114c420`
+    /// beats the 5th entry of the aggressiveness's table).
+    pub fn after_rampage(city: usize, police: u8, score: i32) -> GameMenu {
+        GameMenu {
+            high_score: Some((city, police, score)),
+            ..GameMenu::new()
         }
     }
 
@@ -267,10 +307,33 @@ impl GameMenu {
             i => 2093 + i as u32,
         }
     }
+
+    /// The replay items need a game played since start/load (p3).
+    fn has_replay(cx: &Ctx) -> bool {
+        cx.profile.played && cx.last_replay.is_some()
+    }
+}
+
+/// A replay file name from the text entry: no path separators or `:`, no
+/// trailing dots or spaces (not allowed on Windows).
+fn replay_file_name(name: &str) -> Option<String> {
+    let s: String = name
+        .chars()
+        .map(|c| if matches!(c, ':' | '/' | '\\') { '_' } else { c })
+        .collect();
+    let s = s.trim_end_matches(['.', ' ']).trim_start().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 impl Screen for GameMenu {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
+        if let Some((city, police, score)) = self.high_score.take() {
+            if crate::rampage::load_scores(cx.data, city).rank(police as usize, score).is_some() {
+                self.wait = GameWait::ScoreName(city, police, score);
+                let name = cx.profile.name.clone();
+                return Step::Push(Box::new(TextEntry::new(cx.g(1611), &name, 25)));
+            }
+        }
         if self.sel == 0 && self.obj.view.path != Self::model_of(0, cx.profile) && self.obj.view.pos[0] == 0 {
             self.obj.view.path = Self::model_of(0, cx.profile);
         }
@@ -288,8 +351,7 @@ impl Screen for GameMenu {
             let d: i32 = if input.right { 1 } else { -1 };
             loop {
                 self.sel = (self.sel as i32 + d).rem_euclid(7) as usize;
-                // Replay items need a game played since start/load.
-                if cx.profile.played || !(4..=5).contains(&self.sel) {
+                if Self::has_replay(cx) || !(4..=5).contains(&self.sel) {
                     break;
                 }
             }
@@ -310,16 +372,32 @@ impl Screen for GameMenu {
                 cx.sound(Sfx::Select);
                 Step::Push(Box::new(LevelSelect::new(cx.profile)))
             }
+            2 => {
+                cx.sound(Sfx::Select);
+                Step::Push(Box::new(RampageSetup::new(cx)))
+            }
             3 => {
                 cx.sound(Sfx::Select);
                 Step::Push(Box::new(SaveGame::new()))
+            }
+            4 if Self::has_replay(cx) => {
+                cx.sound(Sfx::Select);
+                let r = cx.last_replay.cloned().expect("checked by has_replay");
+                Step::Push(Box::new(ReplayInfo::new(r, None)))
+            }
+            5 if Self::has_replay(cx) => {
+                // "ENTER FILENAME", default "<name> - ".
+                cx.sound(Sfx::Select);
+                self.wait = GameWait::ReplayName;
+                let default = format!("{} - ", cx.profile.name);
+                Step::Push(Box::new(TextEntry::new(cx.g(2084), &default, 30)))
             }
             6 => {
                 cx.sound(Sfx::Select);
                 self.confirm = Some(Confirm::default());
                 Step::Stay
             }
-            // Multiplayer, rampage and replays are not implemented.
+            // Multiplayer is not implemented.
             _ => {
                 cx.sound(Sfx::Refuse);
                 Step::Stay
@@ -327,9 +405,41 @@ impl Screen for GameMenu {
         }
     }
 
-    fn resume(&mut self, _cx: &mut Ctx, outcome: Outcome) -> Step {
-        match outcome {
-            Outcome::Level(c, l) => Step::Pop(Outcome::Level(c, l)),
+    fn resume(&mut self, cx: &mut Ctx, outcome: Outcome) -> Step {
+        let wait = std::mem::replace(&mut self.wait, GameWait::None);
+        match (wait, outcome) {
+            (GameWait::ScoreName(city, police, score), o) => {
+                // The original keeps whatever is in the buffer, even on Esc.
+                let name = match o {
+                    Outcome::Text(n) => n,
+                    _ => cx.profile.name.clone(),
+                };
+                let mut table = crate::rampage::load_scores(cx.data, city);
+                if table.insert(police as usize, &name, score).is_some() {
+                    crate::rampage::save_scores(city, &table);
+                }
+                Step::Stay
+            }
+            (GameWait::ReplayName, Outcome::Text(name)) => {
+                // `FUN_010bc3b0`, then "REPLAY SAVED!".
+                let (Some(file), Some(r)) = (replay_file_name(&name), cx.last_replay) else {
+                    cx.sound(Sfx::Refuse);
+                    return Step::Stay;
+                };
+                let dir = crate::replay::saves_dir();
+                let res = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&file), r.write()));
+                match res {
+                    Ok(()) => Step::Push(Box::new(Message::new(cx.g(2117)))),
+                    Err(e) => {
+                        bevy::log::warn!("saving replay {file}: {e}");
+                        cx.sound(Sfx::Refuse);
+                        Step::Stay
+                    }
+                }
+            }
+            (_, Outcome::Level(c, l)) => Step::Pop(Outcome::Level(c, l)),
+            (_, Outcome::Rampage(c, p)) => Step::Pop(Outcome::Rampage(c, p)),
+            (_, Outcome::Replay(r)) => Step::Pop(Outcome::Replay(r)),
             _ => Step::Stay,
         }
     }
@@ -528,5 +638,14 @@ impl Screen for PauseMenu {
             v.rot = [self.person, 200, 0];
         }
         Some(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn replay_names() {
+        assert_eq!(super::replay_file_name("Travis - 12:30. ").as_deref(), Some("Travis - 12_30"));
+        assert_eq!(super::replay_file_name(" ..").as_deref(), None);
     }
 }

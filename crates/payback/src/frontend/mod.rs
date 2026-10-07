@@ -11,7 +11,9 @@
 //!
 //! Debug: `--frontend-screen <name>` opens a screen directly (main, game,
 //! levelselect, complete, gameover, gamecomplete, name, load, save,
-//! replays, credits, language, controls, cd; `loading` starts level 0.0
+//! replays, credits, language, controls, cd, rampage, highscore,
+//! replayinfo (with `--replay-file <name in Saves/Replays>`); `loading`
+//! starts level 0.0
 //! through the loading panel; with `--map`, `pause` opens the pause menu
 //! after 3 s and `levelend` completes the level at once).
 
@@ -21,6 +23,8 @@ mod menus;
 mod misc;
 mod model;
 pub mod progress;
+mod rampage;
+mod replays;
 pub mod ui;
 
 use crate::audio::{FxVolume, Sound, SoundPos};
@@ -29,7 +33,10 @@ use crate::data::GameData;
 use crate::hud::icons::HudIcons;
 use crate::hud::paint::{CANVAS_H, Painter, blank, canvas_width};
 use crate::hud::{Language, Texts};
-use crate::level::{AppState, LevelSpec};
+use crate::level::{AppState, GameMode, LevelSpec};
+use crate::rampage::ScoreHighWater;
+use crate::replay::{LastReplay, PlayRequest, ReplayState};
+use payback_formats::replay::Replay;
 use crate::mission::{LevelClock, LevelOutcome, MissionState};
 use assets::FrontendIcons;
 use bevy::{
@@ -61,8 +68,9 @@ struct Frontend {
     pending: Input,
     /// Waiting for the intro to finish before the menus start.
     wait_intro: bool,
-    /// Level to load once the loading panel has been shown.
-    loading: Option<(u8, u8, u32)>,
+    /// Level to load once the loading panel has been shown, and the
+    /// frames it has been up.
+    loading: Option<(Launch, u32)>,
     /// `--frontend-screen pause` has been opened.
     debug_paused: bool,
     /// Build the menu stack on the next update.
@@ -85,12 +93,46 @@ struct Layers {
 #[derive(Component)]
 struct LayerNode;
 
+/// What to start once the loading panel is up.
+#[derive(Clone)]
+struct Launch {
+    spec: LevelSpec,
+    mode: GameMode,
+    replay: Option<Replay>,
+    /// After a replay, back to the game menu (else the main menu).
+    back_to_game: bool,
+}
+
+impl Launch {
+    fn story(city: u8, level: u8) -> Launch {
+        Launch {
+            spec: LevelSpec {
+                map: city.to_string(),
+                level,
+            },
+            mode: GameMode::Story,
+            replay: None,
+            back_to_game: false,
+        }
+    }
+}
+
+/// Where the menus pick up after a replay.
+#[derive(Resource, Clone, Copy, Default)]
+struct ReplayReturn {
+    back_to_game: bool,
+}
+
 /// How the last level ended, for the result screen.
 #[derive(Resource, Clone, Copy, Debug)]
 struct LevelResult {
-    outcome: LevelOutcome,
+    /// None: a replay finished or was stopped.
+    outcome: Option<LevelOutcome>,
     minutes: i32,
     city: Option<(usize, usize)>,
+    /// Rampage: (city, police aggressiveness, score `DAT_0114c420`).
+    rampage: Option<(usize, u8, i32)>,
+    back_to_game: bool,
 }
 
 /// Outcome seen, waiting for [`END_DELAY`].
@@ -112,6 +154,7 @@ impl Plugin for FrontendPlugin {
             .init_resource::<Profile>()
             .init_resource::<Frontend>()
             .init_resource::<PendingEnd>()
+            .init_resource::<ReplayReturn>()
             .init_resource::<model::CurrentModel>()
             .init_resource::<model::ModelCache>()
             .add_systems(Startup, setup)
@@ -180,7 +223,14 @@ fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
         "name" => Box::new(misc::TextEntry::new(cx.g(2088), "Travis", 25)),
         "load" => Box::new(misc::LoadGame::new()),
         "save" => Box::new(misc::SaveGame::new()),
-        "replays" => Box::new(misc::ReplayList::new(cx)),
+        "replays" => Box::new(replays::ReplayList::new(cx)),
+        "rampage" => Box::new(rampage::RampageSetup::new(cx)),
+        "highscore" => Box::new(misc::TextEntry::new(cx.g(1611), "Travis", 25)),
+        "replayinfo" => {
+            let name = crate::arg("--replay-file")?;
+            let r = crate::replay::load_file(&crate::replay::saves_dir().join(&name)).ok()?;
+            Box::new(replays::ReplayInfo::new(r, Some(name)))
+        }
         "credits" => Box::new(misc::Credits::new(2200, 2, true, 0x2e, 100)),
         "language" => Box::new(misc::LanguageChooser::new(cx)),
         "controls" => Box::new(misc::ControlSetup::new()),
@@ -201,11 +251,24 @@ fn init_stack(fe: &mut Frontend, cx: &mut Ctx, result: Option<LevelResult>) {
     if let Some(r) = result {
         // After a level the main menu skips straight into the game menu
         // (`DAT_0118ff28`), with the result screen first.
+        let Some(outcome) = r.outcome else {
+            // After a replay: back where it was started from.
+            if r.back_to_game {
+                fe.stack.push(Box::new(menus::MainMenu::running()));
+                fe.stack.push(Box::new(menus::GameMenu::new()));
+            } else {
+                fe.stack.push(Box::new(menus::MainMenu::new()));
+            }
+            return;
+        };
         cx.profile.played = true;
         fe.stack.push(Box::new(menus::MainMenu::running()));
-        fe.stack.push(Box::new(menus::GameMenu::new()));
-        match (r.outcome, r.city) {
-            (LevelOutcome::Complete, Some((c, l))) => fe
+        fe.stack.push(Box::new(match r.rampage {
+            Some((c, p, score)) => menus::GameMenu::after_rampage(c, p, score),
+            None => menus::GameMenu::new(),
+        }));
+        match (outcome, r.city) {
+            (LevelOutcome::Complete, Some((c, l))) if r.rampage.is_none() => fe
                 .stack
                 .push(Box::new(levels::LevelComplete::new(cx.profile, c, l, r.minutes))),
             (LevelOutcome::GameOver, _) => fe.stack.push(Box::new(levels::GameOver::new(r.minutes))),
@@ -218,7 +281,7 @@ fn init_stack(fe: &mut Frontend, cx: &mut Ctx, result: Option<LevelResult>) {
     if let Some(s) = debug.as_deref().and_then(|n| debug_screen(n, cx)) {
         fe.stack.push(s);
     } else if debug.as_deref() == Some("loading") {
-        fe.loading = Some((0, 0, 0));
+        fe.loading = Some((Launch::story(0, 0), 0));
     } else if cx.settings.language.is_empty() {
         // No language configured: ask first (InitLanguages).
         fe.stack.push(Box::new(misc::LanguageChooser::new(cx)));
@@ -287,15 +350,41 @@ fn debug_level_end(mut out: MessageWriter<LevelOutcome>, mut done: Local<bool>) 
 
 /// Remember the level's outcome and leave for the result screen after
 /// [`END_DELAY`] (main loop `DAT_0114c730`: 3 = complete, 2 = game over).
+/// A replay ends when its records run out or Esc is pressed, with no
+/// result screen (`FUN_0104135c`).
+#[allow(clippy::too_many_arguments)]
 fn watch_level_end(
     mut commands: Commands,
     mut outcomes: MessageReader<LevelOutcome>,
     clock: Res<LevelClock>,
     spec: Res<LevelSpec>,
+    mode: Res<GameMode>,
+    high: Res<ScoreHighWater>,
+    replay: Res<ReplayState>,
+    back: Res<ReplayReturn>,
     time: Res<Time<Real>>,
     mut pending: ResMut<PendingEnd>,
     mut next: ResMut<NextState<AppState>>,
 ) {
+    // The determinism check keeps the level running to its last tick.
+    if crate::arg("--record").is_some() || crate::arg("--play").is_some() {
+        outcomes.clear();
+        return;
+    }
+    if replay.playing() {
+        outcomes.clear();
+        if replay.finished {
+            commands.insert_resource(LevelResult {
+                outcome: None,
+                minutes: 0,
+                city: None,
+                rampage: None,
+                back_to_game: back.back_to_game,
+            });
+            next.set(AppState::Frontend);
+        }
+        return;
+    }
     for &outcome in outcomes.read() {
         if pending.0.is_none() {
             let city = spec
@@ -304,10 +393,16 @@ fn watch_level_end(
                 .ok()
                 .filter(|&c| c < 3)
                 .map(|c| (c, spec.level.min(1) as usize));
+            let rampage = match *mode {
+                GameMode::Rampage { police } => city.map(|(c, _)| (c, police, high.0)),
+                GameMode::Story => None,
+            };
             let r = LevelResult {
-                outcome,
+                outcome: Some(outcome),
                 minutes: clock.minutes() as i32,
                 city,
+                rampage,
+                back_to_game: false,
             };
             pending.0 = Some((r, time.elapsed_secs()));
         }
@@ -365,6 +460,11 @@ struct Env<'w, 's> {
     result: Option<Res<'w, LevelResult>>,
     fx: ResMut<'w, FxVolume>,
     spec: ResMut<'w, LevelSpec>,
+    mode: ResMut<'w, GameMode>,
+    play_request: ResMut<'w, PlayRequest>,
+    last_replay: Res<'w, LastReplay>,
+    replay: Res<'w, ReplayState>,
+    replay_return: ResMut<'w, ReplayReturn>,
     intro_req: MessageWriter<'w, crate::intro::PlayIntro>,
     intro_done: MessageReader<'w, 's, crate::intro::IntroFinished>,
     intro: Option<Res<'w, crate::intro::Intro>>,
@@ -400,6 +500,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         && fe.stack.is_empty()
         && env.pending_end.0.is_none()
         && !intro_on
+        && !env.replay.playing()
         && (env.keys.just_pressed(KeyCode::Escape) || debug_pause)
     {
         fe.debug_paused = true;
@@ -420,6 +521,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         languages: &env.languages.0,
         goal: env.mission.goal,
         level_ticks: env.clock.0,
+        last_replay: env.last_replay.0.as_ref(),
         sfx: Vec::new(),
         requests: Vec::new(),
     };
@@ -493,7 +595,18 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     let mut close = false;
     for r in std::mem::take(&mut cx.requests) {
         match r {
-            Request::StartLevel { city, level } => fe.loading = Some((city, level, 0)),
+            Request::StartLevel { city, level } => fe.loading = Some((Launch::story(city, level), 0)),
+            Request::StartRampage { city, police } => {
+                let mut l = Launch::story(city, 0);
+                l.mode = GameMode::Rampage { police };
+                fe.loading = Some((l, 0));
+            }
+            Request::PlayReplay { replay, back_to_game } => {
+                if let Some((spec, mode)) = crate::replay::launch_of(&replay) {
+                    let replay = Some(*replay);
+                    fe.loading = Some((Launch { spec, mode, replay, back_to_game }, 0));
+                }
+            }
             Request::Exit => {
                 env.exit.write(AppExit::Success);
             }
@@ -527,14 +640,16 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
 
     // Loading panel shown for a couple of frames, then the level loads
     // (the last frame stays on screen while `load_level` runs).
-    if let Some((city, level, n)) = &mut fe.loading {
+    if let Some((launch, n)) = &mut fe.loading {
         *n += 1;
         if *n == 3 {
-            *env.spec = LevelSpec {
-                map: city.to_string(),
-                level: *level,
-            };
-            cx.profile.played = true;
+            *env.spec = launch.spec.clone();
+            *env.mode = launch.mode;
+            env.replay_return.back_to_game = launch.back_to_game;
+            if launch.replay.is_none() {
+                cx.profile.played = true;
+            }
+            env.play_request.0 = launch.replay.take();
             env.next.set(AppState::Playing);
         }
     }

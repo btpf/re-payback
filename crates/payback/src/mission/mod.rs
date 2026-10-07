@@ -145,13 +145,15 @@ impl Plugin for MissionPlugin {
     }
 }
 
-/// `Mission_Init(city, level)` at level start (single player only).
+/// `Mission_Init(city, level)` at level start (single-player story only).
 fn start_level(world: &mut World) {
     let spec = world.resource::<crate::level::LevelSpec>().clone();
     let Ok(city) = spec.map.parse::<u8>() else {
         return;
     };
-    if std::env::args().any(|a| a == "--no-script") {
+    // Rampage runs the city with no level script (and no level phrases in
+    // the original's LoadMap).
+    if std::env::args().any(|a| a == "--no-script") || world.resource::<crate::level::GameMode>().is_rampage() {
         return;
     }
     let Some(mut script) = levels::for_level(city, spec.level) else {
