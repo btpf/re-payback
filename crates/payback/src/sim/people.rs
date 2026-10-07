@@ -394,6 +394,10 @@ fn ped_ai(
 ) {
     let Some(city) = city else { return };
     for (mut obj, mut p, mut stick) in &mut q {
+        // The player's stick comes from `player_stick`.
+        if obj.state == State::Player {
+            continue;
+        }
         *stick = Stick::default();
         match obj.state {
             State::Wander => {
