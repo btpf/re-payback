@@ -686,6 +686,7 @@ fn regen_and_respawn(
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<Rng>,
+    mut outcome: MessageWriter<crate::mission::LevelOutcome>,
     mut players: Query<(Entity, &mut Obj, Has<Person>), With<CameraTarget>>,
 ) {
     let (Some(city), Some(starts), Some(mut library)) = (city, starts, library) else {
@@ -733,6 +734,7 @@ fn regen_and_respawn(
     session.multiplier = 1;
     if session.lives <= 0 {
         info!("Game over!");
+        outcome.write(crate::mission::LevelOutcome::GameOver);
         return;
     }
     let pos = match session.respawn_square {

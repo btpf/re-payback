@@ -98,7 +98,24 @@ pub struct ActiveLevel(pub Option<Box<dyn LevelScript>>);
 /// Outcome signalled to the game loop.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelOutcome {
+    /// `LevelComplete()` from the level script.
     Complete,
+    /// The player ran out of lives.
+    GameOver,
+}
+
+/// Game ticks since the level started (`DAT_0114c738`; the original counts
+/// 30 Hz ticks, ours are 25 Hz). Paused with virtual time.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct LevelClock(pub u32);
+
+impl LevelClock {
+    pub const TICKS_PER_SECOND: u32 = 25;
+
+    /// Whole minutes elapsed (what the trophy table compares against).
+    pub fn minutes(&self) -> u32 {
+        self.0 / (Self::TICKS_PER_SECOND * 60)
+    }
 }
 
 pub struct MissionPlugin;
@@ -106,6 +123,7 @@ pub struct MissionPlugin;
 impl Plugin for MissionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Triggers>()
+            .init_resource::<LevelClock>()
             .init_resource::<MissionState>()
             .insert_resource(ActiveLevel(None))
             .add_message::<LevelOutcome>()
@@ -117,6 +135,11 @@ impl Plugin for MissionPlugin {
             .add_systems(
                 FixedUpdate,
                 eval::run_triggers.after(crate::sim::combat::CombatSet),
+            )
+            .add_systems(
+                FixedUpdate,
+                (|mut clock: ResMut<LevelClock>| clock.0 += 1)
+                    .run_if(in_state(crate::level::AppState::Playing)),
             )
             .add_systems(Update, eval::flash_phones);
     }
@@ -155,5 +178,6 @@ fn reset_missions(world: &mut World) {
         }
     }
     world.insert_resource(MissionState::default());
+    world.insert_resource(LevelClock::default());
     world.resource_mut::<ActiveLevel>().0 = None;
 }
