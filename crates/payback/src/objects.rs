@@ -6,8 +6,9 @@
 //! UVs are in texels of the 256x128 object texture, with v in half-texel
 //! units (0-255 spans the 128 rows); verified on the police car light bar.
 
-use crate::city::{UNITS_PER_SQUARE, stack_height};
+use crate::city::UNITS_PER_SQUARE;
 use crate::data::GameData;
+use crate::world::stack_height;
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageSampler, ImageSamplerDescriptor},

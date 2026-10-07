@@ -9,6 +9,7 @@
 //! raises the cubes above it, and texture orientation/flip on each face.
 
 use crate::data::GameData;
+use crate::world::{stack_height, top_corners};
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageSampler, ImageSamplerDescriptor},
@@ -16,7 +17,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
 };
-use payback_formats::map::{self, Cube, Face, FaceType, MAP_SIZE, Map, Slope};
+use payback_formats::map::{self, Face, FaceType, MAP_SIZE, Map, Slope};
 
 pub const UNITS_PER_SQUARE: f32 = 256.0;
 
@@ -144,26 +145,6 @@ impl MeshBuilder {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
         .with_inserted_indices(Indices::U32(self.indices))
-    }
-}
-
-/// Heights of a cube's top corners above its base: [NW, NE, SE, SW].
-fn top_corners(cube: &Cube) -> [f32; 4] {
-    let (a, b) = (cube.height1 as f32, cube.height2 as f32);
-    match cube.slope {
-        Slope::Vert => [a, a, b, b],
-        Slope::RVert => [b, b, a, a],
-        Slope::Horiz => [a, b, b, a],
-        Slope::RHoriz => [b, a, a, b],
-        _ => [a; 4],
-    }
-}
-
-/// Height a cube adds to its stack.
-pub fn stack_height(cube: &Cube) -> f32 {
-    match cube.slope {
-        Slope::Off | Slope::Flat | Slope::Unknown(_) => cube.height1 as f32,
-        _ => cube.height1.max(cube.height2) as f32,
     }
 }
 

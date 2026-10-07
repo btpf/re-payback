@@ -6,4 +6,4 @@ license.workspace = true
 
 [dependencies]
 payback-formats = { path = "../payback-formats" }
-bevy = "0.19.1"
+bevy = { version = "0.19.1", features = ["wav"] }
