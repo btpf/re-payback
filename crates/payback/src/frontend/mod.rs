@@ -352,6 +352,7 @@ fn close_layers(
         commands.remove_resource::<Layers>();
     }
     current.0 = None;
+    current.1 = None;
     fe.stack.clear();
     fe.loading = None;
     fe.layers_open = false;
@@ -484,6 +485,7 @@ struct Env<'w, 's> {
     fx: ResMut<'w, FxVolume>,
     spec: ResMut<'w, LevelSpec>,
     mode: ResMut<'w, GameMode>,
+    high: Res<'w, ScoreHighWater>,
     play_request: ResMut<'w, PlayRequest>,
     last_replay: Res<'w, LastReplay>,
     replay: Res<'w, ReplayState>,
@@ -548,6 +550,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         languages: &env.languages.0,
         goal: env.mission.goal,
         level_ticks: env.clock.0,
+        story: matches!(*env.mode, GameMode::Story),
         last_replay: env.last_replay.0.as_ref(),
         mp_totals: &mut env.mp_totals,
         sfx: Vec::new(),
@@ -672,6 +675,21 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                         mp: Some((-2, env.mode.players())),
                     });
                 }
+                // A rampage quit early still goes through the high-score
+                // check at the top of the game menu (`FUN_0102ca08`).
+                if let GameMode::Rampage { police } = *env.mode {
+                    if !env.replay.playing() {
+                        let city = env.spec.map.parse::<usize>().ok().filter(|&c| c < 3);
+                        env.commands.insert_resource(LevelResult {
+                            outcome: Some(LevelOutcome::MatchOver),
+                            minutes: 0,
+                            city: city.map(|c| (c, 0)),
+                            rampage: city.map(|c| (c, police, env.high.0)),
+                            back_to_game: false,
+                            mp: None,
+                        });
+                    }
+                }
             }
         }
     }
@@ -679,6 +697,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         fe.stack.clear();
         fe.layers_open = false;
         env.current.0 = None;
+        env.current.1 = None;
         if let Some(l) = &env.layers {
             for &e in &l.entities {
                 env.commands.entity(e).despawn();
@@ -767,7 +786,9 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         node.color = Color::srgb(b, b, b);
         *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
     }
-    env.current.0 = top.filter(|_| shown && !loading).and_then(|t| t.model());
+    let top = top.filter(|_| shown && !loading);
+    env.current.0 = top.and_then(|t| t.model());
+    env.current.1 = top.and_then(|t| t.back_model());
 }
 
 /// InitProgress (`FUN_01042ff8`): clear a box round the centre and draw

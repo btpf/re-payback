@@ -18,9 +18,10 @@ const UNITS: f32 = 1000.0;
 /// horizontally, 8 vertically, rendering.md §0) with the vertical factor.
 const MODEL_UNIT: f32 = 8.0;
 
-/// The model to show this frame (set by the menu loop).
+/// The models to show this frame (set by the menu loop): the option
+/// object and an optional one behind it.
 #[derive(Resource, Default)]
-pub struct CurrentModel(pub Option<ModelView>);
+pub struct CurrentModel(pub Option<ModelView>, pub Option<ModelView>);
 
 /// The front end's own object library (not the level's), kept for reuse.
 #[derive(Resource, Default)]
@@ -32,8 +33,9 @@ pub struct ModelCache {
 #[derive(Component)]
 pub struct MenuCamera;
 
+/// A menu model entity: slot 0 = the option object, 1 = the background.
 #[derive(Component)]
-pub struct MenuModel;
+pub struct MenuModel(u8);
 
 /// Camera for the option models, drawn over the back layer (order 1, no
 /// clear). Same projection as the game camera.
@@ -79,52 +81,55 @@ pub fn sync_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<crate::objects::ObjectMaterial>>,
-    mut model: Query<(Entity, &mut Mesh3d, &mut Transform), With<MenuModel>>,
+    mut model: Query<(Entity, &MenuModel, &mut Mesh3d, &mut Transform)>,
 ) {
-    let Some(view) = current.0 else {
-        for (e, ..) in &model {
-            commands.entity(e).despawn();
-        }
-        return;
-    };
-    let cache = &mut *cache;
-    let lib = cache
-        .lib
-        .get_or_insert_with(|| ObjectLibrary::new(&data, &mut images, &mut materials, false));
-    let mesh = cache
-        .meshes
-        .entry(view.path)
-        .or_insert_with(|| {
-            let i = lib.load(&data, &mut meshes, view.path)?;
-            let m = lib.build_mesh(&lib.model(i).obj, |v| {
-                let k = MODEL_UNIT;
-                to_render(v.x as f32 * k, v.y as f32 * k, v.z as f32 * k).to_array()
-            });
-            Some(meshes.add(m))
-        })
-        .clone();
-    let Some(mesh) = mesh else { return };
-    let transform = Transform::from_translation(to_render(
-        view.pos[0] as f32,
-        view.pos[1] as f32,
-        view.pos[2] as f32,
-    ))
-    .with_rotation(rotation(view.rot));
-    match model.single_mut() {
-        Ok((_, mut m, mut t)) => {
-            if m.0 != mesh {
-                m.0 = mesh;
+    for (slot, view) in [current.0, current.1].into_iter().enumerate() {
+        let existing = model.iter_mut().find(|(_, m, ..)| m.0 as usize == slot);
+        let Some(view) = view else {
+            if let Some((e, ..)) = existing {
+                commands.entity(e).despawn();
             }
-            *t = transform;
-        }
-        Err(_) => {
-            commands.spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(lib.material.clone()),
-                transform,
-                RenderLayers::layer(LAYER),
-                MenuModel,
-            ));
+            continue;
+        };
+        let cache = &mut *cache;
+        let lib = cache
+            .lib
+            .get_or_insert_with(|| ObjectLibrary::new(&data, &mut images, &mut materials, false));
+        let mesh = cache
+            .meshes
+            .entry(view.path)
+            .or_insert_with(|| {
+                let i = lib.load(&data, &mut meshes, view.path)?;
+                let m = lib.build_mesh(&lib.model(i).obj, |v| {
+                    let k = MODEL_UNIT;
+                    to_render(v.x as f32 * k, v.y as f32 * k, v.z as f32 * k).to_array()
+                });
+                Some(meshes.add(m))
+            })
+            .clone();
+        let Some(mesh) = mesh else { continue };
+        let transform = Transform::from_translation(to_render(
+            view.pos[0] as f32,
+            view.pos[1] as f32,
+            view.pos[2] as f32,
+        ))
+        .with_rotation(rotation(view.rot));
+        match existing {
+            Some((_, _, mut m, mut t)) => {
+                if m.0 != mesh {
+                    m.0 = mesh;
+                }
+                *t = transform;
+            }
+            None => {
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(lib.material.clone()),
+                    transform,
+                    RenderLayers::layer(LAYER),
+                    MenuModel(slot as u8),
+                ));
+            }
         }
     }
 }

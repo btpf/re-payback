@@ -319,6 +319,30 @@ impl GameMenu {
     }
 }
 
+/// "ENTER FILENAME" prompt for saving the last game (default "<name> - ").
+pub(crate) fn replay_name_entry(cx: &Ctx) -> Box<TextEntry> {
+    let default = format!("{} - ", cx.profile.name);
+    Box::new(TextEntry::new(cx.g(2084), &default, 30))
+}
+
+/// Save the last game as `name` (`FUN_010bc3b0`), then "REPLAY SAVED!".
+pub(crate) fn save_last_replay(cx: &mut Ctx, name: &str) -> Step {
+    let (Some(file), Some(r)) = (replay_file_name(name), cx.last_replay) else {
+        cx.sound(Sfx::Refuse);
+        return Step::Stay;
+    };
+    let dir = crate::replay::saves_dir();
+    let res = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&file), r.write()));
+    match res {
+        Ok(()) => Step::Push(Box::new(Message::new(cx.g(2117)))),
+        Err(e) => {
+            bevy::log::warn!("saving replay {file}: {e}");
+            cx.sound(Sfx::Refuse);
+            Step::Stay
+        }
+    }
+}
+
 /// A replay file name from the text entry: no path separators or `:`, no
 /// trailing dots or spaces (not allowed on Windows).
 fn replay_file_name(name: &str) -> Option<String> {
@@ -398,8 +422,7 @@ impl Screen for GameMenu {
                 // "ENTER FILENAME", default "<name> - ".
                 cx.sound(Sfx::Select);
                 self.wait = GameWait::ReplayName;
-                let default = format!("{} - ", cx.profile.name);
-                Step::Push(Box::new(TextEntry::new(cx.g(2084), &default, 30)))
+                Step::Push(replay_name_entry(cx))
             }
             6 => {
                 cx.sound(Sfx::Select);
@@ -428,23 +451,7 @@ impl Screen for GameMenu {
                 }
                 Step::Stay
             }
-            (GameWait::ReplayName, Outcome::Text(name)) => {
-                // `FUN_010bc3b0`, then "REPLAY SAVED!".
-                let (Some(file), Some(r)) = (replay_file_name(&name), cx.last_replay) else {
-                    cx.sound(Sfx::Refuse);
-                    return Step::Stay;
-                };
-                let dir = crate::replay::saves_dir();
-                let res = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&file), r.write()));
-                match res {
-                    Ok(()) => Step::Push(Box::new(Message::new(cx.g(2117)))),
-                    Err(e) => {
-                        bevy::log::warn!("saving replay {file}: {e}");
-                        cx.sound(Sfx::Refuse);
-                        Step::Stay
-                    }
-                }
-            }
+            (GameWait::ReplayName, Outcome::Text(name)) => save_last_replay(cx, &name),
             (_, Outcome::Level(c, l)) => Step::Pop(Outcome::Level(c, l)),
             (_, Outcome::Rampage(c, p)) => Step::Pop(Outcome::Rampage(c, p)),
             (_, Outcome::Multiplayer(c)) => Step::Pop(Outcome::Multiplayer(c)),
@@ -493,6 +500,8 @@ pub struct PauseMenu {
     sub: usize,
     /// Rotation of the person model (`[3] += 0x20`).
     person: i32,
+    /// Background `options.obj` angle (`[3] += 0x40` per frame).
+    back: i32,
 }
 
 impl PauseMenu {
@@ -503,6 +512,7 @@ impl PauseMenu {
             confirm: None,
             sub: 0,
             person: 0,
+            back: 0,
         }
     }
 
@@ -522,6 +532,7 @@ impl Screen for PauseMenu {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         self.obj.tick();
         self.person = (self.person + 0x20).rem_euclid(TURN);
+        self.back = (self.back + 0x40).rem_euclid(TURN);
         if let Some(c) = &mut self.confirm {
             if let Some(yes) = c.tick(cx, input) {
                 self.confirm = None;
@@ -600,12 +611,15 @@ impl Screen for PauseMenu {
         let on_off = |b: bool| cx.g(if b { 2081 } else { 2080 });
         match self.sel {
             0 => {
-                let goal = if cx.goal <= 0 {
-                    cx.g(2056)
-                } else {
-                    format!("{}{}{}", cx.g(2058), cx.goal, cx.g(2057))
-                };
-                ui.centred(&goal, y1, 2);
+                // Not in rampage or multiplayer (`DAT_0114c7c6`, `DAT_0114c7c8`).
+                if cx.story {
+                    let goal = if cx.goal <= 0 {
+                        cx.g(2056)
+                    } else {
+                        format!("{}{}{}", cx.g(2058), cx.goal, cx.g(2057))
+                    };
+                    ui.centred(&goal, y1, 2);
+                }
                 let minutes = (cx.level_ticks / (crate::mission::LevelClock::TICKS_PER_SECOND * 60)) as i32;
                 ui.centred(&format!("{}{}", cx.g(2059), hmm(minutes)), y2, 2);
             }
@@ -634,6 +648,11 @@ impl Screen for PauseMenu {
             Some(c) => c.draw(ui, cx, y1, false),
             None => ui.arrows(y),
         }
+    }
+
+    /// `options.obj` at (0, -2000), z 10000 (`FUN_0101a7dc`).
+    fn back_model(&self) -> Option<ModelView> {
+        Some(ModelView { path: "options/options.obj", pos: [0, -2000, 10000], rot: [self.back, 0, 0] })
     }
 
     fn model(&self) -> Option<ModelView> {

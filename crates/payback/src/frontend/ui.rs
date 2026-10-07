@@ -110,6 +110,8 @@ pub struct Ctx<'a> {
     /// Pause menu: the level's money goal (<= 0 = escape) and ticks.
     pub goal: i32,
     pub level_ticks: u32,
+    /// Story level (the goal line is hidden in rampage and multiplayer).
+    pub story: bool,
     /// The last game played (game menu "View replay" / "Save replay").
     pub last_replay: Option<&'a Replay>,
     /// Multiplayer won/drawn/lost totals.
@@ -389,6 +391,11 @@ pub trait Screen: Send + Sync + 'static {
         Step::Stay
     }
     fn model(&self) -> Option<ModelView> {
+        None
+    }
+    /// A second model drawn behind [`Screen::model`] (the pause menu's
+    /// `options.obj`).
+    fn back_model(&self) -> Option<ModelView> {
         None
     }
     /// Screen brightness 0..1 (palette fades, `FUN_0104138c`).

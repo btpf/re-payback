@@ -245,6 +245,8 @@ pub struct MpResults {
     totals: MpTotals,
     sel: usize,
     city: usize,
+    /// Waiting for the "Save replay" file name.
+    naming: bool,
 }
 
 impl MpResults {
@@ -255,6 +257,7 @@ impl MpResults {
             totals: *cx.mp_totals,
             sel: 1,
             city: (cx.settings.rampage_city as usize).min(2),
+            naming: false,
         }
     }
 }
@@ -300,16 +303,27 @@ impl Screen for MpResults {
                 let r = cx.last_replay.cloned().expect("checked");
                 Step::Pop(Outcome::Replay(Box::new(r)))
             }
+            3 if cx.last_replay.is_some() => {
+                cx.sound(Sfx::Select);
+                self.naming = true;
+                Step::Push(super::menus::replay_name_entry(cx))
+            }
             4 => {
                 cx.sound(Sfx::Select);
                 cx.settings.save();
                 Step::Pop(Outcome::Cancel)
             }
-            // Save replay is in the game menu.
             _ => {
                 cx.sound(Sfx::Refuse);
                 Step::Stay
             }
+        }
+    }
+
+    fn resume(&mut self, cx: &mut Ctx, outcome: Outcome) -> Step {
+        match (std::mem::take(&mut self.naming), outcome) {
+            (true, Outcome::Text(name)) => super::menus::save_last_replay(cx, &name),
+            _ => Step::Stay,
         }
     }
 
