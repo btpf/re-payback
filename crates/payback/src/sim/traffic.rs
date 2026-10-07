@@ -135,13 +135,21 @@ fn spawn_traffic(world: &mut World) {
     if objects >= 20 || !world.contains_resource::<City>() {
         return;
     }
-    let Some(cam) = world.get_resource::<GameCam>().copied() else {
+    let Some(mut cam) = world.get_resource::<GameCam>().copied() else {
         return;
     };
+    // Split screen: each tick spawns around the next player's view.
+    let mut view: Option<u8> = None;
+    let views = world.resource::<crate::camera::ViewCams>().0.clone();
+    if !views.is_empty() {
+        let i = world.resource::<crate::mission::LevelClock>().0 as usize % views.len();
+        cam = views[i];
+        view = Some(i as u8);
+    }
     let (player_vel, wanted) = world
         .query_filtered::<&Obj, With<CameraTarget>>()
         .iter(world)
-        .next()
+        .find(|o| view.is_none() || o.player == view)
         .map(|o| (o.vel, o.wanted))
         .unwrap_or((IVec3::ZERO, 0));
     let mut occupied = vec![false; MAP_SIZE * MAP_SIZE];

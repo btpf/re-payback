@@ -54,6 +54,8 @@ struct Body {
     vehicle: bool,
     person: bool,
     player: bool,
+    /// Player number (kill credit in multiplayer).
+    player_no: Option<u8>,
     speed: i32,
 }
 
@@ -87,6 +89,7 @@ fn contacts(
                 vehicle,
                 person,
                 player,
+                player_no: if player { Some(o.player.unwrap_or(0)) } else { None },
                 speed: o.speed,
             }
         })
@@ -154,7 +157,7 @@ fn contacts(
                     effects.add(8, Tex::Blood, o.posf(), Vec3::ZERO, size, o.level as u8 + 1, Blend::Tint);
                     if victim.player && o.health < 1 {
                         if let Some(t) = &texts {
-                            title.show(t.global(2021));
+                            title.show_for(o.player, t.global(2021));
                         }
                     }
                 } else {
@@ -171,7 +174,7 @@ fn contacts(
                         effects.add(9, Tex::Flare, o.posf(), Vec3::ZERO, 100.0 + rng.rand(50) as f32, o.level as u8 + 1, Blend::Add);
                     }
                 }
-                hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false });
+                hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false, attacker: other.player_no });
             }
         }
     }
@@ -198,9 +201,10 @@ fn vehicle_damage(
         let info = &library.model(o.model).info;
         let (mass, radius) = (info.mass as i64, info.radius as f32);
         let layer = o.level as u8 + 1;
+        let player = o.player;
         let say = |title: &mut BigTitle, n: u32| {
             if let Some(t) = &texts {
-                title.show(t.global(n));
+                title.show_for(player, t.global(n));
             }
         };
         // Blown apart.
@@ -211,7 +215,7 @@ fn vehicle_damage(
             }
             if is_player {
                 say(&mut title, 2025);
-                session.foot_health = -71;
+                *session.foot_health_mut(o.player) = -71;
             }
             explode.write(Explode {
                 pos: o.pos,
@@ -219,6 +223,7 @@ fn vehicle_damage(
                 layer: o.level,
                 source: Some(e),
                 by_player: false,
+                player: None,
             });
             triggers.report_actor(kind::ACTOR_KILLED, e);
             o.state = if is_player { State::Dead } else { State::Removed };
@@ -260,7 +265,7 @@ fn vehicle_damage(
                 }
                 let mut at = o.pos;
                 at.z -= 500;
-                explode.write(Explode { pos: at, power: mass * 25000, layer: o.level, source: Some(e), by_player: false });
+                explode.write(Explode { pos: at, power: mass * 25000, layer: o.level, source: Some(e), by_player: false, player: None });
                 triggers.report_actor(kind::ACTOR_KILLED, e);
             }
             continue;

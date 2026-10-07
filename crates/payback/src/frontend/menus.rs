@@ -2,6 +2,7 @@
 //! pause menu (`FUN_0101a7dc`).
 
 use super::levels::LevelSelect;
+use super::multiplayer::MultiplayerSetup;
 use super::misc::{CdSetup, ControlSetup, Credits, LanguageChooser, LoadGame, Message, SaveGame, TextEntry};
 use super::rampage::RampageSetup;
 use super::replays::{ReplayInfo, ReplayList};
@@ -210,6 +211,10 @@ impl Screen for MainMenu {
                 self.leave(Request::StartRampage { city, police });
                 Step::Stay
             }
+            (Waiting::Game, Outcome::Multiplayer(city)) => {
+                self.leave(Request::StartMultiplayer { city });
+                Step::Stay
+            }
             // "View replay" in the game menu (-2 from `FUN_0102ca08`) or
             // "View saved replay" here.
             (w @ (Waiting::Game | Waiting::None), Outcome::Replay(replay)) => {
@@ -372,6 +377,10 @@ impl Screen for GameMenu {
                 cx.sound(Sfx::Select);
                 Step::Push(Box::new(LevelSelect::new(cx.profile)))
             }
+            1 => {
+                cx.sound(Sfx::Select);
+                Step::Push(Box::new(MultiplayerSetup::new(cx)))
+            }
             2 => {
                 cx.sound(Sfx::Select);
                 Step::Push(Box::new(RampageSetup::new(cx)))
@@ -397,7 +406,6 @@ impl Screen for GameMenu {
                 self.confirm = Some(Confirm::default());
                 Step::Stay
             }
-            // Multiplayer is not implemented.
             _ => {
                 cx.sound(Sfx::Refuse);
                 Step::Stay
@@ -439,6 +447,7 @@ impl Screen for GameMenu {
             }
             (_, Outcome::Level(c, l)) => Step::Pop(Outcome::Level(c, l)),
             (_, Outcome::Rampage(c, p)) => Step::Pop(Outcome::Rampage(c, p)),
+            (_, Outcome::Multiplayer(c)) => Step::Pop(Outcome::Multiplayer(c)),
             (_, Outcome::Replay(r)) => Step::Pop(Outcome::Replay(r)),
             _ => Step::Stay,
         }

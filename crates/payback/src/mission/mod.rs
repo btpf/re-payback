@@ -102,6 +102,8 @@ pub enum LevelOutcome {
     Complete,
     /// The player ran out of lives.
     GameOver,
+    /// Multiplayer: a player reached the required kills.
+    MatchOver,
 }
 
 /// Game ticks since the level started (`DAT_0114c738`; the original counts
@@ -151,9 +153,9 @@ fn start_level(world: &mut World) {
     let Ok(city) = spec.map.parse::<u8>() else {
         return;
     };
-    // Rampage runs the city with no level script (and no level phrases in
-    // the original's LoadMap).
-    if std::env::args().any(|a| a == "--no-script") || world.resource::<crate::level::GameMode>().is_rampage() {
+    // Rampage and multiplayer run the city with no level script (and no
+    // level phrases in the original's LoadMap).
+    if std::env::args().any(|a| a == "--no-script") || *world.resource::<crate::level::GameMode>() != crate::level::GameMode::Story {
         return;
     }
     let Some(mut script) = levels::for_level(city, spec.level) else {

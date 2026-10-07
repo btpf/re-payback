@@ -22,7 +22,7 @@ pub struct RampageSetup {
 
 /// A city may be chosen once the previous city's last level has a cup
 /// (`DAT_0117aecc[(c-1)*2]`).
-fn unlocked(cx: &Ctx, city: usize) -> bool {
+pub fn unlocked(cx: &Ctx, city: usize) -> bool {
     city == 0 || cx.profile.cups[2 * city - 1] != 0
 }
 

@@ -66,6 +66,8 @@ impl Plugin for PursuitPlugin {
                 despawn_far,
             )
                 .chain()
+                // Route police are unused in multiplayer.
+                .distributive_run_if(crate::level::single_player)
                 .in_set(VehicleAiSet)
                 .before(vehicle_ai::vehicle_orders),
         );

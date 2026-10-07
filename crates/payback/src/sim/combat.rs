@@ -3,7 +3,7 @@
 //! `FUN_000e0e46` projectile physics, `FUN_000de0b6` hits,
 //! `FUN_000cd22e` Explosion, `FUN_000d0988` pickups).
 
-use super::people::{Person, PlayerInput};
+use super::people::{Person, PlayerInputs};
 use super::police::Hurt;
 use super::{Class, Obj, Rng, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
@@ -178,6 +178,8 @@ pub struct Projectile {
     pub shooter: Option<Entity>,
     /// The shooter is the player (for crimes and score).
     pub by_player: bool,
+    /// The shooting player's number (kill credit in multiplayer).
+    pub player: Option<u8>,
 }
 
 /// Request an explosion (68k `FUN_000cd22e`).
@@ -190,6 +192,8 @@ pub struct Explode {
     /// Object excluded from the blast (the exploding thing itself).
     pub source: Option<Entity>,
     pub by_player: bool,
+    /// The player whose weapon this is (kill credit in multiplayer).
+    pub player: Option<u8>,
 }
 
 /// Pickup respawns: (sx, sy, level, ticks left) -> becomes a crate.
@@ -229,14 +233,15 @@ impl Plugin for CombatPlugin {
 /// Number keys select a carried weapon (§3.1).
 fn select_weapon(
     mut commands: Commands,
-    mut input: ResMut<PlayerInput>,
+    mut inputs: ResMut<PlayerInputs>,
     mut triggers: ResMut<Triggers>,
     mut q: Query<(&Obj, &mut Arsenal, &mut Person), With<CameraTarget>>,
 ) {
-    let Some(slot) = input.weapon_pressed.take() else {
-        return;
-    };
+    let slots = inputs.0.each_mut().map(|i| i.weapon_pressed.take());
     for (obj, mut ars, mut person) in &mut q {
+        let Some(slot) = slots[obj.player.unwrap_or(0).min(3) as usize] else {
+            continue;
+        };
         let w = Weapon::ALL[slot as usize];
         let has = w == Weapon::Fist
             || ars.ammo[slot as usize] > 0
@@ -284,7 +289,7 @@ fn spawn_projectile(
     heading: i32,
     level: usize,
     shooter: Entity,
-    by_player: bool,
+    player: Option<u8>,
 ) -> Option<Entity> {
     let model = library.load(data, meshes, kind.model())?;
     let mesh = library.model(model).mesh.clone();
@@ -303,7 +308,8 @@ fn spawn_projectile(
                 Projectile {
                     kind,
                     shooter: Some(shooter),
-                    by_player,
+                    by_player: player.is_some(),
+                    player,
                 },
                 Mesh3d(mesh),
                 MeshMaterial3d(library.material.clone()),
@@ -348,6 +354,7 @@ fn fire_weapons(
         let pressed = stick.fire && !ars.fire_held;
         let released = !stick.fire && ars.fire_held;
         ars.fire_held = stick.fire;
+        let player = is_player.then(|| obj.player.unwrap_or(0));
         let w = ars.current;
         let slot = w as usize;
 
@@ -377,7 +384,7 @@ fn fire_weapons(
                     obj.heading,
                     obj.level,
                     e,
-                    is_player,
+                    player,
                 );
                 ars.ammo[slot] -= 1;
             }
@@ -432,7 +439,7 @@ fn fire_weapons(
                 h,
                 obj.level,
                 e,
-                is_player,
+                player,
             );
         };
         match w {
@@ -514,7 +521,7 @@ fn fire_weapons(
                         obj.heading,
                         obj.level,
                         e,
-                        is_player,
+                        player,
                     );
                     ars.ammo[slot] -= 1;
                 }
@@ -560,7 +567,7 @@ fn fire_weapons(
                         obj.heading,
                         obj.level,
                         e,
-                        is_player,
+                        player,
                     );
                     ars.ammo[slot] -= 1;
                     // Scripts tag the player's bombs (`SetProjectileId`).
@@ -607,12 +614,17 @@ fn fire_weapons(
             8000.0,
             SoundPos::At(t.posf()),
         ));
-        if a.state == State::Player && t.state != State::Player {
-            a.score += 500;
+        if a.state == State::Player {
+            // Players punching each other only matters for the kill
+            // credit (multiplayer).
+            if t.state != State::Player {
+                a.score += 500;
+            }
             hurt.write(Hurt {
                 victim: target,
                 by_player: true,
                 by_weapon: false,
+                attacker: Some(a.player.unwrap_or(0)),
             });
         }
     }
@@ -626,6 +638,7 @@ fn detonate_bomb(world: &mut World, owner: Entity) {
         .find(|(_, _, p)| p.kind == ProjectileKind::Bomb && p.shooter == Some(owner))
         .map(|(e, o, _)| (e, o.pos, o.level));
     if let Some((e, pos, level)) = bomb {
+        let player = world.get::<Obj>(owner).and_then(|o| o.player).unwrap_or(0);
         world.entity_mut(e).despawn();
         world.write_message(Explode {
             pos,
@@ -633,6 +646,7 @@ fn detonate_bomb(world: &mut World, owner: Entity) {
             layer: level,
             source: None,
             by_player: true,
+            player: Some(player),
         });
     }
 }
@@ -777,6 +791,7 @@ fn move_projectiles(
                         layer: obj.level,
                         source: Some(e),
                         by_player: p.by_player,
+                        player: p.player,
                     });
                     remove = true;
                 }
@@ -789,6 +804,7 @@ fn move_projectiles(
                         layer: obj.level,
                         source: Some(e),
                         by_player: p.by_player,
+                        player: p.player,
                     });
                     remove = true;
                 }
@@ -899,6 +915,7 @@ fn projectile_hits(
                         layer: po.level,
                         source: Some(pe),
                         by_player: p.by_player,
+                        player: p.player,
                     });
                     commands.entity(pe).despawn();
                     break;
@@ -909,6 +926,7 @@ fn projectile_hits(
                 victim: te,
                 by_player: p.by_player,
                 by_weapon: true,
+                attacker: p.player,
             });
             if t.filter == -1 || t.filter == weapon.filter_class() {
                 if p.kind == ProjectileKind::Petrol {
@@ -1039,6 +1057,7 @@ fn explosions(
                         victim: e,
                         by_player: ex.by_player,
                         by_weapon: true,
+                        attacker: ex.player,
                     });
                 }
             }
@@ -1231,7 +1250,7 @@ fn pickups(
             ));
         }
         if let Some(t) = &texts {
-            banner.show(t.global(0x834 + kind - 1));
+            banner.show_for(o.player, t.global(0x834 + kind - 1));
         }
         set.write(SetScenery {
             sx,

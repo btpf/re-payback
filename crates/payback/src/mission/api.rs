@@ -937,6 +937,7 @@ impl<'w> Script<'w> {
             layer: 0,
             source: None,
             by_player: false,
+            player: None,
         });
     }
 

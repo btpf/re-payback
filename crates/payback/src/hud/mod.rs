@@ -14,12 +14,14 @@ pub mod paint;
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
-use crate::level::LevelSpec;
+use crate::level::{GameMode, LevelSpec};
 use crate::sim::Obj;
+use crate::sim::combat::Arsenal;
 use crate::sim::people::PlayerSession;
 use bevy::{prelude::*, window::PrimaryWindow};
 use icons::{HudIcons, Icon};
 pub use paint::{Blend, CANVAS_H, Painter, blank, canvas_width};
+use paint::text_len;
 use payback_formats::Phrases;
 use std::collections::VecDeque;
 
@@ -46,6 +48,18 @@ pub struct HudData {
     pub multiplayer: bool,
     /// Draw the flashing checkpoint marker at the target.
     pub checkpoint: bool,
+    /// Split screen: each player's view, by player number.
+    pub views: Vec<ViewHud>,
+}
+
+/// What one split-screen view shows (`FUN_0105bd98`): weapons and ammo,
+/// hearts and the kill count.
+#[derive(Clone, Default, Debug)]
+pub struct ViewHud {
+    pub health: i32,
+    pub weapon: usize,
+    pub ammo: [i32; 8],
+    pub kills: i32,
 }
 
 /// Message-box speaker icons (`Dialog_Begin(n)`).
@@ -133,6 +147,10 @@ pub struct BigTitle {
     y: i32,
     vy: i32,
     pitch: i32,
+    /// Split screen: a different text per view ("You win!" / "You lose!").
+    each: Vec<String>,
+    /// Split screen: only this player's view shows it.
+    view: Option<u8>,
 }
 
 impl BigTitle {
@@ -143,7 +161,21 @@ impl BigTitle {
             y: -0xF00,
             vy: 0x100,
             pitch: 120,
+            each: Vec::new(),
+            view: None,
         };
+    }
+
+    /// Shown in `player`'s view only (split screen; e.g. "Wasted!").
+    pub fn show_for(&mut self, player: Option<u8>, text: impl Into<String>) {
+        self.show(text);
+        self.view = player;
+    }
+
+    /// One text per split-screen view.
+    pub fn show_each(&mut self, texts: Vec<String>) {
+        self.show(texts.first().cloned().unwrap_or_default());
+        self.each = texts;
     }
 }
 
@@ -152,12 +184,21 @@ impl BigTitle {
 pub struct Banner {
     text: String,
     t: i32,
+    /// Split screen: the player whose view shows it (None: every view).
+    view: Option<u8>,
 }
 
 impl Banner {
     pub fn show(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.t = 0;
+        self.view = None;
+    }
+
+    /// Shown in `player`'s view only (split screen).
+    pub fn show_for(&mut self, player: Option<u8>, text: impl Into<String>) {
+        self.show(text);
+        self.view = player;
     }
 }
 
@@ -318,19 +359,39 @@ fn load_minimap(data: &GameData, map: &str) -> Option<Icon> {
     })
 }
 
-/// Copy the followed player's state into the HUD values.
+/// Copy the followed player's state into the HUD values (every player's
+/// in split screen).
 fn collect(
-    player: Query<&Obj, With<CameraTarget>>,
+    player: Query<(&Obj, Option<&Arsenal>), With<CameraTarget>>,
     session: Res<PlayerSession>,
+    mode: Res<GameMode>,
+    game: Option<Res<crate::multiplayer::Match>>,
     mut hud: ResMut<HudData>,
 ) {
     hud.lives = session.lives;
     hud.multiplier = session.multiplier;
-    if let Ok(obj) = player.single() {
+    let weapons = |ars: Option<&Arsenal>| ars.map_or((0, [0; 8]), |a| (a.current as usize, a.ammo));
+    if mode.is_multiplayer() {
+        hud.multiplayer = true;
+        hud.views.resize(mode.players(), ViewHud::default());
+        for (i, v) in hud.views.iter_mut().enumerate() {
+            v.kills = game.as_ref().map_or(0, |g| g.kills[i]);
+            v.health = 0;
+        }
+        for (obj, ars) in &player {
+            if let Some(v) = obj.player.and_then(|p| hud.views.get_mut(p as usize)) {
+                v.health = obj.health;
+                (v.weapon, v.ammo) = weapons(ars);
+            }
+        }
+        return;
+    }
+    if let Ok((obj, ars)) = player.single() {
         hud.health = obj.health;
         hud.wanted = obj.wanted;
         hud.score = obj.score;
         hud.player_pos = Some(obj.pos.truncate());
+        (hud.weapon, hud.ammo) = weapons(ars);
     }
 }
 
@@ -457,12 +518,14 @@ fn draw(
     dialog: Res<Dialog>,
     title: Res<BigTitle>,
     banner: Res<Banner>,
+    texts: Res<Texts>,
 ) {
     let Some(icons) = icons else { return };
     let aspect = window
         .single()
         .map(|w| w.width() / w.height().max(1.0))
         .unwrap_or(1.25);
+    let physical = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
     let w = canvas_width(aspect);
     canvas.frame = canvas.frame.wrapping_add(1);
     let frame = canvas.frame;
@@ -478,6 +541,12 @@ fn draw(
     };
     let Some(px) = img.data.as_mut() else { return };
     px.fill(0);
+    if hud.multiplayer {
+        let label = texts.global(2189);
+        let views = Views { icons: &icons, title: &title, banner: &banner, label: &label, frame };
+        views.draw(px, w, &data.palette, &hud.views, physical);
+        return;
+    }
     let mut p = Painter {
         px,
         w,
@@ -487,32 +556,8 @@ fn draw(
     let ymax = CANVAS_H as i32 - 1;
     let cx = (xmax >> 1) + 1;
 
-    // Weapons: fist at (5,5), then slots 1..7 every 10 px.
     let blink = frame & 2 != 0;
-    for slot in 0..8 {
-        if slot != 0 && hud.ammo[slot] <= 0 {
-            continue;
-        }
-        let x = if slot == 0 { 5 } else { 5 + 10 * slot as i32 };
-        let (normal, bright) = &icons.weapons[slot];
-        let icon = if slot == hud.weapon && blink {
-            bright
-        } else {
-            normal
-        };
-        p.icon(icon, x, 5, Blend::Plain);
-    }
-    if hud.weapon != 0 {
-        let ammo = hud.ammo[hud.weapon].clamp(0, 99999);
-        for (k, d) in format!("{ammo:05}").bytes().enumerate() {
-            p.icon(
-                &icons.small_digits[(d - b'0') as usize],
-                5 + 10 * k as i32,
-                26,
-                Blend::Lighten,
-            );
-        }
-    }
+    draw_weapons(&mut p, &icons, hud.weapon, &hud.ammo, blink);
 
     if !hud.multiplayer {
         // Score: 7 digits (8 when larger).
@@ -630,21 +675,7 @@ fn draw(
         }
     }
 
-    // Vehicle-name banner: slides in, holds, slides out.
-    if !banner.text.is_empty() && banner.t <= 149 {
-        let t = banner.t;
-        let (h, ty) = if t < 20 {
-            (16 * t / 20, 16 * t / 20 - 14)
-        } else if t < 130 {
-            (16, 2)
-        } else {
-            let k = 149 - t;
-            (16 * k / 20, 16 * k / 20 - 14)
-        };
-        p.darken(cx - 80, 0, cx + 80, h);
-        let tx = cx - 7 * banner.text.len() as i32 / 2;
-        p.text(&icons.you, &banner.text, tx, ty, 7, Blend::Lighten);
-    }
+    draw_banner(&mut p, &icons, &banner, cx);
 
     // Message box.
     if let Some(speaker) = dialog.open {
@@ -686,5 +717,119 @@ fn draw(
             title.pitch,
             Blend::Lighten,
         );
+    }
+}
+
+/// Weapons: fist at (5,5), then slots 1..7 every 10 px; ammo of the
+/// selected one below.
+fn draw_weapons(p: &mut Painter, icons: &HudIcons, weapon: usize, ammo: &[i32; 8], blink: bool) {
+    for slot in 0..8 {
+        if slot != 0 && ammo[slot] <= 0 {
+            continue;
+        }
+        let x = if slot == 0 { 5 } else { 5 + 10 * slot as i32 };
+        let (normal, bright) = &icons.weapons[slot];
+        let icon = if slot == weapon && blink { bright } else { normal };
+        p.icon(icon, x, 5, Blend::Plain);
+    }
+    if weapon != 0 {
+        let ammo = ammo[weapon].clamp(0, 99999);
+        for (k, d) in format!("{ammo:05}").bytes().enumerate() {
+            p.icon(
+                &icons.small_digits[(d - b'0') as usize],
+                5 + 10 * k as i32,
+                26,
+                Blend::Lighten,
+            );
+        }
+    }
+}
+
+/// Vehicle-name banner: slides in, holds, slides out.
+fn draw_banner(p: &mut Painter, icons: &HudIcons, banner: &Banner, cx: i32) {
+    if banner.text.is_empty() || banner.t > 149 {
+        return;
+    }
+    let t = banner.t;
+    let (h, ty) = if t < 20 {
+        (16 * t / 20, 16 * t / 20 - 14)
+    } else if t < 130 {
+        (16, 2)
+    } else {
+        let k = 149 - t;
+        (16 * k / 20, 16 * k / 20 - 14)
+    };
+    p.darken(cx - 80, 0, cx + 80, h);
+    let tx = cx - 7 * banner.text.len() as i32 / 2;
+    p.text(&icons.you, &banner.text, tx, ty, 7, Blend::Lighten);
+}
+
+/// The split-screen HUD (`FUN_0105bd98`): per view the vehicle banner,
+/// weapons and ammo at the usual place, hearts centred at x = xmax' - 30,
+/// y = 10, and the kills box at (5, ymax' - 13); no minimap, score,
+/// stars, lives, timer or message box.
+struct Views<'a> {
+    icons: &'a HudIcons,
+    title: &'a BigTitle,
+    banner: &'a Banner,
+    /// "Kill(s):" (2189).
+    label: &'a str,
+    frame: u32,
+}
+
+impl Views<'_> {
+    /// Draw every view into its rectangle of the `w`x256 canvas;
+    /// `physical` is the window size the view rectangles are laid out in.
+    fn draw(&self, px: &mut [u8], w: usize, pal: &[u8; 768], views: &[ViewHud], physical: UVec2) {
+        let (pw, ph) = (physical.x.max(2), physical.y.max(2));
+        let rects = crate::camera::view_rects(views.len(), pw, ph);
+        for (i, v) in views.iter().enumerate() {
+            let Some(&(x, y, rw, rh)) = rects.get(i) else { continue };
+            let sx = |a: u32| (a as u64 * w as u64 / pw as u64) as usize;
+            let sy = |a: u32| (a as u64 * CANVAS_H as u64 / ph as u64) as usize;
+            let (x0, y0) = (sx(x), sy(y));
+            let (vw, vh) = (sx(rw).clamp(1, w - x0.min(w - 1)), sy(rh).clamp(1, CANVAS_H - y0.min(CANVAS_H - 1)));
+            let mut buf = vec![0u8; vw * CANVAS_H * 4];
+            let mut p = Painter { px: &mut buf, w: vw, pal };
+            self.view(&mut p, i, v, vw as i32, vh as i32);
+            for row in 0..vh {
+                let src = &buf[row * vw * 4..(row + 1) * vw * 4];
+                let at = ((y0 + row) * w + x0) * 4;
+                px[at..at + vw * 4].copy_from_slice(src);
+            }
+        }
+    }
+
+    fn view(&self, p: &mut Painter, i: usize, v: &ViewHud, vw: i32, vh: i32) {
+        let icons = self.icons;
+        let (xmax, ymax) = (vw - 1, vh - 1);
+        let cx = (xmax >> 1) + 1;
+        draw_weapons(p, icons, v.weapon, &v.ammo, self.frame & 2 != 0);
+        // Hearts centred at xmax - 30.
+        for k in 0..5 {
+            let big = v.health >= 1 && v.health / 20 >= k;
+            let icon = if big { &icons.heart_big } else { &icons.heart_small };
+            p.icon(icon, xmax - 30 - 25 + 10 * k, 10, Blend::Lighten);
+        }
+        // Kills box (`FUN_010199ec`).
+        let y = ymax - 13;
+        let len = text_len(self.label);
+        p.darken(0, y - 5, 5 + (len + 3) * 7 + 5, y + 13);
+        let s = format!("{} {}", self.label, v.kills);
+        p.text(&icons.them, &s, 5, y, 7, Blend::Lighten);
+        if self.banner.view.is_none_or(|b| b as usize == i) {
+            draw_banner(p, icons, self.banner, cx);
+        }
+        // Big title, smaller in a split view (pitch - 8), scaled to the
+        // view height.
+        let t = self.title;
+        if t.ticks > 0 && t.view.is_none_or(|p| p as usize == i) {
+            let text = t.each.get(i).unwrap_or(&t.text).to_uppercase();
+            let pitch = (t.pitch - 8).max(8);
+            let n = text_len(&text);
+            let x = cx - pitch * n / 2;
+            let y = ((t.y * 16) >> 12) * vh / CANVAS_H as i32 - 11;
+            p.text(&icons.big, &text, x, y, pitch, Blend::Lighten);
+        }
     }
 }

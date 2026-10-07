@@ -1,10 +1,13 @@
 //! Payback reimplementation (Bevy).
 //!
 //! Usage: `payback [--data <dir>] [--map <n>] [--level <0|1>] [--free]
-//!                 [--rampage <police 0..5>] [--screenshot <out.png>]
+//!                 [--rampage <police 0..5>] [--multiplayer <2..4> [--kills <n>]]
+//!                 [--screenshot <out.png>]
 //!                 [--record <file> | --play <file>] [--ticks <n>]`
 //!
 //! `--record`/`--play` are the replay determinism check (see `replay.rs`).
+//! `--multiplayer` starts a split-screen match on `--map` (key bindings in
+//! `multiplayer.rs`).
 //!
 //! Controls: arrows/WASD move the player. F2 toggles the free camera
 //! (WASD pan, Q/E rotate, R/F tilt, wheel or Z/X zoom).
@@ -20,6 +23,7 @@ mod intro;
 mod level;
 mod mapedit;
 mod mission;
+mod multiplayer;
 mod objects;
 mod rampage;
 mod replay;
@@ -80,7 +84,7 @@ fn main() -> AppExit {
             frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
-            (rampage::RampagePlugin, replay::ReplayPlugin),
+            (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
         ))
                 .add_systems(Update, screenshot_and_exit)
         // `--map` starts a level directly; otherwise the menus come first.

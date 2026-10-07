@@ -64,6 +64,8 @@ pub enum Request {
     StartLevel { city: u8, level: u8 },
     /// Rampage on `city` with police aggressiveness 0..5.
     StartRampage { city: u8, police: u8 },
+    /// Multiplayer deathmatch on `city` with the setup in the settings.
+    StartMultiplayer { city: u8 },
     /// Play a replay; afterwards return to the game menu or the main menu.
     PlayReplay { replay: Box<Replay>, back_to_game: bool },
     Exit,
@@ -82,6 +84,8 @@ pub enum Outcome {
     Level(u8, u8),
     /// Rampage setup "Play": city, police aggressiveness.
     Rampage(u8, u8),
+    /// Multiplayer setup "Play" / results "Play again": city.
+    Multiplayer(u8),
     /// Replay info "View Replay".
     Replay(Box<Replay>),
     Text(String),
@@ -108,6 +112,8 @@ pub struct Ctx<'a> {
     pub level_ticks: u32,
     /// The last game played (game menu "View replay" / "Save replay").
     pub last_replay: Option<&'a Replay>,
+    /// Multiplayer won/drawn/lost totals.
+    pub mp_totals: &'a mut crate::multiplayer::MpTotals,
     pub sfx: Vec<Sfx>,
     pub requests: Vec<Request>,
 }

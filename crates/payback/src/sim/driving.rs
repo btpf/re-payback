@@ -8,7 +8,7 @@
 //! grip; the remaining slip drives skid sounds and marks.
 
 use super::collide;
-use super::people::PlayerInput;
+use super::people::PlayerInputs;
 use super::{Obj, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
@@ -65,13 +65,14 @@ impl Plugin for DrivingPlugin {
 
 /// The player's controls drive the vehicle they're in.
 fn player_vehicle_stick(
-    input: Res<PlayerInput>,
+    inputs: Res<PlayerInputs>,
     mut q: Query<(&Obj, &Vehicle, &mut Stick), With<CameraTarget>>,
 ) {
     for (obj, veh, mut stick) in &mut q {
         if obj.state != State::Player {
             continue;
         }
+        let input = &inputs.0[obj.player.unwrap_or(0).min(3) as usize];
         if !veh.controls {
             *stick = Stick::default();
             continue;

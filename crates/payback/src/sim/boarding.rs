@@ -89,13 +89,13 @@ fn use_pressed(
 ) {
     let Some(mut library) = library else { return };
     // On foot: choose a vehicle (nearest door point, no range limit).
-    if let Ok((pe, p, stick, boarding)) = on_foot.single() {
+    for (pe, p, stick, boarding) in &on_foot {
         if !stick.use_vehicle || p.state != State::Player {
-            return;
+            continue;
         }
         if boarding.is_some() {
             commands.entity(pe).remove::<Boarding>();
-            return;
+            continue;
         }
         let best = vehicles
             .iter()
@@ -116,62 +116,61 @@ fn use_pressed(
                 entering: false,
             });
         }
-        return;
     }
     // Driving: get out (helicopters must land first).
-    let Ok((ve, mut v, veh, mut drive, stick, ars)) = driving.single_mut() else {
-        return;
-    };
-    if !stick.use_vehicle || v.state != State::Player || (veh.kind == vk::HELICOPTER && veh.flying)
-    {
-        return;
+    for (ve, mut v, veh, mut drive, stick, ars) in &mut driving {
+        if !stick.use_vehicle || v.state != State::Player || (veh.kind == vk::HELICOPTER && veh.flying)
+        {
+            continue;
+        }
+        let info = library.model(v.model).info.clone();
+        let mut exit = door_point(
+            &trig,
+            &v,
+            info.radius,
+            door_y(veh.kind, info.max_y),
+            192 * 6 / 5,
+        );
+        exit.z = v.pos.z;
+        let heading = wrap(v.heading - 0x5a0);
+        let ars = ars.cloned().unwrap_or_default();
+        let model = ars.current.person_model();
+        let Some(pe) = people::spawn_person(
+            &mut commands,
+            &data,
+            &mut library,
+            &mut meshes,
+            model,
+            exit,
+            heading,
+            State::Player,
+        ) else {
+            continue;
+        };
+        let player = v.player.unwrap_or(0);
+        let (score, wanted, health) = (v.score, v.wanted, *session.foot_health_mut(v.player));
+        let prev = v.pos;
+        commands.entity(pe).insert((CameraTarget, ars));
+        commands.queue(move |world: &mut World| {
+            if let Some(mut o) = world.get_mut::<Obj>(pe) {
+                o.score = score;
+                o.wanted = wanted;
+                o.health = health;
+                o.player = Some(player);
+                // The first collision step tests car centre -> exit point, so
+                // walls between pull the player back (Update 4 fix).
+                o.prev_pos = prev;
+            }
+            if let Some(mut p) = world.get_mut::<Person>(pe) {
+                p.follows_weapon = true;
+            }
+        });
+        commands.entity(ve).remove::<(CameraTarget, Arsenal)>();
+        v.state = State::Parked;
+        v.player = None;
+        v.speed = 0;
+        drive.door = DOOR_OPEN;
     }
-    let info = library.model(v.model).info.clone();
-    let mut exit = door_point(
-        &trig,
-        &v,
-        info.radius,
-        door_y(veh.kind, info.max_y),
-        192 * 6 / 5,
-    );
-    exit.z = v.pos.z;
-    let heading = wrap(v.heading - 0x5a0);
-    let ars = ars.cloned().unwrap_or_default();
-    let model = ars.current.person_model();
-    let Some(pe) = people::spawn_person(
-        &mut commands,
-        &data,
-        &mut library,
-        &mut meshes,
-        model,
-        exit,
-        heading,
-        State::Player,
-    ) else {
-        return;
-    };
-    let (score, wanted, health) = (v.score, v.wanted, session.foot_health);
-    let prev = v.pos;
-    commands.entity(pe).insert((CameraTarget, ars));
-    commands.queue(move |world: &mut World| {
-        if let Some(mut o) = world.get_mut::<Obj>(pe) {
-            o.score = score;
-            o.wanted = wanted;
-            o.health = health;
-            o.player = Some(0);
-            // The first collision step tests car centre -> exit point, so
-            // walls between pull the player back (Update 4 fix).
-            o.prev_pos = prev;
-        }
-        if let Some(mut p) = world.get_mut::<Person>(pe) {
-            p.follows_weapon = true;
-        }
-    });
-    commands.entity(ve).remove::<(CameraTarget, Arsenal)>();
-    v.state = State::Parked;
-    v.player = None;
-    v.speed = 0;
-    drive.door = DOOR_OPEN;
 }
 
 /// Walk to the driver's door, open it, get in (and hijack a driven car).
@@ -277,13 +276,13 @@ fn walk_to_door(
             }
         }
         // The vehicle becomes the player.
-        session.foot_health = p.health;
+        *session.foot_health_mut(p.player) = p.health;
         v.state = State::Player;
-        v.player = Some(0);
+        v.player = Some(p.player.unwrap_or(0));
         v.score = p.score;
         v.wanted = p.wanted;
         if let Some(t) = &texts {
-            banner.show(t.global(TYPES[veh.kind].name_phrase));
+            banner.show_for(v.player, t.global(TYPES[veh.kind].name_phrase));
         }
         let arsenal = ars.cloned().unwrap_or_default();
         commands.entity(b.vehicle).insert((CameraTarget, arsenal));

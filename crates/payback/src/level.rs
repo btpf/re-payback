@@ -31,12 +31,34 @@ pub enum GameMode {
         /// Police aggressiveness 0..5 (phrases 2491..2496).
         police: u8,
     },
+    /// Split-screen deathmatch (`DAT_0114c7c8 = 1`, set by the
+    /// multiplayer setup `FUN_0102b2c8`): 2..4 players (`DAT_0114c2e4`),
+    /// first to `kills` (`DAT_0114c2e8`) wins; no level script, no lives,
+    /// no crimes or route police (docs/re/combat_police.md §7).
+    Multiplayer { players: u8, kills: u8 },
 }
 
 impl GameMode {
     pub fn is_rampage(&self) -> bool {
         matches!(self, GameMode::Rampage { .. })
     }
+
+    pub fn is_multiplayer(&self) -> bool {
+        matches!(self, GameMode::Multiplayer { .. })
+    }
+
+    /// Players in the game (1 outside multiplayer).
+    pub fn players(&self) -> usize {
+        match self {
+            GameMode::Multiplayer { players, .. } => (*players as usize).clamp(1, 4),
+            _ => 1,
+        }
+    }
+}
+
+/// Run condition: not a multiplayer game (crimes, police, scripts).
+pub fn single_player(mode: Res<GameMode>) -> bool {
+    !mode.is_multiplayer()
 }
 
 /// Start positions (original units: x, y, z-down) from squares with no

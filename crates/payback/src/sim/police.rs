@@ -48,6 +48,8 @@ pub struct Hurt {
     pub by_player: bool,
     /// Weapon or explosion (true) vs collision or punch (false).
     pub by_weapon: bool,
+    /// The attacking player's number (kill credit in multiplayer).
+    pub attacker: Option<u8>,
 }
 
 /// Each victim counts once for injury and once for death.
@@ -81,16 +83,20 @@ impl Plugin for PolicePlugin {
                 },
             )
             .add_systems(OnExit(AppState::Playing), reset_police)
+            // Crimes, the wanted level and cops on foot are unused in
+            // multiplayer.
             .add_systems(
                 FixedUpdate,
                 (crimes, decay_wanted)
                     .chain()
+                    .distributive_run_if(crate::level::single_player)
                     .after(super::combat::CombatSet),
             )
             // Cops steer after the ambient ped AI has reset their sticks.
             .add_systems(
                 FixedUpdate,
                 cops.in_set(super::people::PeopleThink)
+                    .run_if(crate::level::single_player)
                     .after(super::ai::people_orders),
             );
     }

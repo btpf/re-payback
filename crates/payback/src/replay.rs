@@ -20,9 +20,12 @@
 //! and logs the same hashes, then exits. Matching hashes = deterministic.
 //! `--record ... --again` plays the recording back in the same session
 //! after leaving the level, logging a second set of hashes.
+//!
+//! Multiplayer games record one word per player per tick (records
+//! interleaved by player, as in the original).
 
 use crate::level::{AppState, GameMode, LevelLoaded, LevelSpec};
-use crate::sim::people::{PeopleThink, PlayerInput};
+use crate::sim::people::{PeopleThink, PlayerInput, PlayerInputs};
 use crate::objects::ObjectLibrary;
 use crate::sim::{Obj, Rng};
 use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
@@ -149,7 +152,12 @@ pub fn launch_of(r: &Replay) -> Option<(LevelSpec, GameMode)> {
         map,
         level: (r.header.level & 1) as u8,
     };
-    let mode = if r.header.rampage {
+    let mode = if r.header.players > 1 {
+        GameMode::Multiplayer {
+            players: r.header.players.clamp(2, 4) as u8,
+            kills: r.header.required_kills.clamp(1, 50) as u8,
+        }
+    } else if r.header.rampage {
         GameMode::Rampage {
             police: r.header.police.clamp(0, 5) as u8,
         }
@@ -181,11 +189,12 @@ fn begin(
     mut st: ResMut<ReplayState>,
     mut req: ResMut<PlayRequest>,
     mut rng: ResMut<Rng>,
-    mut input: ResMut<PlayerInput>,
+    mut inputs: ResMut<PlayerInputs>,
     spec: Res<LevelSpec>,
     mode: Res<GameMode>,
+    devices: Res<crate::multiplayer::MpDevices>,
 ) {
-    *input = PlayerInput::default();
+    *inputs = PlayerInputs::default();
     *st = ReplayState::default();
     // Game state that outlives a level must start fresh too, or a replay
     // viewed after playing would diverge (traffic lights, pickup respawns).
@@ -208,15 +217,29 @@ fn begin(
     rng.seed(seed);
     let (rampage, police) = match *mode {
         GameMode::Rampage { police } => (true, police as i32),
-        GameMode::Story => (false, 2),
+        _ => (false, 2),
+    };
+    let (players, controllers, required_kills) = match *mode {
+        GameMode::Multiplayer { players, kills } => {
+            let mut c = [-1; 4];
+            for (p, c) in c.iter_mut().enumerate().take(players as usize) {
+                // Original controller codes: 0..3 joystick n, 12 keyboard.
+                *c = match devices.0.get(p) {
+                    Some(crate::multiplayer::Device::Joystick(n)) => *n as i32,
+                    _ => KEYBOARD,
+                };
+            }
+            (players as i32, c, kills as i32)
+        }
+        _ => (1, [KEYBOARD, -1, -1, -1], 5),
     };
     st.mode = Mode::Record;
     st.replay = Some(Replay {
         header: Header {
             version: VERSION,
-            players: 1,
-            controllers: [KEYBOARD, -1, -1, -1],
-            required_kills: 5,
+            players,
+            controllers,
+            required_kills,
             duration: 0,
             seed: seed as i32,
             rampage,
@@ -232,7 +255,8 @@ fn begin(
 fn end(mut st: ResMut<ReplayState>, mut last: ResMut<LastReplay>) {
     if st.mode == Mode::Record {
         if let Some(mut r) = st.replay.take() {
-            r.header.duration = r.records.iter().map(|r| r.input.ticks as i32).sum();
+            let players = r.header.players.max(1) as usize;
+            r.header.duration = r.records.iter().step_by(players).map(|r| r.input.ticks as i32).sum();
             last.0 = Some(r);
         }
     }
@@ -255,49 +279,58 @@ fn to_input(i: &PlayerInput) -> Input {
     }
 }
 
-/// Record this tick's controls, or replace them with the recorded ones.
-fn feed(mut st: ResMut<ReplayState>, mut input: ResMut<PlayerInput>) {
+/// Record this tick's controls, or replace them with the recorded ones
+/// (one record per player per frame).
+fn feed(mut st: ResMut<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
     let st = &mut *st;
     st.tick += 1;
+    let players = st.replay.as_ref().map_or(1, |r| r.header.players.clamp(1, 4) as usize);
+    let inputs = &mut inputs.0[..players];
     match st.mode {
         Mode::Off => {}
         Mode::Record => {
             let Some(r) = &mut st.replay else { return };
-            if r.records.len() < MAX_RECORDS {
-                r.records.push(Record {
-                    input: to_input(&input),
-                    comment: None,
-                });
+            if r.records.len() + players <= MAX_RECORDS {
+                for input in inputs.iter() {
+                    r.records.push(Record {
+                        input: to_input(input),
+                        comment: None,
+                    });
+                }
             }
         }
         Mode::Play => {
             let Some(r) = &st.replay else { return };
             if st.left == 0 {
-                let Some(rec) = r.records.get(st.cursor) else {
+                let Some(frame) = r.records.get(st.cursor..st.cursor + players) else {
                     if !st.finished {
                         info!("replay: finished after {} ticks", st.tick - 1);
                     }
                     st.finished = true;
-                    *input = PlayerInput::default();
+                    inputs.fill(PlayerInput::default());
                     return;
                 };
-                let i = rec.input;
-                st.cursor += 1;
-                st.left = i.ticks.max(1);
-                *input = PlayerInput {
-                    left: i.left,
-                    right: i.right,
-                    accel: i.accelerate,
-                    reverse: i.reverse,
-                    fire: i.shoot,
-                    brake: i.brake,
-                    use_pressed: i.use_vehicle,
-                    weapon_pressed: (i.weapon < 8).then_some(i.weapon),
-                };
+                st.cursor += players;
+                st.left = frame[0].input.ticks.max(1);
+                for (input, rec) in inputs.iter_mut().zip(frame) {
+                    let i = rec.input;
+                    *input = PlayerInput {
+                        left: i.left,
+                        right: i.right,
+                        accel: i.accelerate,
+                        reverse: i.reverse,
+                        fire: i.shoot,
+                        brake: i.brake,
+                        use_pressed: i.use_vehicle,
+                        weapon_pressed: (i.weapon < 8).then_some(i.weapon),
+                    };
+                }
             } else {
                 // Later ticks of a multi-tick record: held keys only.
-                input.use_pressed = false;
-                input.weapon_pressed = None;
+                for input in inputs.iter_mut() {
+                    input.use_pressed = false;
+                    input.weapon_pressed = None;
+                }
             }
             st.left -= 1;
         }
@@ -314,21 +347,25 @@ fn stop_on_escape(keys: Res<ButtonInput<KeyCode>>, mut st: ResMut<ReplayState>) 
 /// `--script-input`: a fixed pattern of controls instead of the keyboard
 /// (walk, turn, shoot, try a vehicle, switch weapon), for the determinism
 /// check.
-fn scripted_input(st: Res<ReplayState>, mut input: ResMut<PlayerInput>) {
+fn scripted_input(st: Res<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
     if st.mode != Mode::Record || !std::env::args().any(|a| a == "--script-input") {
         return;
     }
-    let t = st.tick + 1;
-    *input = PlayerInput {
-        accel: t % 200 < 150,
-        left: (20..35).contains(&(t % 100)),
-        right: (60..70).contains(&(t % 120)),
-        fire: t % 50 < 5,
-        brake: t % 300 > 290,
-        reverse: false,
-        use_pressed: t % 250 == 0,
-        weapon_pressed: (t % 400 == 100).then_some(1),
-    };
+    let players = st.replay.as_ref().map_or(1, |r| r.header.players.clamp(1, 4) as u32);
+    for (p, input) in inputs.0.iter_mut().enumerate().take(players as usize) {
+        // Other players run the same pattern, shifted.
+        let t = st.tick + 1 + 37 * p as u32;
+        *input = PlayerInput {
+            accel: t % 200 < 150,
+            left: (20..35).contains(&(t % 100)),
+            right: (60..70).contains(&(t % 120)),
+            fire: t % 50 < 5,
+            brake: t % 300 > 290,
+            reverse: false,
+            use_pressed: t % 250 == 0,
+            weapon_pressed: (t % 400 == 100).then_some(1),
+        };
+    }
 }
 
 /// Order-independent hash of every object's state (position, velocity,
@@ -405,8 +442,9 @@ fn debug_hash(
         if let (Some(path), Some(r)) = (record, &st.replay) {
             let mut r = r.clone();
             // The record of this tick is not part of the run.
-            r.records.truncate(done as usize);
-            r.header.duration = r.records.len() as i32;
+            let players = r.header.players.max(1) as usize;
+            r.records.truncate(done as usize * players);
+            r.header.duration = (r.records.len() / players) as i32;
             match std::fs::write(&path, r.write()) {
                 Ok(()) => info!("replay: wrote {} records to {path}", r.records.len()),
                 Err(e) => error!("replay: {path}: {e}"),

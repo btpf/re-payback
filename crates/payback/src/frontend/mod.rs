@@ -22,6 +22,7 @@ mod levels;
 mod menus;
 mod misc;
 mod model;
+mod multiplayer;
 pub mod progress;
 mod rampage;
 mod replays;
@@ -101,6 +102,8 @@ struct Launch {
     replay: Option<Replay>,
     /// After a replay, back to the game menu (else the main menu).
     back_to_game: bool,
+    /// Multiplayer: the players' devices.
+    devices: Option<Vec<crate::multiplayer::Device>>,
 }
 
 impl Launch {
@@ -113,6 +116,7 @@ impl Launch {
             mode: GameMode::Story,
             replay: None,
             back_to_game: false,
+            devices: None,
         }
     }
 }
@@ -133,6 +137,9 @@ struct LevelResult {
     /// Rampage: (city, police aggressiveness, score `DAT_0114c420`).
     rampage: Option<(usize, u8, i32)>,
     back_to_game: bool,
+    /// Multiplayer: (result, players); result = winner, -1 draw,
+    /// -2 aborted (`FUN_01027330`).
+    mp: Option<(i32, usize)>,
 }
 
 /// Outcome seen, waiting for [`END_DELAY`].
@@ -225,6 +232,8 @@ fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
         "save" => Box::new(misc::SaveGame::new()),
         "replays" => Box::new(replays::ReplayList::new(cx)),
         "rampage" => Box::new(rampage::RampageSetup::new(cx)),
+        "multiplayer" => Box::new(multiplayer::MultiplayerSetup::new(cx)),
+        "mpresults" => Box::new(multiplayer::MpResults::new(cx, 1, 3)),
         "highscore" => Box::new(misc::TextEntry::new(cx.g(1611), "Travis", 25)),
         "replayinfo" => {
             let name = crate::arg("--replay-file")?;
@@ -263,6 +272,14 @@ fn init_stack(fe: &mut Frontend, cx: &mut Ctx, result: Option<LevelResult>) {
         };
         cx.profile.played = true;
         fe.stack.push(Box::new(menus::MainMenu::running()));
+        if let Some((result, players)) = r.mp {
+            fe.stack.push(Box::new(menus::GameMenu::new()));
+            if let Some((c, _)) = r.city {
+                cx.settings.rampage_city = c as u8;
+            }
+            fe.stack.push(Box::new(multiplayer::MpResults::new(cx, result, players)));
+            return;
+        }
         fe.stack.push(Box::new(match r.rampage {
             Some((c, p, score)) => menus::GameMenu::after_rampage(c, p, score),
             None => menus::GameMenu::new(),
@@ -363,6 +380,7 @@ fn watch_level_end(
     replay: Res<ReplayState>,
     back: Res<ReplayReturn>,
     time: Res<Time<Real>>,
+    game: Res<crate::multiplayer::Match>,
     mut pending: ResMut<PendingEnd>,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -380,6 +398,7 @@ fn watch_level_end(
                 city: None,
                 rampage: None,
                 back_to_game: back.back_to_game,
+                mp: None,
             });
             next.set(AppState::Frontend);
         }
@@ -395,14 +414,18 @@ fn watch_level_end(
                 .map(|c| (c, spec.level.min(1) as usize));
             let rampage = match *mode {
                 GameMode::Rampage { police } => city.map(|(c, _)| (c, police, high.0)),
-                GameMode::Story => None,
+                _ => None,
             };
+            let mp = mode
+                .is_multiplayer()
+                .then(|| (game.result.unwrap_or(-2), mode.players()));
             let r = LevelResult {
                 outcome: Some(outcome),
                 minutes: clock.minutes() as i32,
                 city,
                 rampage,
                 back_to_game: false,
+                mp,
             };
             pending.0 = Some((r, time.elapsed_secs()));
         }
@@ -465,6 +488,8 @@ struct Env<'w, 's> {
     last_replay: Res<'w, LastReplay>,
     replay: Res<'w, ReplayState>,
     replay_return: ResMut<'w, ReplayReturn>,
+    mp_totals: ResMut<'w, crate::multiplayer::MpTotals>,
+    mp_devices: ResMut<'w, crate::multiplayer::MpDevices>,
     intro_req: MessageWriter<'w, crate::intro::PlayIntro>,
     intro_done: MessageReader<'w, 's, crate::intro::IntroFinished>,
     intro: Option<Res<'w, crate::intro::Intro>>,
@@ -475,7 +500,9 @@ struct Env<'w, 's> {
     icons: Option<Res<'w, HudIcons>>,
     fe_icons: Option<Res<'w, FrontendIcons>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    game_cam: Query<'w, 's, Entity, With<GameCamera>>,
+    /// The camera the menu's back layer is drawn on: the game camera, or
+    /// the full-window overlay in split screen.
+    game_cam: Query<'w, 's, Entity, (With<IsDefaultUiCamera>, With<Camera3d>)>,
     current: ResMut<'w, model::CurrentModel>,
 }
 
@@ -522,6 +549,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         goal: env.mission.goal,
         level_ticks: env.clock.0,
         last_replay: env.last_replay.0.as_ref(),
+        mp_totals: &mut env.mp_totals,
         sfx: Vec::new(),
         requests: Vec::new(),
     };
@@ -601,10 +629,20 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                 l.mode = GameMode::Rampage { police };
                 fe.loading = Some((l, 0));
             }
+            Request::StartMultiplayer { city } => {
+                let devices = multiplayer::active_devices(cx.settings);
+                let mut l = Launch::story(city, 0);
+                l.mode = GameMode::Multiplayer {
+                    players: devices.len() as u8,
+                    kills: cx.settings.required_kills.clamp(1, 50),
+                };
+                l.devices = Some(devices);
+                fe.loading = Some((l, 0));
+            }
             Request::PlayReplay { replay, back_to_game } => {
                 if let Some((spec, mode)) = crate::replay::launch_of(&replay) {
                     let replay = Some(*replay);
-                    fe.loading = Some((Launch { spec, mode, replay, back_to_game }, 0));
+                    fe.loading = Some((Launch { spec, mode, replay, back_to_game, devices: None }, 0));
                 }
             }
             Request::Exit => {
@@ -622,6 +660,18 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                 env.virtual_time.unpause();
                 close = true;
                 env.next.set(AppState::Frontend);
+                // A multiplayer match quit from the pause menu: "Match
+                // aborted." on the results screen.
+                if env.mode.is_multiplayer() && !env.replay.playing() {
+                    env.commands.insert_resource(LevelResult {
+                        outcome: Some(LevelOutcome::MatchOver),
+                        minutes: 0,
+                        city: None,
+                        rampage: None,
+                        back_to_game: false,
+                        mp: Some((-2, env.mode.players())),
+                    });
+                }
             }
         }
     }
@@ -645,6 +695,9 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         if *n == 3 {
             *env.spec = launch.spec.clone();
             *env.mode = launch.mode;
+            if let Some(d) = &launch.devices {
+                env.mp_devices.0 = d.clone();
+            }
             env.replay_return.back_to_game = launch.back_to_game;
             if launch.replay.is_none() {
                 cx.profile.played = true;

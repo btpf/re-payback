@@ -21,9 +21,10 @@ pub struct Killed {
     pub police: bool,
 }
 
-/// Who last hurt each object (true = the player).
+/// Who last hurt each object: the attacking player's number, None for
+/// anyone else (`+0x4b0`, "last attacker player").
 #[derive(Resource, Default)]
-pub struct LastAttacker(HashMap<Entity, bool>);
+pub struct LastAttacker(pub HashMap<Entity, Option<u8>>);
 
 /// Cop kills since the last bonus (`DAT_0114c6a4`).
 #[derive(Resource, Default)]
@@ -52,9 +53,10 @@ impl Plugin for ScorePlugin {
     }
 }
 
-fn track_attackers(mut hurt: MessageReader<Hurt>, mut last: ResMut<LastAttacker>, alive: Query<(), With<Obj>>) {
+pub(crate) fn track_attackers(mut hurt: MessageReader<Hurt>, mut last: ResMut<LastAttacker>, alive: Query<(), With<Obj>>) {
     for h in hurt.read() {
-        last.0.insert(h.victim, h.by_player);
+        let attacker = if h.by_player { Some(h.attacker.unwrap_or(0)) } else { None };
+        last.0.insert(h.victim, attacker);
     }
     last.0.retain(|e, _| alive.contains(*e));
 }
@@ -72,7 +74,7 @@ fn score_kills(
 ) {
     for k in killed.read() {
         let Ok((pe, mut p)) = player.single_mut() else { continue };
-        if k.victim == pe || last.0.remove(&k.victim) != Some(true) {
+        if k.victim == pe || last.0.remove(&k.victim).flatten().is_none() {
             continue;
         }
         p.score += if k.police { POLICE } else { CIVILIAN } * session.multiplier;

@@ -210,9 +210,14 @@ pub struct Settings {
     pub cd_mode: u8,
     /// Rampage police aggressiveness 0..5 (config field 13).
     pub police: u8,
-    /// Rampage city (config field 11).
+    /// Rampage and multiplayer city (config field 11).
     pub rampage_city: u8,
     pub keys: [String; 11],
+    /// Multiplayer setup: each player's device (config: 4 × {device, key
+    /// set}; here the key set is part of the device).
+    pub mp_devices: [crate::multiplayer::Device; 4],
+    /// Multiplayer required kills 1..50 (`DAT_0114c2e8`, config field 10).
+    pub required_kills: u8,
 }
 
 impl Default for Settings {
@@ -228,6 +233,11 @@ impl Default for Settings {
             police: 2,
             rampage_city: 0,
             keys: DEFAULT_KEYS.map(String::from),
+            mp_devices: {
+                use crate::multiplayer::Device;
+                [Device::Keyboard(0), Device::Keyboard(1), Device::Off, Device::Off]
+            },
+            required_kills: 5,
         }
     }
 }
@@ -262,7 +272,15 @@ impl Settings {
                 "cd_mode" => s.cd_mode = num(3).unwrap_or(s.cd_mode),
                 "police" => s.police = num(5).unwrap_or(s.police),
                 "city" => s.rampage_city = num(2).unwrap_or(s.rampage_city),
+                "required_kills" => s.required_kills = num(50).unwrap_or(s.required_kills).max(1),
                 _ => {
+                    if let Some(p) = k.strip_prefix("mp.player").and_then(|p| p.parse::<usize>().ok()) {
+                        if let (Some(slot), Some(d)) =
+                            (s.mp_devices.get_mut(p.wrapping_sub(1)), crate::multiplayer::Device::parse(v))
+                        {
+                            *slot = d;
+                        }
+                    }
                     if let Some(a) = k.strip_prefix("key.") {
                         if let Some(i) = ACTIONS.iter().position(|x| *x == a) {
                             s.keys[i] = v.to_string();
@@ -286,6 +304,10 @@ impl Settings {
         t += &format!("cd_mode = {}\n", self.cd_mode);
         t += &format!("police = {}\n", self.police);
         t += &format!("city = {}\n", self.rampage_city);
+        t += &format!("required_kills = {}\n", self.required_kills);
+        for (i, d) in self.mp_devices.iter().enumerate() {
+            t += &format!("mp.player{} = {}\n", i + 1, d.name());
+        }
         for (a, k) in ACTIONS.iter().zip(&self.keys) {
             t += &format!("key.{a} = {k}\n");
         }

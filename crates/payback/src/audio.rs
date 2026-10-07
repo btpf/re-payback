@@ -222,6 +222,12 @@ impl Sound {
 #[derive(Resource, Default, Clone, Copy)]
 pub struct Listener(pub Vec3);
 
+/// Split screen: the other players' listening points. The original
+/// prioritises each sound per (sound, listener) (`FUN_01006750`); here a
+/// sound is as loud as at its nearest listener.
+#[derive(Resource, Default, Clone)]
+pub struct OtherListeners(pub Vec<Vec3>);
+
 /// Global FX volume, 0-100 (pause-menu option).
 #[derive(Resource, Clone, Copy)]
 pub struct FxVolume(pub u8);
@@ -237,6 +243,7 @@ pub struct AudioPlugin;
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Listener>()
+            .init_resource::<OtherListeners>()
             .init_resource::<FxVolume>()
             .add_systems(Startup, load_sounds)
             .add_systems(PostUpdate, (start_sounds, mix).chain());
@@ -328,10 +335,18 @@ fn start_sounds(
 }
 
 /// Apply the original mixer's voice selection, attenuation and pitch.
-fn mix(listener: Res<Listener>, fx: Res<FxVolume>, mut playing: Query<(&Sound, &mut AudioSink)>) {
+fn mix(
+    listener: Res<Listener>,
+    others: Res<OtherListeners>,
+    fx: Res<FxVolume>,
+    mut playing: Query<(&Sound, &mut AudioSink)>,
+) {
+    let loudest = |s: &Sound| {
+        others.0.iter().fold(amplitude(s, listener.0), |a, &l| a.max(amplitude(s, l)))
+    };
     let mut voices: Vec<(f32, Mut<AudioSink>, &Sound)> = playing
         .iter_mut()
-        .map(|(s, sink)| (amplitude(s, listener.0), sink, s))
+        .map(|(s, sink)| (loudest(s), sink, s))
         .collect();
     voices.sort_by(|a, b| b.0.total_cmp(&a.0));
     let master = fx.0 as f32 / 100.0;

@@ -560,6 +560,7 @@ fn tank_cannon(
                 kind: super::combat::ProjectileKind::Missile,
                 shooter: Some(e),
                 by_player: is_player,
+                player: is_player.then(|| obj.player.unwrap_or(0)),
             },
             Mesh3d(library.model(model).mesh.clone()),
             MeshMaterial3d(library.material.clone()),

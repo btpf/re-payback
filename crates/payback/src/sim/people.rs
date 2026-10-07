@@ -7,9 +7,9 @@ use super::collide;
 use super::combat::{Arsenal, Panic};
 use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of, wrap};
 use crate::audio::{Listener, Sound, SoundPos, id};
-use crate::camera::{CameraTarget, GameCam};
+use crate::camera::{CameraTarget, GameCam, ViewCams};
 use crate::data::GameData;
-use crate::level::{AppState, LevelEntity, LevelLoaded, StartPoints};
+use crate::level::{AppState, GameMode, LevelEntity, LevelLoaded, StartPoints};
 use crate::objects::{ObjectLibrary, corner_positions};
 use crate::world::{City, heading_to_render, object_to_render};
 use bevy::{mesh::VertexAttributeValues, prelude::*};
@@ -21,9 +21,9 @@ pub const PERSON_RADIUS: i32 = 192;
 /// Drowning depth (z) for people in water.
 const DROWN_Z: i32 = 27000;
 /// Ticks between player health regeneration steps.
-const REGEN_TICKS: i32 = 250;
+pub const REGEN_TICKS: i32 = 250;
 /// Respawn delay after death, ticks.
-const RESPAWN_TICKS: i32 = 80;
+pub const RESPAWN_TICKS: i32 = 80;
 /// Hard limit of the original object table.
 pub const MAX_OBJECTS: usize = 32;
 
@@ -102,6 +102,19 @@ pub struct PlayerSession {
     pub respawn_square: Option<(usize, usize, usize)>,
     /// Start points used recently (avoid repeats).
     pub recent_starts: Vec<usize>,
+    /// On-foot health of multiplayer players 2..4 while driving (player 1
+    /// uses `foot_health`).
+    pub others_foot_health: [i32; 3],
+}
+
+impl PlayerSession {
+    /// On-foot health kept while player `p` drives.
+    pub fn foot_health_mut(&mut self, p: Option<u8>) -> &mut i32 {
+        match p.unwrap_or(0) {
+            0 => &mut self.foot_health,
+            n => &mut self.others_foot_health[(n as usize - 1).min(2)],
+        }
+    }
 }
 
 impl Default for PlayerSession {
@@ -114,13 +127,15 @@ impl Default for PlayerSession {
             regen: 0,
             respawn_square: None,
             recent_starts: Vec::new(),
+            others_foot_health: [100; 3],
         }
     }
 }
 
-/// Held keys and latched presses, collected every frame and consumed by
-/// the next fixed tick (so short presses aren't lost between ticks).
-#[derive(Resource, Default)]
+/// One player's held keys and latched presses, collected every frame and
+/// consumed by the next fixed tick (so short presses aren't lost between
+/// ticks).
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct PlayerInput {
     pub left: bool,
     pub right: bool,
@@ -131,6 +146,10 @@ pub struct PlayerInput {
     pub use_pressed: bool,
     pub weapon_pressed: Option<u8>,
 }
+
+/// Controls of every player, by player number (single player: index 0).
+#[derive(Resource, Default)]
+pub struct PlayerInputs(pub [PlayerInput; 4]);
 
 #[derive(Resource)]
 pub struct HumanMotion(pub Motion);
@@ -152,7 +171,7 @@ pub struct PeoplePlugin;
 impl Plugin for PeoplePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerSession>()
-            .init_resource::<PlayerInput>()
+            .init_resource::<PlayerInputs>()
             .add_message::<Panic>()
             .add_systems(Startup, load_motion)
             .add_systems(
@@ -161,7 +180,7 @@ impl Plugin for PeoplePlugin {
             )
             .add_systems(OnExit(AppState::Playing), |mut commands: Commands| {
                 commands.insert_resource(PlayerSession::default());
-                commands.insert_resource(PlayerInput::default());
+                commands.insert_resource(PlayerInputs::default());
             })
             .add_systems(PreUpdate, read_keyboard)
             .add_systems(
@@ -251,16 +270,43 @@ pub fn spawn_person(
     Some(e)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_player(
     mut commands: Commands,
     data: Res<GameData>,
     starts: Option<Res<StartPoints>>,
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mode: Res<GameMode>,
+    mut rng: ResMut<Rng>,
 ) {
     let (Some(starts), Some(mut library)) = (starts, library) else {
         return;
     };
+    if mode.is_multiplayer() {
+        // Every player at a different start point.
+        let mut taken: Vec<Vec3> = Vec::new();
+        for p in 0..mode.players() {
+            let Some(pos) = crate::multiplayer::pick_start(&starts, &taken, &mut rng) else {
+                warn!("map has no start points");
+                return;
+            };
+            taken.push(pos);
+            if let Some(e) = spawn_person(
+                &mut commands,
+                &data,
+                &mut library,
+                &mut meshes,
+                0,
+                pos.as_ivec3(),
+                0,
+                State::Player,
+            ) {
+                make_player(&mut commands, e, p as u8);
+            }
+        }
+        return;
+    }
     let Some(pos) = starts.level_start.or_else(|| starts.list.first().copied()) else {
         warn!("map has no start points");
         return;
@@ -275,12 +321,12 @@ fn spawn_player(
         0,
         State::Player,
     ) {
-        make_player(&mut commands, e);
+        make_player(&mut commands, e, 0);
     }
 }
 
-/// Turn a freshly spawned person into the local player.
-fn make_player(commands: &mut Commands, e: Entity) {
+/// Turn a freshly spawned person into player `player`.
+pub fn make_player(commands: &mut Commands, e: Entity, player: u8) {
     commands
         .entity(e)
         .insert((CameraTarget, Arsenal::default()));
@@ -289,12 +335,17 @@ fn make_player(commands: &mut Commands, e: Entity) {
             p.follows_weapon = true;
         }
         if let Some(mut o) = world.get_mut::<Obj>(e) {
-            o.player = Some(0);
+            o.player = Some(player);
         }
     });
 }
 
-fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<PlayerInput>) {
+fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mode: Res<GameMode>, mut inputs: ResMut<PlayerInputs>) {
+    // Multiplayer devices are read by `multiplayer::read_devices`.
+    if mode.is_multiplayer() {
+        return;
+    }
+    let input = &mut inputs.0[0];
     let held = |k: &[KeyCode]| keys.any_pressed(k.iter().copied());
     input.left = held(&[KeyCode::ArrowLeft]);
     input.right = held(&[KeyCode::ArrowRight]);
@@ -323,11 +374,12 @@ fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<PlayerInput>
 }
 
 /// Player controls -> virtual stick (people.md §4.1).
-fn player_stick(mut input: ResMut<PlayerInput>, mut q: Query<(&Obj, &mut Stick)>) {
+fn player_stick(mut inputs: ResMut<PlayerInputs>, mut q: Query<(&Obj, &mut Stick)>) {
     for (obj, mut stick) in &mut q {
         if obj.state != State::Player {
             continue;
         }
+        let input = &inputs.0[obj.player.unwrap_or(0).min(3) as usize];
         stick.steer = if input.left {
             -1
         } else if input.right {
@@ -352,7 +404,9 @@ fn player_stick(mut input: ResMut<PlayerInput>, mut q: Query<(&Obj, &mut Stick)>
         stick.fire = input.fire;
         stick.use_vehicle = input.use_pressed;
     }
-    input.use_pressed = false;
+    for input in &mut inputs.0 {
+        input.use_pressed = false;
+    }
 }
 
 /// Civilians within 10000 units of a shot or blast scream and flee for
@@ -692,7 +746,12 @@ fn regen_and_respawn(
     mut rng: ResMut<Rng>,
     mut outcome: MessageWriter<crate::mission::LevelOutcome>,
     mut players: Query<(Entity, &mut Obj, Has<Person>), With<CameraTarget>>,
+    mode: Res<GameMode>,
 ) {
+    // Multiplayer deaths and respawns: `multiplayer::deaths_and_respawns`.
+    if mode.is_multiplayer() {
+        return;
+    }
     let (Some(city), Some(starts), Some(mut library)) = (city, starts, library) else {
         return;
     };
@@ -779,7 +838,7 @@ fn regen_and_respawn(
         0,
         State::Player,
     ) {
-        make_player(&mut commands, e);
+        make_player(&mut commands, e, 0);
     }
 }
 
@@ -797,9 +856,20 @@ fn spawn_peds(
     mut rng: ResMut<Rng>,
     objects: Query<&Obj>,
     player: Query<&Obj, With<CameraTarget>>,
+    views: Res<ViewCams>,
+    mut turn: Local<usize>,
 ) {
     let (Some(city), Some(mut library)) = (city, library) else {
         return;
+    };
+    // Split screen: each tick spawns around the next player's view.
+    let (cam, vel) = if views.0.is_empty() {
+        (*cam, player.single().map(|o| o.vel).unwrap_or(IVec3::ZERO))
+    } else {
+        *turn = (*turn + 1) % views.0.len();
+        let p = *turn as u8;
+        let vel = player.iter().find(|o| o.player == Some(p)).map_or(IVec3::ZERO, |o| o.vel);
+        (views.0[*turn], vel)
     };
     let count = objects.iter().count();
     // Ambient budget: min(placed + 11, 20) objects.
@@ -813,7 +883,6 @@ fn spawn_peds(
             occupied[sx * MAP_SIZE + sy] = true;
         }
     }
-    let vel = player.single().map(|o| o.vel).unwrap_or(IVec3::ZERO);
     let c = cam.square();
     let h = cam.window();
     for _ in 0..2 {
@@ -883,18 +952,26 @@ fn spawn_peds(
 pub struct Ambient;
 
 /// Remove ambient objects that leave every camera's window.
-fn despawn_far(mut commands: Commands, cam: Res<GameCam>, q: Query<(Entity, &Obj), With<Ambient>>) {
-    let c = cam.square();
-    let h = cam.window();
+fn despawn_far(
+    mut commands: Commands,
+    cam: Res<GameCam>,
+    views: Res<ViewCams>,
+    q: Query<(Entity, &Obj), With<Ambient>>,
+) {
+    let cams: &[GameCam] = if views.0.is_empty() { std::slice::from_ref(&*cam) } else { &views.0 };
     for (e, obj) in &q {
         let sq = IVec2::new(obj.pos.x >> 11, obj.pos.y >> 11);
         if obj.script_id != -1 {
             continue;
         }
+        let outside = |cam: &GameCam| {
+            let (c, h) = (cam.square(), cam.window());
+            (sq.x - c.x).abs() > h || (sq.y - c.y).abs() > h
+        };
         let gone = matches!(
             obj.state,
             State::Wander | State::Parked | State::Dead | State::Flee | State::Removed
-        ) && ((sq.x - c.x).abs() > h || (sq.y - c.y).abs() > h);
+        ) && cams.iter().all(outside);
         if gone {
             commands.entity(e).despawn();
         }
@@ -985,9 +1062,24 @@ fn pose_people(
     }
 }
 
-/// Sounds are heard from the followed object.
-fn update_listener(mut listener: ResMut<Listener>, q: Query<&Obj, With<CameraTarget>>) {
-    if let Ok(obj) = q.single() {
-        listener.0 = obj.posf();
+/// Sounds are heard from the followed object; in split screen from every
+/// player (each sound as loud as at the nearest one).
+fn update_listener(
+    mut listener: ResMut<Listener>,
+    mut others: ResMut<crate::audio::OtherListeners>,
+    mode: Res<GameMode>,
+    q: Query<&Obj, With<CameraTarget>>,
+) {
+    if !mode.is_multiplayer() {
+        if let Ok(obj) = q.single() {
+            listener.0 = obj.posf();
+        }
+        return;
     }
+    let mut players: Vec<(u8, Vec3)> = q.iter().filter_map(|o| Some((o.player?, o.posf()))).collect();
+    players.sort_by_key(|p| p.0);
+    if let Some(first) = players.first() {
+        listener.0 = first.1;
+    }
+    others.0 = players.iter().skip(1).map(|p| p.1).collect();
 }
