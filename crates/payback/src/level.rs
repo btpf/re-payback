@@ -3,7 +3,8 @@
 use crate::city::{self, Pass};
 use crate::data::GameData;
 use crate::objects::{self, ObjectLibrary};
-use crate::world::{City, SQUARE};
+use crate::water::{self, Water, WaterMaterial};
+use crate::world::{City, SQUARE, z_of_h};
 use bevy::prelude::*;
 use payback_formats::{Map, map::MAP_SIZE};
 
@@ -15,10 +16,11 @@ pub struct LevelSpec {
     pub level: u8,
 }
 
-/// Start positions (game units) from squares with no scenery and flags
-/// exactly 0x20, per LoadMap (OS4 `FUN_01079300`): special 1 squares form a
-/// list of up to 100 (multiplayer starts, INFERRED); the square whose special
-/// is `level + 2` is stored separately (single-player start, INFERRED).
+/// Start positions (original units: x, y, z-down) from squares with no
+/// scenery and flags exactly 0x20, per LoadMap (OS4 `FUN_01079300`):
+/// special 1 squares form a list of up to 100 (multiplayer starts,
+/// INFERRED); the square whose special is `level + 2` is stored separately
+/// (single-player start, INFERRED).
 #[derive(Resource, Default)]
 pub struct StartPoints {
     pub list: Vec<Vec3>,
@@ -37,6 +39,7 @@ impl Plugin for LevelPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn load_level(
     mut commands: Commands,
     data: Res<GameData>,
@@ -44,6 +47,7 @@ pub fn load_level(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut water_materials: ResMut<Assets<WaterMaterial>>,
 ) {
     let path = format!("Maps/{}.map", spec.map);
     let map = match data
@@ -58,40 +62,57 @@ pub fn load_level(
         }
     };
     info!(
-        "loaded {path} (night: {}, variant: {})",
+        "loaded {path} (night: {}, weather: {})",
         map.night, map.variant
     );
 
-    let atlas = images.add(city::build_cube_atlas(&data));
-    for (pass, mesh) in city::build_city_meshes(&map) {
+    let atlases = city::build_cube_atlases(&data, map.night);
+    let opaque = images.add(atlases.opaque);
+    let keyed = images.add(atlases.keyed);
+    let water = water_materials.add(WaterMaterial {
+        params: Vec4::ZERO,
+        index_atlas: images.add(atlases.indices),
+        sky: images.add(water::load_sky(&data, map.night)),
+    });
+    let names: Vec<String> = data
+        .cube_textures
+        .entries
+        .iter()
+        .map(|e| e.file.clone())
+        .collect();
+    for (pass, mesh) in city::build_city_meshes(&map, &names) {
+        let mesh = Mesh3d(meshes.add(mesh));
+        if pass == Pass::Reflect {
+            commands.spawn((mesh, MeshMaterial3d(water.clone()), LevelEntity));
+            continue;
+        }
         let material = StandardMaterial {
-            base_color_texture: Some(atlas.clone()),
+            base_color_texture: Some(if pass == Pass::Masked {
+                keyed.clone()
+            } else {
+                opaque.clone()
+            }),
             unlit: true,
             alpha_mode: match pass {
-                Pass::Opaque | Pass::Reflect => AlphaMode::Opaque,
                 Pass::Masked => AlphaMode::Mask(0.5),
                 Pass::Alpha => AlphaMode::Blend,
+                _ => AlphaMode::Opaque,
             },
-            base_color: match pass {
-                Pass::Alpha => Color::srgba(1.0, 1.0, 1.0, 0.5),
-                // Placeholder until the reflection effect is reimplemented.
-                Pass::Reflect => Color::srgb(0.45, 0.6, 1.0),
-                _ => Color::WHITE,
+            base_color: if pass == Pass::Alpha {
+                Color::srgba(1.0, 1.0, 1.0, 0.5)
+            } else {
+                Color::WHITE
             },
             ..default()
         };
-        commands.spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.add(material)),
-            LevelEntity,
-        ));
+        commands.spawn((mesh, MeshMaterial3d(materials.add(material)), LevelEntity));
     }
-
-    let mut library = ObjectLibrary::new(&data, &mut images, &mut materials);
-    objects::spawn_scenery(&mut commands, &data, &mut library, &mut meshes, &map);
-    commands.insert_resource(library);
+    commands.insert_resource(Water(water));
 
     let city = City::new(map);
+    let mut library = ObjectLibrary::new(&data, &mut images, &mut materials, city.map.night);
+    objects::spawn_scenery(&mut commands, &data, &mut library, &mut meshes, &city);
+    commands.insert_resource(library);
     commands.insert_resource(find_start_points(&city, spec.level));
     commands.insert_resource(city);
 }
@@ -109,7 +130,7 @@ fn find_start_points(city: &City, level: u8) -> StartPoints {
                 let pos = Vec3::new(
                     (x as f32 + 0.5) * SQUARE,
                     (y as f32 + 0.5) * SQUARE,
-                    geom.top_at(0.5, 0.5),
+                    z_of_h(geom.top_at(0.5, 0.5)),
                 );
                 if cube.special == 1 && points.list.len() < 100 {
                     points.list.push(pos);

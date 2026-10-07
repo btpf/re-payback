@@ -1,26 +1,53 @@
-//! Cameras: an overhead camera that follows the player (the game's view),
-//! and a free debug camera (toggle with F2).
+//! Cameras: the game's overhead camera (docs/re/rendering.md §6, OS4
+//! `FUN_010556e0`) and a free debug camera (toggle with F2).
 
-use crate::world::{SQUARE, to_render};
-use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
+use crate::sim::{Obj, Trig};
+use crate::vehicles::Vehicle;
+use crate::world::H_PER_SQUARE;
+use bevy::{camera::PerspectiveProjection, input::mouse::AccumulatedMouseScroll, prelude::*};
 
-/// Marks the entity the game camera follows (its [`Tracked`] state).
+/// Marks the object the game camera follows.
 #[derive(Component)]
 pub struct CameraTarget;
 
-/// Position (game units) and planar speed of a simulated entity, read by the
-/// camera. Systems that move things keep this up to date.
-#[derive(Component, Default, Clone, Copy)]
-pub struct Tracked {
-    pub pos: Vec3,
-    pub speed: f32,
+/// The original camera state: x, y in 16.16 squares, and `h` such that the
+/// camera sits at height `h + 1500` h-units (a point at height H is
+/// `h + 1500 - H` below it).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct GameCam {
+    pub x: i64,
+    pub y: i64,
+    pub h: i32,
+    pub initialised: bool,
+}
+
+impl Default for GameCam {
+    fn default() -> Self {
+        // The level intro starts high (camH 10000) and eases down.
+        GameCam {
+            x: 64 << 16,
+            y: 64 << 16,
+            h: 10000,
+            initialised: false,
+        }
+    }
+}
+
+impl GameCam {
+    /// Squares visible either side of the camera, plus margin: the
+    /// spawn/despawn window half-size (people.md §7.2).
+    pub fn window(&self) -> i32 {
+        ((self.h + 1500) >> 8) + 5
+    }
+
+    pub fn square(&self) -> IVec2 {
+        IVec2::new((self.x >> 16) as i32, (self.y >> 16) as i32)
+    }
 }
 
 #[derive(Component)]
 pub struct GameCamera {
     pub mode: CameraMode,
-    /// Smoothed height above the target, game units.
-    pub height: f32,
     pub free: FreeRig,
 }
 
@@ -47,23 +74,42 @@ impl FreeRig {
     }
 }
 
-/// Camera height above the player on foot / at rest, game units. Rises with
-/// speed so you can see further ahead when driving fast.
-/// INFERRED pending docs/re/rendering.md.
-const BASE_HEIGHT: f32 = 6.0 * SQUARE;
-const HEIGHT_PER_SPEED: f32 = 0.25;
-const MAX_HEIGHT: f32 = 16.0 * SQUARE;
+/// Follow parameters (rendering.md §6, top-down view): look-ahead K,
+/// velocity lead V, base height B, speed factor c.
+struct Follow {
+    k: i64,
+    v: i64,
+    b: i32,
+    c: i32,
+}
+
+const ON_FOOT: Follow = Follow {
+    k: 100,
+    v: 0x140,
+    b: 1000,
+    c: 3,
+};
+const DRIVING: Follow = Follow {
+    k: 150,
+    v: 200,
+    b: 800,
+    c: 3,
+};
+const LEAD_CAP: i64 = 0x2af80;
 
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera).add_systems(
-            PostUpdate,
-            (toggle_mode, follow, free_controls)
-                .chain()
-                .before(TransformSystems::Propagate),
-        );
+        app.init_resource::<GameCam>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(FixedUpdate, follow_tick)
+            .add_systems(
+                PostUpdate,
+                (toggle_mode, place_game_camera, free_controls)
+                    .chain()
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -88,6 +134,13 @@ fn spawn_camera(mut commands: Commands) {
     };
     commands.spawn((
         Camera3d::default(),
+        // Vertical FOV of the 320x256 original: 2·atan(128/256) = 53.1°.
+        Projection::Perspective(PerspectiveProjection {
+            fov: 2.0 * (128.0f32 / 256.0).atan(),
+            near: 0.05,
+            far: 400.0,
+            ..default()
+        }),
         free.transform(),
         GameCamera {
             mode: if free_requested {
@@ -95,7 +148,6 @@ fn spawn_camera(mut commands: Commands) {
             } else {
                 CameraMode::Follow
             },
-            height: BASE_HEIGHT,
             free,
         },
     ));
@@ -110,24 +162,42 @@ fn toggle_mode(keys: Res<ButtonInput<KeyCode>>, mut cam: Single<&mut GameCamera>
     }
 }
 
-fn follow(
-    time: Res<Time>,
-    target: Option<Single<&Tracked, With<CameraTarget>>>,
-    cam: Single<(&mut GameCamera, &mut Transform)>,
+/// One game tick of the original camera motion.
+fn follow_tick(
+    trig: Res<Trig>,
+    mut cam: ResMut<GameCam>,
+    target: Query<(&Obj, Has<Vehicle>), With<CameraTarget>>,
 ) {
-    let (mut cam, mut transform) = cam.into_inner();
-    if cam.mode != CameraMode::Follow {
+    let Ok((obj, driving)) = target.single() else {
         return;
+    };
+    let f = if driving { DRIVING } else { ON_FOOT };
+    let lead = |v: i32| (v as i64 * f.v).clamp(-LEAD_CAP, LEAD_CAP);
+    let tx = obj.pos.x as i64 * 32 + f.k * trig.sin(obj.heading) as i64 + lead(obj.vel.x);
+    let ty = obj.pos.y as i64 * 32 + f.k * trig.cos(obj.heading) as i64 + lead(obj.vel.y);
+    let t = ((f.c * obj.speed).abs() + f.b - (obj.pos.z >> 4)).clamp(1, 3000);
+    if !cam.initialised {
+        cam.x = tx;
+        cam.y = ty;
+        cam.initialised = true;
     }
-    let Some(target) = target else { return };
-    let wanted = (BASE_HEIGHT + target.speed * HEIGHT_PER_SPEED).min(MAX_HEIGHT);
-    let k = 1.0 - (-2.0 * time.delta_secs()).exp();
-    cam.height += (wanted - cam.height) * k;
-    let focus = to_render(target.pos);
-    // Looking straight down, north at the top of the screen.
-    *transform = Transform::from_translation(focus + Vec3::Y * cam.height / SQUARE)
-        .looking_at(focus, Vec3::NEG_Z);
-    cam.free.focus = focus;
+    cam.x = (4 * cam.x + tx) / 5;
+    cam.y = (4 * cam.y + ty) / 5;
+    cam.h = (2 * cam.h + t) / 3;
+}
+
+fn place_game_camera(game: Res<GameCam>, cam: Single<(&mut GameCamera, &mut Transform)>) {
+    let (mut cam, mut transform) = cam.into_inner();
+    let pos = Vec3::new(
+        game.x as f32 / 65536.0,
+        (game.h + 1500) as f32 / H_PER_SQUARE,
+        game.y as f32 / 65536.0,
+    );
+    if cam.mode == CameraMode::Follow {
+        // Straight down, north (-y) at the top of the screen.
+        *transform = Transform::from_translation(pos).looking_at(pos - Vec3::Y, Vec3::NEG_Z);
+        cam.free.focus = Vec3::new(pos.x, 1.0, pos.z);
+    }
 }
 
 fn free_controls(
@@ -147,16 +217,16 @@ fn free_controls(
     let forward = Vec3::new(-rig.yaw.sin(), 0.0, -rig.yaw.cos());
     let right = Vec3::new(rig.yaw.cos(), 0.0, -rig.yaw.sin());
     let mut pan = Vec3::ZERO;
-    if pressed(&[KeyCode::KeyW, KeyCode::ArrowUp]) {
+    if pressed(&[KeyCode::KeyW]) {
         pan += forward;
     }
-    if pressed(&[KeyCode::KeyS, KeyCode::ArrowDown]) {
+    if pressed(&[KeyCode::KeyS]) {
         pan -= forward;
     }
-    if pressed(&[KeyCode::KeyD, KeyCode::ArrowRight]) {
+    if pressed(&[KeyCode::KeyD]) {
         pan += right;
     }
-    if pressed(&[KeyCode::KeyA, KeyCode::ArrowLeft]) {
+    if pressed(&[KeyCode::KeyA]) {
         pan -= right;
     }
     rig.focus += pan * rig.distance * dt;

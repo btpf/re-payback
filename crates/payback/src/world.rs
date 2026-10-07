@@ -1,54 +1,77 @@
-//! Simulation-space view of the city: heights and solidity of every cube.
+//! Simulation-space view of the city, in the original game's units
+//! (docs/re/rendering.md §0):
 //!
-//! Simulation runs in original game units: x east, y south, z up, 256 units
-//! per map square. Rendering converts with [`to_render`].
+//! - x, y: 2048 (`0x800`) per map square, x east, y south.
+//! - z: object depth, **downward**, 16 per h-unit, measured from a plane
+//!   1500 h-units above the bottom of cube 0: `z = (1500 - H) << 4`.
+//! - H ("h-units"): cube heights; 256 per square, so a ground cube is a cube.
+//! - Angles: 5760 (`0x1680`) per turn; heading 0 = +y (south), 0x5a0 = +x.
+//!
+//! Rendering converts with [`to_render`] (1 Bevy unit = 1 square, Y up).
 
 use bevy::prelude::*;
 use payback_formats::map::{self, FaceType, MAP_SIZE, Map, Slope};
 
-pub const SQUARE: f32 = 256.0;
+pub const SQUARE: f32 = 2048.0;
+pub const H_PER_SQUARE: f32 = 256.0;
 pub const WORLD_SIZE: f32 = SQUARE * MAP_SIZE as f32;
+pub const ANGLE_TURN: f32 = 5760.0;
+/// Reference plane for z, in h-units above the bottom of cube 0.
+pub const Z_PLANE: f32 = 1500.0;
 
-/// Game units (x east, y south, z up) to Bevy render space (1 unit = 1 square,
-/// Y up, north = -Z).
-pub fn to_render(p: Vec3) -> Vec3 {
-    Vec3::new(p.x / SQUARE, p.z / SQUARE, p.y / SQUARE)
+/// h-units above the ground -> original downward z.
+pub fn z_of_h(h: f32) -> f32 {
+    (Z_PLANE - h) * 16.0
 }
 
-/// Heading in game convention (radians, 0 = north, clockwise) to a Bevy
-/// rotation about +Y.
+/// Original downward z -> h-units.
+pub fn h_of_z(z: f32) -> f32 {
+    Z_PLANE - z / 16.0
+}
+
+/// Original position (x, y, z-down) to Bevy render space.
+pub fn to_render(p: Vec3) -> Vec3 {
+    Vec3::new(p.x / SQUARE, h_of_z(p.z) / H_PER_SQUARE, p.y / SQUARE)
+}
+
+/// Original heading (5760 units/turn, 0 = south, 0x5a0 = east) to a Bevy
+/// rotation about +Y for models whose forward axis is object +y.
 pub fn heading_to_render(heading: f32) -> Quat {
-    Quat::from_rotation_y(-heading)
+    Quat::from_rotation_y(heading / ANGLE_TURN * std::f32::consts::TAU)
+}
+
+/// Unit direction (x, y) of an original heading.
+pub fn heading_dir(heading: f32) -> Vec2 {
+    let a = heading / ANGLE_TURN * std::f32::consts::TAU;
+    Vec2::new(a.sin(), a.cos())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CubeGeom {
     pub solid: bool,
+    /// Bottom of the cube, h-units.
     pub base: f32,
-    /// Top heights above `base` at the corners NW, NE, SE, SW.
+    /// Top heights above `base` at the corners NW, NE, SE, SW (h-units).
     pub corners: [f32; 4],
-    /// Top face is water (reflective).
+    /// Top face is water/reflective (face type 4).
     pub water: bool,
     /// Texture index of the top face, if visible.
     pub top_texture: Option<u16>,
 }
 
 impl CubeGeom {
-    /// Absolute height of the top surface at fractional position (fx, fy)
-    /// within the square (0..1 each, fy southward).
+    /// Absolute top height (h-units) at fractional position (fx, fy) within
+    /// the square (0..1 each, fy southward).
     pub fn top_at(&self, fx: f32, fy: f32) -> f32 {
         let [nw, ne, se, sw] = self.corners;
         let n = nw + (ne - nw) * fx;
         let s = sw + (se - sw) * fx;
         self.base + n + (s - n) * fy
     }
-
-    pub fn max_top(&self) -> f32 {
-        self.base + self.corners.iter().copied().fold(0.0, f32::max)
-    }
 }
 
-/// Heights of a cube's top corners above its base: [NW, NE, SE, SW].
+/// Heights of a cube's top corners above its base: [NW, NE, SE, SW]
+/// (rendering.md §1). Reflect flat tops (water) sit at h2.
 pub fn top_corners(cube: &map::Cube) -> [f32; 4] {
     let (a, b) = (cube.height1 as f32, cube.height2 as f32);
     match cube.slope {
@@ -56,16 +79,14 @@ pub fn top_corners(cube: &map::Cube) -> [f32; 4] {
         Slope::RVert => [b, b, a, a],
         Slope::Horiz => [a, b, b, a],
         Slope::RHoriz => [b, a, a, b],
+        _ if cube.faces[map::TOP].kind == FaceType::Reflect => [b; 4],
         _ => [a; 4],
     }
 }
 
-/// Height a cube adds to its stack.
+/// Height a cube adds to its stack: always h1 (rendering.md §1).
 pub fn stack_height(cube: &map::Cube) -> f32 {
-    match cube.slope {
-        Slope::Off | Slope::Flat | Slope::Unknown(_) => cube.height1 as f32,
-        _ => cube.height1.max(cube.height2) as f32,
-    }
+    cube.height1 as f32
 }
 
 #[derive(Resource)]
@@ -96,44 +117,51 @@ impl City {
         City { map, cubes }
     }
 
-    /// Cubes of the square containing game position (x, y), with the
-    /// fractional position inside it. `None` outside the map.
-    pub fn square_at(&self, x: f32, y: f32) -> Option<(&[CubeGeom; 3], f32, f32)> {
+    /// Square containing world (x, y) and the fractional position in it.
+    pub fn locate(x: f32, y: f32) -> Option<(usize, usize, f32, f32)> {
         if !(0.0..WORLD_SIZE).contains(&x) || !(0.0..WORLD_SIZE).contains(&y) {
             return None;
         }
         let (sx, sy) = ((x / SQUARE) as usize, (y / SQUARE) as usize);
-        let cubes = &self.cubes[sx * MAP_SIZE + sy];
-        Some((cubes, x / SQUARE - sx as f32, y / SQUARE - sy as f32))
+        Some((sx, sy, x / SQUARE - sx as f32, y / SQUARE - sy as f32))
     }
 
     pub fn square_cubes(&self, sx: usize, sy: usize) -> &[CubeGeom; 3] {
         &self.cubes[sx * MAP_SIZE + sy]
     }
 
-    /// Highest solid surface at (x, y) whose top is at most `z + step`,
-    /// i.e. the floor something at height `z` would stand on. Returns the
-    /// surface height and its cube.
-    pub fn floor(&self, x: f32, y: f32, z: f32, step: f32) -> Option<(f32, CubeGeom)> {
-        let (cubes, fx, fy) = self.square_at(x, y)?;
-        cubes
+    /// Highest solid surface (h-units) at world (x, y) whose top is at most
+    /// `h + step`: what something at height `h` stands on, and its layer.
+    pub fn floor(&self, x: f32, y: f32, h: f32, step: f32) -> Option<(f32, usize, CubeGeom)> {
+        let (sx, sy, fx, fy) = Self::locate(x, y)?;
+        self.square_cubes(sx, sy)
             .iter()
-            .filter(|c| c.solid)
-            .map(|c| (c.top_at(fx, fy), *c))
-            .filter(|(top, _)| *top <= z + step)
+            .enumerate()
+            .filter(|(_, c)| c.solid)
+            .map(|(i, c)| (c.top_at(fx, fy), i, *c))
+            .filter(|(top, _, _)| *top <= h + step)
             .max_by(|a, b| a.0.total_cmp(&b.0))
     }
 
-    /// Whether a body occupying heights [z, z + height] at (x, y) intersects
-    /// a solid cube, ignoring surfaces within `step` below its feet.
-    pub fn blocked(&self, x: f32, y: f32, z: f32, height: f32, step: f32) -> bool {
-        let Some((cubes, fx, fy)) = self.square_at(x, y) else {
+    /// Whether a body occupying heights [h, h + height] at world (x, y)
+    /// intersects a solid cube, ignoring surfaces within `step` of its feet.
+    /// Off-map counts as blocked.
+    pub fn blocked(&self, x: f32, y: f32, h: f32, height: f32, step: f32) -> bool {
+        let Some((sx, sy, fx, fy)) = Self::locate(x, y) else {
             return true;
         };
-        cubes.iter().filter(|c| c.solid).any(|c| {
-            let top = c.top_at(fx, fy);
-            top > z + step && c.base < z + height
-        })
+        self.square_cubes(sx, sy)
+            .iter()
+            .filter(|c| c.solid)
+            .any(|c| {
+                let top = c.top_at(fx, fy);
+                top > h + step && c.base < h + height
+            })
+    }
+
+    /// Whether the surface under world (x, y) at height h is water.
+    pub fn water_at(&self, x: f32, y: f32, h: f32) -> bool {
+        self.floor(x, y, h, 64.0).is_some_and(|(_, _, c)| c.water)
     }
 }
 
@@ -182,18 +210,17 @@ mod tests {
             }
             sq
         });
-        let (h, _) = city.floor(5.0 * SQUARE, 5.0 * SQUARE, 256.0, 16.0).unwrap();
-        assert_eq!(h, 256.0);
+        let (h, layer, _) = city.floor(5.0 * SQUARE, 5.0 * SQUARE, 256.0, 16.0).unwrap();
+        assert_eq!((h, layer), (256.0, 0));
         let inside = 10.5 * SQUARE;
         assert!(city.blocked(inside, inside, 256.0, 100.0, 16.0));
         assert!(!city.blocked(9.5 * SQUARE, inside, 256.0, 100.0, 16.0));
-        // Standing on the roof.
         assert_eq!(city.floor(inside, inside, 768.0, 16.0).unwrap().0, 768.0);
         assert!(city.blocked(-1.0, 0.0, 0.0, 1.0, 0.0));
     }
 
     #[test]
-    fn slope_interpolates() {
+    fn slopes_and_stacking() {
         let city = city_with(|_, _| {
             let mut sq = Square::default();
             sq.cubes[0] = Cube {
@@ -202,9 +229,39 @@ mod tests {
                 height2: 256,
                 ..flat(0)
             };
+            sq.cubes[1] = flat(100);
             sq
         });
-        let (h, _) = city.floor(0.5 * SQUARE, 0.5 * SQUARE, 1000.0, 0.0).unwrap();
+        // Horiz: west edge h1 = 0, east edge h2 = 256.
+        let (h, _, _) = city.floor(0.5 * SQUARE, 0.5 * SQUARE, 1000.0, 0.0).unwrap();
         assert_eq!(h, 128.0);
+        // The cube above stacks on h1 (0), not max(h1, h2).
+        assert_eq!(city.square_cubes(0, 0)[1].base, 0.0);
+    }
+
+    #[test]
+    fn water_sits_at_h2() {
+        let city = city_with(|_, _| {
+            let mut sq = Square::default();
+            sq.cubes[0] = flat(256);
+            sq.cubes[0].height2 = 0;
+            sq.cubes[0].faces[map::TOP].kind = FaceType::Reflect;
+            sq
+        });
+        let c = city.square_cubes(0, 0)[0];
+        assert!(c.water);
+        assert_eq!(c.top_at(0.5, 0.5), 0.0);
+        assert_eq!(city.square_cubes(0, 0)[1].base, 256.0);
+    }
+
+    #[test]
+    fn units() {
+        assert_eq!(z_of_h(256.0), (1500.0 - 256.0) * 16.0);
+        assert_eq!(
+            to_render(Vec3::new(SQUARE, 2.0 * SQUARE, z_of_h(256.0))),
+            Vec3::new(1.0, 1.0, 2.0)
+        );
+        let d = heading_dir(1440.0);
+        assert!((d - Vec2::X).length() < 1e-5);
     }
 }

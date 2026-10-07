@@ -6,19 +6,17 @@
 //! UVs are in texels of the 256x128 object texture, with v in half-texel
 //! units (0-255 spans the 128 rows); verified on the police car light bar.
 
-use crate::city::UNITS_PER_SQUARE;
 use crate::data::GameData;
-use crate::world::stack_height;
+use crate::level::LevelEntity;
+use crate::sim::ModelInfo;
+use crate::world::{City, H_PER_SQUARE, heading_to_render};
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
 };
-use payback_formats::{
-    IndexedImage, Obj,
-    map::{MAP_SIZE, Map},
-};
+use payback_formats::{IndexedImage, Obj, map::MAP_SIZE, obj::Vertex};
 use std::collections::HashMap;
 
 /// Scenery models by map scenery id (1-based; 0 = none). Order recovered from
@@ -75,7 +73,8 @@ pub struct ObjectLibrary {
     /// Lower-cased texture name -> atlas slot.
     slots: HashMap<String, u32>,
     pub material: Handle<StandardMaterial>,
-    meshes: HashMap<String, Option<Handle<Mesh>>>,
+    by_path: HashMap<String, Option<usize>>,
+    models: Vec<LoadedModel>,
 }
 
 impl ObjectLibrary {
@@ -83,6 +82,7 @@ impl ObjectLibrary {
         data: &GameData,
         images: &mut Assets<Image>,
         materials: &mut Assets<StandardMaterial>,
+        night: bool,
     ) -> ObjectLibrary {
         let mut rgba = vec![0u8; (ATLAS_W * ATLAS_H * 4) as usize];
         let mut slots = HashMap::new();
@@ -100,13 +100,38 @@ impl ObjectLibrary {
                 warn!("object texture atlas full");
                 break;
             }
-            let Ok(img) = std::fs::read(entry.path())
-                .map_err(|e| e.to_string())
-                .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
-            else {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            // Night (rendering.md §4, OS4 `FUN_010bf310`): Shine.* (not the
+            // cups) and CloudsReflect swap in their `.dark` files; a few
+            // textures are left alone; the rest are darkened.
+            let swap = night
+                && ((name.starts_with("shine.") && !name.starts_with("shine.cup"))
+                    || name == "cloudsreflect")
+                && !name.ends_with(".dark");
+            let path = if swap {
+                entry
+                    .path()
+                    .with_file_name(format!("{}.dark", entry.file_name().to_string_lossy()))
+            } else {
+                entry.path()
+            };
+            let read = |p: &std::path::Path| {
+                std::fs::read(p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
+            };
+            let Ok(img) = read(&path).or_else(|_| read(&entry.path())) else {
                 continue;
             };
-            let pixels = img.to_rgba(&data.palette, Some(0));
+            let mut pixels = img.to_rgba(&data.palette, Some(0));
+            let keep = ["joystick", "red shade", "lights", "tankbits"];
+            if night && !swap && !name.ends_with(".dark") && !keep.contains(&name.as_str()) {
+                for px in pixels.chunks_mut(4) {
+                    for c in &mut px[..3] {
+                        *c = c.saturating_sub(crate::city::NIGHT_DARKEN);
+                    }
+                }
+            }
             let (sx, sy) = (slot % ATLAS_COLS * TEX_W, slot / ATLAS_COLS * TEX_H);
             for row in 0..TEX_H {
                 let src = (row * TEX_W * 4) as usize;
@@ -114,7 +139,7 @@ impl ObjectLibrary {
                 rgba[dst..dst + (TEX_W * 4) as usize]
                     .copy_from_slice(&pixels[src..src + (TEX_W * 4) as usize]);
             }
-            slots.insert(entry.file_name().to_string_lossy().to_lowercase(), slot);
+            slots.insert(name, slot);
         }
         let mut atlas = Image::new(
             Extent3d {
@@ -139,21 +164,24 @@ impl ObjectLibrary {
         ObjectLibrary {
             slots,
             material,
-            meshes: HashMap::new(),
+            by_path: HashMap::new(),
+            models: Vec::new(),
         }
     }
 
-    /// Mesh for `Objects/<path>`, loaded on first use. `None` if missing.
-    pub fn mesh(
+    /// Load `Objects/<path>` (case-insensitive) on first use and return its
+    /// model index. `None` if missing or unparsable.
+    pub fn load(
         &mut self,
         data: &GameData,
         meshes: &mut Assets<Mesh>,
         path: &str,
-    ) -> Option<Handle<Mesh>> {
-        if let Some(m) = self.meshes.get(path) {
-            return m.clone();
+    ) -> Option<usize> {
+        let key = path.to_lowercase();
+        if let Some(&i) = self.by_path.get(&key) {
+            return i;
         }
-        let built = find_case_insensitive(&data.root.join("Objects"), path)
+        let parsed = find_case_insensitive(&data.root.join("Objects"), path)
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|b| match Obj::parse(&b) {
                 Ok(o) => Some(o),
@@ -161,25 +189,50 @@ impl ObjectLibrary {
                     warn!("{path}: {e}");
                     None
                 }
-            })
-            .map(|o| meshes.add(self.build_mesh(&o)));
-        if built.is_none() {
+            });
+        let index = parsed.map(|obj| {
+            let mesh = meshes.add(self.build_mesh(&obj, |p| static_vertex(p)));
+            let info = ModelInfo::from_obj(&key, &obj);
+            self.models.push(LoadedModel { obj, mesh, info });
+            self.models.len() - 1
+        });
+        if index.is_none() {
             warn!("object {path} not found");
         }
-        self.meshes.insert(path.to_string(), built.clone());
-        built
+        self.by_path.insert(key, index);
+        index
     }
 
-    fn build_mesh(&self, obj: &Obj) -> Mesh {
-        let s = 1.0 / UNITS_PER_SQUARE;
+    /// Static mesh for `Objects/<path>`.
+    pub fn mesh(
+        &mut self,
+        data: &GameData,
+        meshes: &mut Assets<Mesh>,
+        path: &str,
+    ) -> Option<Handle<Mesh>> {
+        self.load(data, meshes, path)
+            .map(|i| self.models[i].mesh.clone())
+    }
+
+    pub fn model(&self, i: usize) -> &LoadedModel {
+        &self.models[i]
+    }
+
+    pub fn model_mut(&mut self, i: usize) -> &mut LoadedModel {
+        &mut self.models[i]
+    }
+
+    /// Mesh of `obj` with each vertex placed by `place` (render units,
+    /// object-local: +X left, +Y up, +Z forward). Vertices are emitted per
+    /// face corner, in face order.
+    pub fn build_mesh(&self, obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Mesh {
         let mut positions = Vec::new();
         let mut uvs = Vec::new();
         for face in &obj.faces {
             let slot = face.active_slot();
             let tex = self.slots.get(&slot.texture.to_lowercase()).copied();
             for (&vi, &(u, v)) in face.indices.iter().zip(&slot.uv) {
-                let p = obj.vertices[vi];
-                positions.push([p.x as f32 * s, -p.z as f32 * s, p.y as f32 * s]);
+                positions.push(place(&obj.vertices[vi]));
                 uvs.push(match tex {
                     Some(t) => {
                         let ox = (t % ATLAS_COLS * TEX_W) as f32;
@@ -203,6 +256,28 @@ impl ObjectLibrary {
         mesh.compute_flat_normals();
         mesh
     }
+}
+
+/// Model-space vertex to render units for ordinary (non-people) models:
+/// one model unit = 2 h-units horizontally; vertically the top-down view
+/// draws 1 h-unit per model unit (rendering.md §0). Model z is downward.
+pub fn static_vertex(p: &Vertex) -> [f32; 3] {
+    let (sh, sv) = (2.0 / H_PER_SQUARE, 1.0 / H_PER_SQUARE);
+    [p.x as f32 * sh, -p.z as f32 * sv, p.y as f32 * sh]
+}
+
+/// Positions in the order `build_mesh` emits them, for re-posing a mesh.
+pub fn corner_positions(obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Vec<[f32; 3]> {
+    obj.faces
+        .iter()
+        .flat_map(|f| f.indices.iter().map(|&vi| place(&obj.vertices[vi])))
+        .collect()
+}
+
+pub struct LoadedModel {
+    pub obj: Obj,
+    pub mesh: Handle<Mesh>,
+    pub info: ModelInfo,
 }
 
 /// AmigaOS paths are case-insensitive; the extracted files keep the CD's case.
@@ -229,29 +304,30 @@ pub fn spawn_scenery(
     data: &GameData,
     library: &mut ObjectLibrary,
     meshes: &mut Assets<Mesh>,
-    map: &Map,
+    city: &City,
 ) {
-    let s = 1.0 / UNITS_PER_SQUARE;
     for x in 0..MAP_SIZE {
         for y in 0..MAP_SIZE {
-            let mut base = 0.0;
-            for cube in &map.square(x, y).cubes {
-                let top = base + cube.height1.max(cube.height2) as f32;
-                if cube.scenery != 0 {
-                    let path = SCENERY.get(cube.scenery as usize - 1);
-                    if let Some(mesh) = path.and_then(|p| library.mesh(data, meshes, p)) {
-                        let angle = cube.rotation as f32 / 256.0 * std::f32::consts::TAU;
-                        commands.spawn((
-                            Mesh3d(mesh),
-                            MeshMaterial3d(library.material.clone()),
-                            Transform::from_xyz(x as f32 + 0.5, top * s, y as f32 + 0.5)
-                                .with_rotation(Quat::from_rotation_y(-angle)),
-                        ));
-                    } else {
-                        warn!("square ({x},{y}): unknown scenery id {}", cube.scenery);
-                    }
+            let geoms = city.square_cubes(x, y);
+            for (cube, geom) in city.map.square(x, y).cubes.iter().zip(geoms) {
+                if cube.scenery == 0 {
+                    continue;
                 }
-                base += stack_height(cube);
+                let path = SCENERY.get(cube.scenery as usize - 1);
+                let Some(mesh) = path.and_then(|p| library.mesh(data, meshes, p)) else {
+                    warn!("square ({x},{y}): unknown scenery id {}", cube.scenery);
+                    continue;
+                };
+                // Scenery stands on its cube's top; heading = rotation * 22.5
+                // angle units (rendering.md §0).
+                let h = geom.top_at(0.5, 0.5);
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(library.material.clone()),
+                    Transform::from_xyz(x as f32 + 0.5, h / H_PER_SQUARE, y as f32 + 0.5)
+                        .with_rotation(heading_to_render(cube.rotation as f32 * 22.5)),
+                    LevelEntity,
+                ));
             }
         }
     }

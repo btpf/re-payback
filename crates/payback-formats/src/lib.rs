@@ -4,6 +4,7 @@
 //! documented in each module and in `docs/formats.md`.
 
 pub mod map;
+pub mod motion;
 pub mod obj;
 pub mod palette;
 pub mod phrases;
@@ -11,6 +12,7 @@ pub mod sound;
 pub mod texture;
 
 pub use map::Map;
+pub use motion::Motion;
 pub use obj::Obj;
 pub use palette::Palette;
 pub use phrases::Phrases;

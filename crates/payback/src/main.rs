@@ -12,7 +12,9 @@ mod city;
 mod data;
 mod level;
 mod objects;
-mod player;
+mod sim;
+mod vehicles;
+mod water;
 mod world;
 
 use bevy::{
@@ -49,12 +51,16 @@ fn main() -> AppExit {
             map: arg("--map").unwrap_or_else(|| "0".into()),
             level: arg("--level").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
+        // One game tick is 1/25 s on the Amiga (the OS4 port uses 1/30 s;
+        // docs/re/people.md).
+        .insert_resource(Time::<Fixed>::from_hz(25.0))
         .insert_resource(ClearColor(Color::srgb(0.35, 0.55, 0.85)))
         .add_plugins((
             level::LevelPlugin,
             camera::CameraPlugin,
-            player::PlayerPlugin,
+            sim::SimPlugin,
             audio::AudioPlugin,
+            water::WaterPlugin,
         ))
         .add_systems(Update, screenshot_and_exit)
         .run()
