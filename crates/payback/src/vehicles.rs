@@ -455,6 +455,8 @@ pub fn spawn_vehicle_world(
                     flying: false,
                     controls: true,
                 },
+                crate::sim::driving::Drive::default(),
+                crate::sim::Stick::default(),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 Transform::from_translation(to_render(pos.as_vec3()))

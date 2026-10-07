@@ -6,10 +6,13 @@
 //! One game tick is 1/25 s; systems run in `FixedUpdate` with ticks = 1.
 
 pub mod ai;
+pub mod boarding;
 pub mod collide;
 pub mod combat;
+pub mod driving;
 pub mod people;
 pub mod police;
+pub mod traffic;
 
 use crate::data::GameData;
 use bevy::prelude::*;
@@ -286,6 +289,9 @@ impl Plugin for SimPlugin {
                 people::PeoplePlugin,
                 combat::CombatPlugin,
                 police::PolicePlugin,
+                driving::DrivingPlugin,
+                boarding::BoardingPlugin,
+                traffic::TrafficPlugin,
             ));
     }
 }

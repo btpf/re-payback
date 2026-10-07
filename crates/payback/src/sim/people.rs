@@ -94,6 +94,8 @@ pub struct PlayerSession {
     pub lives: i32,
     /// Bonus multiplier 1..4 (+1 per mission complete, reset on death).
     pub multiplier: i32,
+    /// On-foot health kept while driving (`DAT_012a6304`).
+    pub foot_health: i32,
     pub respawn_timer: i32,
     pub regen: i32,
     /// Script-forced respawn square (sx, sy, level).
@@ -107,6 +109,7 @@ impl Default for PlayerSession {
         PlayerSession {
             lives: 3,
             multiplier: 1,
+            foot_health: 100,
             respawn_timer: 0,
             regen: 0,
             respawn_square: None,
@@ -132,7 +135,11 @@ pub struct PlayerInput {
 #[derive(Resource)]
 pub struct HumanMotion(pub Motion);
 
-/// The people update chain; other systems order themselves after it.
+/// People decide what to do (controls and AI fill the stick).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PeopleThink;
+
+/// People move and animate; other systems order themselves after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeopleSet;
 
@@ -148,18 +155,20 @@ impl Plugin for PeoplePlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    player_stick,
-                    panic_peds,
-                    ped_ai,
-                    super::ai::people_orders,
-                    move_people,
-                    animate_people,
-                    regen_and_respawn,
-                    spawn_peds,
-                    despawn_far,
-                )
-                    .chain()
-                    .in_set(PeopleSet),
+                    (player_stick, panic_peds, ped_ai, super::ai::people_orders)
+                        .chain()
+                        .in_set(PeopleThink),
+                    (
+                        move_people,
+                        animate_people,
+                        regen_and_respawn,
+                        spawn_peds,
+                        despawn_far,
+                    )
+                        .chain()
+                        .in_set(PeopleSet)
+                        .after(PeopleThink),
+                ),
             )
             .add_systems(Update, (pose_people, update_listener));
     }
@@ -665,13 +674,13 @@ fn regen_and_respawn(
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<Rng>,
-    mut players: Query<(Entity, &mut Obj), With<CameraTarget>>,
+    mut players: Query<(Entity, &mut Obj, Has<Person>), With<CameraTarget>>,
 ) {
     let (Some(city), Some(starts), Some(mut library)) = (city, starts, library) else {
         return;
     };
     let mut alive = false;
-    for (e, mut obj) in &mut players {
+    for (e, mut obj, on_foot) in &mut players {
         match obj.state {
             State::Dead | State::Removed => {
                 if session.respawn_timer == 0 {
@@ -685,11 +694,17 @@ fn regen_and_respawn(
             }
             _ => {
                 alive = true;
+                // +1 health every 250 ticks; while driving it heals the
+                // stored on-foot health.
                 session.regen += 1;
                 if session.regen >= REGEN_TICKS {
                     session.regen = 0;
-                    if (1..100).contains(&obj.health) {
-                        obj.health += 1;
+                    if on_foot {
+                        if (1..100).contains(&obj.health) {
+                            obj.health += 1;
+                        }
+                    } else if (1..100).contains(&session.foot_health) {
+                        session.foot_health += 1;
                     }
                 }
             }
