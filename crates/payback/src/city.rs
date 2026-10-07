@@ -160,7 +160,7 @@ fn top_corners(cube: &Cube) -> [f32; 4] {
 }
 
 /// Height a cube adds to its stack.
-fn stack_height(cube: &Cube) -> f32 {
+pub fn stack_height(cube: &Cube) -> f32 {
     match cube.slope {
         Slope::Off | Slope::Flat | Slope::Unknown(_) => cube.height1 as f32,
         _ => cube.height1.max(cube.height2) as f32,

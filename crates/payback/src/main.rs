@@ -7,6 +7,7 @@
 
 mod city;
 mod data;
+mod objects;
 
 use bevy::{
     input::mouse::AccumulatedMouseScroll,
@@ -80,12 +81,13 @@ fn spawn_city(
             alpha_mode: match pass {
                 Pass::Opaque => AlphaMode::Opaque,
                 Pass::Masked => AlphaMode::Mask(0.5),
-                Pass::Alpha | Pass::Reflect => AlphaMode::Blend,
+                Pass::Reflect => AlphaMode::Opaque,
+                Pass::Alpha => AlphaMode::Blend,
             },
             base_color: match pass {
                 Pass::Alpha => Color::srgba(1.0, 1.0, 1.0, 0.5),
                 // Placeholder until the reflection effect is reimplemented.
-                Pass::Reflect => Color::srgba(0.45, 0.6, 1.0, 0.85),
+                Pass::Reflect => Color::srgb(0.45, 0.6, 1.0),
                 _ => Color::WHITE,
             },
             ..default()
@@ -95,6 +97,10 @@ fn spawn_city(
             MeshMaterial3d(materials.add(material)),
         ));
     }
+
+    let mut library = objects::ObjectLibrary::new(&data, &mut images, &mut materials);
+    objects::spawn_scenery(&mut commands, &data, &mut library, &mut meshes, &map);
+    commands.insert_resource(library);
 }
 
 /// Camera orbiting a focus point on the ground.
