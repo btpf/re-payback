@@ -161,6 +161,24 @@ pub fn resolve_walls(city: &City, pos: IVec3, prev: IVec3, r: i32) -> (IVec3, Hi
     (p, hit)
 }
 
+/// Line of sight between two points at head height (68k `FUN_0009217e`):
+/// no wall face is crossed on the way, probing 0x400 above the lower point.
+pub fn line_of_sight(city: &City, a: IVec3, b: IVec3) -> bool {
+    let zh = (a.z.max(b.z) - 0x400) >> 4;
+    let d = b - a;
+    let steps = (d.x.abs().max(d.y.abs()) / 256).max(1);
+    let mut prev = a;
+    for k in 1..=steps {
+        let p = a + d * k / steps;
+        if seg_blocked_x(city, prev.x, p.x, prev.y, zh) || seg_blocked_y(city, p.x, prev.y, p.y, zh)
+        {
+            return false;
+        }
+        prev = p;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

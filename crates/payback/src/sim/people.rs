@@ -4,6 +4,7 @@
 //! follow the 68k `FUN_000e3a58` people branch. All rates are per game tick.
 
 use super::collide;
+use super::combat::{Arsenal, Panic};
 use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of, wrap};
 use crate::audio::{Listener, Sound, SoundPos, id};
 use crate::camera::{CameraTarget, GameCam};
@@ -75,16 +76,24 @@ pub struct Person {
     pub splashed: bool,
     /// Entity fled from / targeted.
     pub target: Option<Entity>,
-    /// Index into PEOPLE_MODELS.
+    /// Index into PEOPLE_MODELS of the model shown (follows the weapon for
+    /// the player).
     pub kind: usize,
-    /// The entity's own animated mesh.
+    /// Firing/punch pose model shown instead for a frame or two.
+    pub pose_model: Option<&'static str>,
+    /// The model follows the carried weapon (the player).
+    pub follows_weapon: bool,
+    /// The entity's own animated mesh, and the model it was built for.
     pub mesh: Handle<Mesh>,
+    shown: usize,
 }
 
 /// The local player's session state (lives, respawn).
 #[derive(Resource)]
 pub struct PlayerSession {
     pub lives: i32,
+    /// Bonus multiplier 1..4 (+1 per mission complete, reset on death).
+    pub multiplier: i32,
     pub respawn_timer: i32,
     pub regen: i32,
     /// Script-forced respawn square (sx, sy, level).
@@ -97,6 +106,7 @@ impl Default for PlayerSession {
     fn default() -> Self {
         PlayerSession {
             lives: 3,
+            multiplier: 1,
             respawn_timer: 0,
             regen: 0,
             respawn_square: None,
@@ -122,26 +132,34 @@ pub struct PlayerInput {
 #[derive(Resource)]
 pub struct HumanMotion(pub Motion);
 
+/// The people update chain; other systems order themselves after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PeopleSet;
+
 pub struct PeoplePlugin;
 
 impl Plugin for PeoplePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerSession>()
             .init_resource::<PlayerInput>()
+            .add_message::<Panic>()
             .add_systems(Startup, (load_motion, spawn_player).chain())
             .add_systems(PreUpdate, read_keyboard)
             .add_systems(
                 FixedUpdate,
                 (
                     player_stick,
+                    panic_peds,
                     ped_ai,
+                    super::ai::people_orders,
                     move_people,
                     animate_people,
                     regen_and_respawn,
                     spawn_peds,
                     despawn_far,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(PeopleSet),
             )
             .add_systems(Update, (pose_people, update_listener));
     }
@@ -193,7 +211,10 @@ pub fn spawn_person(
         splashed: false,
         target: None,
         kind,
+        pose_model: None,
+        follows_weapon: false,
         mesh: mesh.clone(),
+        shown: model,
     };
     let e = commands
         .spawn((
@@ -233,8 +254,23 @@ fn spawn_player(
         0,
         State::Player,
     ) {
-        commands.entity(e).insert(CameraTarget);
+        make_player(&mut commands, e);
     }
+}
+
+/// Turn a freshly spawned person into the local player.
+fn make_player(commands: &mut Commands, e: Entity) {
+    commands
+        .entity(e)
+        .insert((CameraTarget, Arsenal::default()));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut p) = world.get_mut::<Person>(e) {
+            p.follows_weapon = true;
+        }
+        if let Some(mut o) = world.get_mut::<Obj>(e) {
+            o.player = Some(0);
+        }
+    });
 }
 
 fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mut input: ResMut<PlayerInput>) {
@@ -298,6 +334,36 @@ fn player_stick(mut input: ResMut<PlayerInput>, mut q: Query<(&Obj, &mut Stick)>
     input.use_pressed = false;
 }
 
+/// Civilians within 10000 units of a shot or blast scream and flee for
+/// 100 ticks (68k `FUN_000ccabe`, OS4 `FUN_010435f4` / `FUN_01043788`).
+fn panic_peds(
+    mut commands: Commands,
+    mut events: MessageReader<Panic>,
+    mut rng: ResMut<Rng>,
+    mut q: Query<(&mut Obj, &mut Person)>,
+    models: Option<Res<ObjectLibrary>>,
+) {
+    let Some(models) = models else {
+        events.clear();
+        return;
+    };
+    for ev in events.read() {
+        for (mut o, mut p) in &mut q {
+            if o.state != State::Wander || models.model(o.model).info.police {
+                continue;
+            }
+            let d = (o.pos - ev.at).as_i64vec3() / 8;
+            if d.length_squared() < 0x17d784 {
+                o.state = State::Flee;
+                p.flee = 100;
+                p.target = Some(ev.from);
+                let at = SoundPos::At(o.posf());
+                commands.spawn(Sound::once(id::OW1 + rng.rand(3) as u16, 5e6, 8000.0, at));
+            }
+        }
+    }
+}
+
 /// Pedestrian AI: wandering and fleeing (people.md §7.3).
 fn ped_ai(
     city: Option<Res<City>>,
@@ -306,7 +372,7 @@ fn ped_ai(
     mut q: Query<(&mut Obj, &mut Person, &mut Stick)>,
 ) {
     let Some(city) = city else { return };
-    for (obj, mut p, mut stick) in &mut q {
+    for (mut obj, mut p, mut stick) in &mut q {
         *stick = Stick::default();
         match obj.state {
             State::Wander => {
@@ -341,6 +407,12 @@ fn ped_ai(
                 p.wander = t;
             }
             State::Flee => {
+                p.flee -= 1;
+                if p.flee <= 0 {
+                    obj.state = State::Wander;
+                    p.wander = -1;
+                    continue;
+                }
                 let from = p
                     .target
                     .and_then(|e| targets.get(e).ok())
@@ -631,6 +703,7 @@ fn regen_and_respawn(
         return;
     }
     session.lives -= 1;
+    session.multiplier = 1;
     if session.lives <= 0 {
         info!("Game over!");
         return;
@@ -673,7 +746,7 @@ fn regen_and_respawn(
         0,
         State::Player,
     ) {
-        commands.entity(e).insert(CameraTarget);
+        make_player(&mut commands, e);
     }
 }
 
@@ -830,17 +903,30 @@ fn limb_offset(m: &Motion, p: &Person, l: usize, b: bool) -> f32 {
 
 fn pose_people(
     motion: Option<Res<HumanMotion>>,
-    library: Option<Res<ObjectLibrary>>,
+    library: Option<ResMut<ObjectLibrary>>,
+    data: Res<GameData>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut q: Query<(&Obj, &Person, &mut Transform)>,
+    mut q: Query<(&Obj, &mut Person, &mut Transform)>,
 ) {
-    let (Some(motion), Some(library)) = (motion, library) else {
+    let (Some(motion), Some(mut library)) = (motion, library) else {
         return;
     };
-    for (obj, p, mut tf) in &mut q {
+    for (obj, mut p, mut tf) in &mut q {
         tf.translation = to_render(obj.posf());
         tf.rotation = heading_to_render(obj.heading as f32);
-        let model = &library.model(obj.model).obj;
+        let path = p.pose_model.unwrap_or(PEOPLE_MODELS[p.kind]);
+        let Some(shown) = library.load(&data, &mut meshes, path) else {
+            continue;
+        };
+        if shown != p.shown {
+            // Different vertex layout: rebuild the whole mesh.
+            let rebuilt = library.build_mesh(&library.model(shown).obj, |v| standing(v, 0.0, 0.0));
+            if let Some(mut mesh) = meshes.get_mut(&p.mesh) {
+                *mesh = rebuilt;
+            }
+            p.shown = shown;
+        }
+        let model = &library.model(shown).obj;
         let positions = if obj.pitch == 0 {
             corner_positions(model, lying)
         } else {
@@ -848,8 +934,8 @@ fn pose_people(
                 let l = v.limb as usize;
                 standing(
                     v,
-                    limb_offset(&motion.0, p, l, false),
-                    limb_offset(&motion.0, p, l, true),
+                    limb_offset(&motion.0, &p, l, false),
+                    limb_offset(&motion.0, &p, l, true),
                 )
             })
         };

@@ -8,6 +8,7 @@ pub mod motion;
 pub mod obj;
 pub mod palette;
 pub mod phrases;
+pub mod route;
 pub mod sound;
 pub mod texture;
 
@@ -16,6 +17,7 @@ pub use motion::Motion;
 pub use obj::Obj;
 pub use palette::Palette;
 pub use phrases::Phrases;
+pub use route::Route;
 pub use texture::{CubeTextureList, IndexedImage};
 
 #[derive(Debug, thiserror::Error)]

@@ -2,11 +2,13 @@
 
 use crate::city::{self, Pass};
 use crate::data::GameData;
-use crate::objects::{self, ObjectLibrary};
+use crate::mapedit::{self, CityRender};
+use crate::objects::{self, ObjectLibrary, SceneryIndex};
 use crate::water::{self, Water, WaterMaterial};
 use crate::world::{City, SQUARE, z_of_h};
 use bevy::prelude::*;
 use payback_formats::{Map, map::MAP_SIZE};
+use std::collections::HashMap;
 
 /// Which map to load (`Maps/<n>.map`).
 #[derive(Resource, Clone)]
@@ -48,6 +50,7 @@ pub fn load_level(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
+    mut scenery: ResMut<SceneryIndex>,
 ) {
     let path = format!("Maps/{}.map", spec.map);
     let map = match data
@@ -80,12 +83,8 @@ pub fn load_level(
         .iter()
         .map(|e| e.file.clone())
         .collect();
-    for (pass, mesh) in city::build_city_meshes(&map, &names) {
-        let mesh = Mesh3d(meshes.add(mesh));
-        if pass == Pass::Reflect {
-            commands.spawn((mesh, MeshMaterial3d(water.clone()), LevelEntity));
-            continue;
-        }
+    let mut pass_materials = HashMap::new();
+    for pass in [Pass::Opaque, Pass::Masked, Pass::Alpha] {
         let material = StandardMaterial {
             base_color_texture: Some(if pass == Pass::Masked {
                 keyed.clone()
@@ -105,13 +104,29 @@ pub fn load_level(
             },
             ..default()
         };
-        commands.spawn((mesh, MeshMaterial3d(materials.add(material)), LevelEntity));
+        pass_materials.insert(pass, materials.add(material));
     }
+    let mut render = CityRender {
+        names,
+        materials: pass_materials,
+        water: water.clone(),
+        chunks: HashMap::new(),
+        visible_layers: 3,
+    };
     commands.insert_resource(Water(water));
 
     let city = City::new(map);
+    mapedit::spawn_all_chunks(&mut commands, &mut render, &mut meshes, &city);
+    commands.insert_resource(render);
     let mut library = ObjectLibrary::new(&data, &mut images, &mut materials, city.map.night);
-    objects::spawn_scenery(&mut commands, &data, &mut library, &mut meshes, &city);
+    objects::spawn_scenery(
+        &mut commands,
+        &data,
+        &mut library,
+        &mut meshes,
+        &city,
+        &mut scenery,
+    );
     commands.insert_resource(library);
     commands.insert_resource(find_start_points(&city, spec.level));
     commands.insert_resource(city);

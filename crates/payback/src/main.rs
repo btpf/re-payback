@@ -10,7 +10,11 @@ mod audio;
 mod camera;
 mod city;
 mod data;
+mod effects;
+mod hud;
 mod level;
+mod mapedit;
+mod mission;
 mod objects;
 mod sim;
 mod vehicles;
@@ -57,10 +61,15 @@ fn main() -> AppExit {
         .insert_resource(ClearColor(Color::srgb(0.35, 0.55, 0.85)))
         .add_plugins((
             level::LevelPlugin,
+            objects::SceneryPlugin,
+            mapedit::MapEditPlugin,
             camera::CameraPlugin,
             sim::SimPlugin,
             audio::AudioPlugin,
             water::WaterPlugin,
+            effects::EffectsPlugin,
+            hud::HudPlugin,
+            mission::MissionPlugin,
         ))
         .add_systems(Update, screenshot_and_exit)
         .run()

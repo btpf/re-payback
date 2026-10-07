@@ -125,3 +125,25 @@ fn palette_from_executable() {
         assert!(g > r && g > b, "colour {i:#x} = {r},{g},{b}");
     }
 }
+
+#[test]
+fn routes_parse_and_connect() {
+    let Some(dir) = data_dir() else { return };
+    for n in 0..3 {
+        let r = payback_formats::Route::parse(
+            &std::fs::read(dir.join(format!("Maps/{n}.route"))).unwrap(),
+        )
+        .unwrap();
+        let used: Vec<usize> = (0..r.nodes.len()).filter(|&i| r.nodes[i].used).collect();
+        assert!(used.len() > 300, "map {n}: {} nodes", used.len());
+        // Following next hops from the first node reaches the last one.
+        let (mut at, dest) = (used[0], *used.last().unwrap());
+        for _ in 0..1024 {
+            if at == dest {
+                break;
+            }
+            at = r.next(at, dest).unwrap();
+        }
+        assert_eq!(at, dest, "map {n}");
+    }
+}

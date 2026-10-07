@@ -211,15 +211,27 @@ fn top_uv(slope: Slope) -> [Vec2; 4] {
     }
 }
 
-pub fn build_city_meshes(map: &Map, cube_texture_names: &[String]) -> Vec<(Pass, Mesh)> {
-    // Indexed by `Pass as usize`.
-    let mut builders: [MeshBuilder; 4] = Default::default();
+/// Squares per chunk side; the city is meshed in 8x8 chunks so map edits
+/// only rebuild one.
+pub const CHUNK: usize = 16;
+pub const CHUNKS: usize = MAP_SIZE / CHUNK;
+
+/// Meshes for one chunk (cx, cy), per cube layer and pass.
+pub fn build_chunk_meshes(
+    map: &Map,
+    cube_texture_names: &[String],
+    cx: usize,
+    cy: usize,
+) -> Vec<(usize, Pass, Mesh)> {
+    // Indexed by [layer][Pass as usize].
+    let mut builders: [[MeshBuilder; 4]; 3] = Default::default();
     let s = 1.0 / H_PER_SQUARE;
 
-    for x in 0..MAP_SIZE {
-        for y in 0..MAP_SIZE {
+    for x in cx * CHUNK..(cx + 1) * CHUNK {
+        for y in cy * CHUNK..(cy + 1) * CHUNK {
             let mut base = 0.0f32;
-            for cube in &map.square(x, y).cubes {
+            for (layer, cube) in map.square(x, y).cubes.iter().enumerate() {
+                let builders = &mut builders[layer];
                 if cube.slope != Slope::Off {
                     let corners = top_corners(cube);
                     let [nw, ne, se, sw] = corners.map(|h| (base + h) * s);
@@ -306,10 +318,13 @@ pub fn build_city_meshes(map: &Map, cube_texture_names: &[String]) -> Vec<(Pass,
             }
         }
     }
-    Pass::ALL
-        .into_iter()
-        .zip(builders)
-        .filter(|(_, b)| !b.positions.is_empty())
-        .map(|(p, b)| (p, b.build()))
-        .collect()
+    let mut out = Vec::new();
+    for (layer, passes) in builders.into_iter().enumerate() {
+        for (pass, b) in Pass::ALL.into_iter().zip(passes) {
+            if !b.positions.is_empty() {
+                out.push((layer, pass, b.build()));
+            }
+        }
+    }
+    out
 }

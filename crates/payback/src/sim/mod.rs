@@ -5,8 +5,11 @@
 //! z downward (16 per h-unit), angles 5760 per turn, rates per game tick.
 //! One game tick is 1/25 s; systems run in `FixedUpdate` with ticks = 1.
 
+pub mod ai;
 pub mod collide;
+pub mod combat;
 pub mod people;
+pub mod police;
 
 use crate::data::GameData;
 use bevy::prelude::*;
@@ -224,6 +227,15 @@ pub struct Obj {
     pub player: Option<u8>,
     pub wanted: i32,
     pub score: i32,
+    /// Burn timer (> 0: on fire; 100 when set alight).
+    pub burn: i32,
+    /// Damage filter: -1 vulnerable to everything, else only the matching
+    /// weapon class (combat_police.md §6).
+    pub filter: i32,
+    /// Script id (-1 = none), matched by mission triggers.
+    pub script_id: i32,
+    /// Who created/fired this object (projectiles, thrown drivers).
+    pub owner: Option<Entity>,
 }
 
 impl Obj {
@@ -249,6 +261,10 @@ impl Obj {
             player: None,
             wanted: 0,
             score: 0,
+            burn: 0,
+            filter: -1,
+            script_id: -1,
+            owner: None,
         }
     }
 
@@ -266,7 +282,11 @@ impl Plugin for SimPlugin {
             .add_systems(Startup, |mut commands: Commands, data: Res<GameData>| {
                 commands.insert_resource(Rng::load(&data));
             })
-            .add_plugins(people::PeoplePlugin);
+            .add_plugins((
+                people::PeoplePlugin,
+                combat::CombatPlugin,
+                police::PolicePlugin,
+            ));
     }
 }
 

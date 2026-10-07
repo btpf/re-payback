@@ -95,26 +95,33 @@ pub struct City {
     cubes: Vec<[CubeGeom; 3]>,
 }
 
+fn square_geoms(sq: &map::Square) -> [CubeGeom; 3] {
+    let mut base = 0.0;
+    let mut geoms = [CubeGeom::default(); 3];
+    for (g, cube) in geoms.iter_mut().zip(&sq.cubes) {
+        let top = cube.faces[map::TOP];
+        *g = CubeGeom {
+            solid: cube.slope != Slope::Off,
+            base,
+            corners: top_corners(cube),
+            water: top.kind == FaceType::Reflect,
+            top_texture: top.visible().then_some(top.texture),
+        };
+        base += stack_height(cube);
+    }
+    geoms
+}
+
 impl City {
     pub fn new(map: Map) -> City {
-        let mut cubes = Vec::with_capacity(MAP_SIZE * MAP_SIZE);
-        for sq in &map.squares {
-            let mut base = 0.0;
-            let mut geoms = [CubeGeom::default(); 3];
-            for (g, cube) in geoms.iter_mut().zip(&sq.cubes) {
-                let top = cube.faces[map::TOP];
-                *g = CubeGeom {
-                    solid: cube.slope != Slope::Off,
-                    base,
-                    corners: top_corners(cube),
-                    water: top.kind == FaceType::Reflect,
-                    top_texture: top.visible().then_some(top.texture),
-                };
-                base += stack_height(cube);
-            }
-            cubes.push(geoms);
-        }
+        let cubes = map.squares.iter().map(square_geoms).collect();
         City { map, cubes }
+    }
+
+    /// Recompute derived geometry after the map square was edited.
+    pub fn refresh_square(&mut self, sx: usize, sy: usize) {
+        let i = sx * MAP_SIZE + sy;
+        self.cubes[i] = square_geoms(&self.map.squares[i]);
     }
 
     /// Square containing world (x, y) and the fractional position in it.

@@ -298,36 +298,123 @@ fn find_case_insensitive(root: &std::path::Path, rel: &str) -> Option<std::path:
     Some(dir)
 }
 
-/// Spawn every scenery object placed in `map`.
+/// Scenery entity per map cell (sx, sy, cube level).
+#[derive(Resource, Default)]
+pub struct SceneryIndex(pub HashMap<(usize, usize, usize), Entity>);
+
+/// Change the scenery object on a map cell (pickups, crates, scripts'
+/// `SetScenery`). `special`/`rotation` are left unchanged when `None`.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct SetScenery {
+    pub sx: usize,
+    pub sy: usize,
+    pub level: usize,
+    pub scenery: u8,
+    pub special: Option<u8>,
+    pub rotation: Option<u8>,
+}
+
+pub struct SceneryPlugin;
+
+impl Plugin for SceneryPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SceneryIndex>()
+            .add_message::<SetScenery>()
+            .add_systems(FixedPostUpdate, apply_scenery_changes);
+    }
+}
+
+fn apply_scenery_changes(
+    mut commands: Commands,
+    mut changes: MessageReader<SetScenery>,
+    data: Res<GameData>,
+    city: Option<ResMut<City>>,
+    library: Option<ResMut<ObjectLibrary>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut index: ResMut<SceneryIndex>,
+) {
+    let (Some(mut city), Some(mut library)) = (city, library) else {
+        changes.clear();
+        return;
+    };
+    for c in changes.read() {
+        if c.sx >= MAP_SIZE || c.sy >= MAP_SIZE || c.level > 2 {
+            continue;
+        }
+        let cube = &mut city.map.squares[c.sx * MAP_SIZE + c.sy].cubes[c.level];
+        cube.scenery = c.scenery;
+        if let Some(s) = c.special {
+            cube.special = s;
+        }
+        if let Some(r) = c.rotation {
+            cube.rotation = r;
+        }
+        if let Some(e) = index.0.remove(&(c.sx, c.sy, c.level)) {
+            commands.entity(e).despawn();
+        }
+        spawn_one(
+            &mut commands,
+            &data,
+            &mut library,
+            &mut meshes,
+            &city,
+            &mut index,
+            c.sx,
+            c.sy,
+            c.level,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_one(
+    commands: &mut Commands,
+    data: &GameData,
+    library: &mut ObjectLibrary,
+    meshes: &mut Assets<Mesh>,
+    city: &City,
+    index: &mut SceneryIndex,
+    x: usize,
+    y: usize,
+    level: usize,
+) {
+    let cube = &city.map.square(x, y).cubes[level];
+    if cube.scenery == 0 {
+        return;
+    }
+    let path = SCENERY.get(cube.scenery as usize - 1);
+    let Some(mesh) = path.and_then(|p| library.mesh(data, meshes, p)) else {
+        warn!("square ({x},{y}): unknown scenery id {}", cube.scenery);
+        return;
+    };
+    // Scenery stands on its cube's top; heading = rotation * 22.5 angle
+    // units (rendering.md §0).
+    let h = city.square_cubes(x, y)[level].top_at(0.5, 0.5);
+    let e = commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(library.material.clone()),
+            Transform::from_xyz(x as f32 + 0.5, h / H_PER_SQUARE, y as f32 + 0.5)
+                .with_rotation(heading_to_render(cube.rotation as f32 * 22.5)),
+            LevelEntity,
+        ))
+        .id();
+    index.0.insert((x, y, level), e);
+}
+
+/// Spawn every scenery object placed in the city.
 pub fn spawn_scenery(
     commands: &mut Commands,
     data: &GameData,
     library: &mut ObjectLibrary,
     meshes: &mut Assets<Mesh>,
     city: &City,
+    index: &mut SceneryIndex,
 ) {
     for x in 0..MAP_SIZE {
         for y in 0..MAP_SIZE {
-            let geoms = city.square_cubes(x, y);
-            for (cube, geom) in city.map.square(x, y).cubes.iter().zip(geoms) {
-                if cube.scenery == 0 {
-                    continue;
-                }
-                let path = SCENERY.get(cube.scenery as usize - 1);
-                let Some(mesh) = path.and_then(|p| library.mesh(data, meshes, p)) else {
-                    warn!("square ({x},{y}): unknown scenery id {}", cube.scenery);
-                    continue;
-                };
-                // Scenery stands on its cube's top; heading = rotation * 22.5
-                // angle units (rendering.md §0).
-                let h = geom.top_at(0.5, 0.5);
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(library.material.clone()),
-                    Transform::from_xyz(x as f32 + 0.5, h / H_PER_SQUARE, y as f32 + 0.5)
-                        .with_rotation(heading_to_render(cube.rotation as f32 * 22.5)),
-                    LevelEntity,
-                ));
+            for level in 0..3 {
+                spawn_one(commands, data, library, meshes, city, index, x, y, level);
             }
         }
     }
