@@ -802,7 +802,11 @@ fn move_projectiles(
                 }
             }
             ProjectileKind::Missile => {
-                if hit.x || hit.y || on_ground || scenery_hit || floor.is_none() {
+                // Scenery only stops it (and breaks a crate): it explodes on
+                // walls, the ground and objects (68k `FUN_000cdfdc`).
+                if scenery_hit && !(hit.x || hit.y || on_ground) {
+                    remove = true;
+                } else if hit.x || hit.y || on_ground || floor.is_none() {
                     explode.write(Explode {
                         pos: prev,
                         power: 1000 * 25000,
@@ -880,12 +884,15 @@ fn projectile_hits(
     mut effects: ResMut<Effects>,
     mut explode: MessageWriter<Explode>,
     mut hurt: MessageWriter<Hurt>,
+    session: Res<super::people::PlayerSession>,
     projectiles: Query<(Entity, &Obj, &Projectile)>,
     mut targets: Query<(Entity, &mut Obj, Has<Person>), Without<Projectile>>,
 ) {
     let (Some(library), Some(city)) = (library, city) else {
         return;
     };
+    // Hit money for the shooting player, paid after the loop.
+    let mut pay: Vec<(u8, i32)> = Vec::new();
     for (pe, po, p) in &projectiles {
         if matches!(p.kind, ProjectileKind::Grenade | ProjectileKind::Bomb) {
             continue;
@@ -953,6 +960,12 @@ fn projectile_hits(
                     }
                 } else {
                     t.health -= base / mass;
+                    // Money: min(8000, k / T), k = 40 x the damage numerator,
+                    // T = the target's toughness, for player shots on
+                    // non-players (68k `FUN_000de0b6` ~119024).
+                    if let (true, Some(pl), None) = (p.by_player, p.player, t.player) {
+                        pay.push((pl, (40 * base / mass).min(8000)));
+                    }
                 }
             }
             if p.kind != ProjectileKind::Petrol {
@@ -994,6 +1007,11 @@ fn projectile_hits(
                 commands.entity(pe).despawn();
             }
             break;
+        }
+    }
+    for (pl, money) in pay {
+        if let Some((_, mut o, _)) = targets.iter_mut().find(|(_, o, _)| o.player == Some(pl) && o.state == State::Player) {
+            o.score += money * session.multiplier.max(1);
         }
     }
 }

@@ -14,6 +14,7 @@ pub mod route;
 pub mod scores;
 pub mod sound;
 pub mod texture;
+pub mod vehicles;
 
 pub use map::Map;
 pub use motion::Motion;

@@ -30,6 +30,7 @@ mod mapedit;
 mod mission;
 mod multiplayer;
 mod objects;
+mod parked;
 mod rampage;
 mod replay;
 mod sim;
@@ -89,6 +90,7 @@ fn main() -> AppExit {
             frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
+            parked::ParkedPlugin,
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
             autoplay::AutoplayPlugin,
         ))

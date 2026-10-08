@@ -177,3 +177,15 @@ fn shipped_replays_parse() {
         assert_eq!(r.header.duration, ticks);
     }
 }
+
+#[test]
+fn map_vehicles_parse() {
+    let Some(dir) = data_dir() else { return };
+    for n in 0..3 {
+        let Ok(b) = std::fs::read(dir.join(format!("Maps/{n}.vehicles"))) else { continue };
+        let v = payback_formats::vehicles::MapVehicles::parse(&b).unwrap();
+        // Each shipped city allows only its own home-city traffic.
+        assert_eq!(v.cities, std::array::from_fn(|i| i == n));
+        assert!(!v.parked.is_empty() && v.parked.iter().all(|p| (0..28).contains(&p.model)));
+    }
+}
