@@ -3,8 +3,10 @@
 //! (`FUN_0101267c`), control setup (`FUN_0102e75c`) and CD audio setup
 //! (`FUN_0102dd30`). The replay list is in `replays.rs`.
 
+use super::bindings::{self, COLUMNS, Controls, Table};
 use super::progress::{self, Profile, SLOTS};
 use super::ui::*;
+use bevy::prelude::{GamepadButton, KeyCode};
 use crate::hud::paint::text_len;
 
 /// Characters accepted by text entry: letters, digits, space and
@@ -424,10 +426,14 @@ impl Screen for LanguageChooser {
     }
 }
 
-/// Key name for a binding (phrases 1520.. for the special keys).
-fn key_name(cx: &Ctx, key: &str) -> String {
-    let phrase = match key {
-        "" => return "-".into(),
+/// Key name for a binding (`FUN_0103c690`: "-?-" when disabled, phrases
+/// 1520.. for the special keys).
+pub fn key_name(cx: &Ctx, key: Option<KeyCode>) -> String {
+    let Some(key) = key else {
+        return "-?-".into();
+    };
+    let id = bindings::key_id(key);
+    let phrase = match id.as_str() {
         "Space" => 1521,
         "Enter" => 1520,
         "Delete" => 1523,
@@ -440,6 +446,8 @@ fn key_name(cx: &Ctx, key: &str) -> String {
         "Tab" => 1532,
         "Backspace" => 1533,
         "NumpadMultiply" => 1534,
+        "PageUp" => return "PgUp".into(),
+        "PageDown" => return "PgDn".into(),
         k => {
             let short = k.strip_prefix("Arrow").or(k.strip_prefix("Key")).or(k.strip_prefix("Digit"));
             return short.unwrap_or(k).to_string();
@@ -448,39 +456,217 @@ fn key_name(cx: &Ctx, key: &str) -> String {
     cx.g(phrase)
 }
 
-/// Control setup: shows the single-player keyboard bindings (redefining
-/// keys is not implemented).
-pub struct ControlSetup;
+/// Gamepad button name (phrases 1500–1505 for Select, Start, L1/R1/L2/R2).
+pub fn pad_name(cx: &Ctx, b: Option<GamepadButton>) -> String {
+    use GamepadButton::*;
+    let Some(b) = b else {
+        return "-?-".into();
+    };
+    let phrase = match b {
+        Select => 1500,
+        Start => 1501,
+        LeftTrigger => 1502,
+        RightTrigger => 1503,
+        LeftTrigger2 => 1504,
+        RightTrigger2 => 1505,
+        South => return "A".into(),
+        East => return "B".into(),
+        West => return "X".into(),
+        North => return "Y".into(),
+        LeftThumb => return "L3".into(),
+        RightThumb => return "R3".into(),
+        DPadUp => return "Up".into(),
+        DPadDown => return "Down".into(),
+        DPadLeft => return "Left".into(),
+        DPadRight => return "Right".into(),
+        b => return bindings::pad_id(b),
+    };
+    cx.g(phrase)
+}
+
+/// Control setup (`FUN_0102e75c`): one column of 11 bindings per device
+/// table (`bindings.rs`), scrolled sideways, then Done and Cancel.
+///
+/// The selection is `column*11 + action`, then Done (`0x79` in the
+/// original's 11 columns) and Cancel (`0x7a`, the start). Up from an
+/// action's first row goes to Cancel, down from its last row to Done; up
+/// from Done goes to the first column's last row; down from Cancel wraps
+/// to the first row. Left/right change the column (wrapping). Fire on an
+/// action shows the redefine prompt (2468, 2119) and waits for a key
+/// (`FUN_01040790`): Esc cancels, 0 disables, the digits, `-`, `=` and
+/// `P` are refused; pad columns take a gamepad button. Edits go to a copy
+/// that Done stores (and saves); Cancel drops them.
+pub struct ControlSetup {
+    sel: usize,
+    controls: Controls,
+    /// Column scroll in virtual pixels, eased `p = (7p + target) >> 3`.
+    scroll: i32,
+    /// The redefine prompt is up.
+    waiting: bool,
+    /// Flash phase 0..3 (`uVar18`).
+    flash: u32,
+}
+
+const ROWS: usize = 11;
+const DONE: usize = COLUMNS * ROWS;
+const CANCEL: usize = DONE + 1;
 
 impl ControlSetup {
-    pub fn new() -> ControlSetup {
-        ControlSetup
+    pub fn new(cx: &Ctx) -> ControlSetup {
+        ControlSetup {
+            sel: CANCEL,
+            controls: cx.settings.controls.clone(),
+            scroll: -1000,
+            waiting: false,
+            flash: 0,
+        }
+    }
+
+    /// `--frontend-screen controls-redefine`: the prompt for the
+    /// single-player keyboard's "accelerate".
+    pub fn redefining(cx: &Ctx) -> ControlSetup {
+        ControlSetup {
+            sel: 0,
+            waiting: true,
+            scroll: 0,
+            ..ControlSetup::new(cx)
+        }
+    }
+
+    fn column(&self) -> usize {
+        self.sel / ROWS
+    }
+
+    /// Read the new binding for the selected action.
+    fn redefine(&mut self, cx: &mut Ctx, input: &Input) {
+        let (col, action) = (self.column(), self.sel % ROWS);
+        let keyboard = Controls::is_keyboard(col);
+        for &k in &input.keys {
+            if k == KeyCode::Escape {
+                cx.sound(Sfx::Select);
+                self.waiting = false;
+                return;
+            }
+            if k == KeyCode::Digit0 {
+                cx.sound(Sfx::Select);
+                self.controls.set_key(col, action, None);
+                self.controls.set_pad(col, action, None);
+                self.waiting = false;
+                return;
+            }
+            if keyboard && !bindings::refused_key(k) {
+                cx.sound(Sfx::Select);
+                self.controls.set_key(col, action, Some(k));
+                self.waiting = false;
+                return;
+            }
+            cx.sound(Sfx::Refuse);
+        }
+        if !keyboard {
+            if let Some(&b) = input.pad.first() {
+                cx.sound(Sfx::Select);
+                self.controls.set_pad(col, action, Some(b));
+                self.waiting = false;
+            }
+        }
     }
 }
 
 impl Screen for ControlSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
-        if input.fire || input.back {
-            cx.sound(Sfx::Select);
-            return Step::Pop(Outcome::Done);
+        self.flash = (self.flash + 1) % 4;
+        let target = if self.sel >= DONE { 0 } else { -100 * self.column() as i32 };
+        self.scroll = (7 * self.scroll + target) >> 3;
+        if self.waiting {
+            self.redefine(cx, input);
+            return Step::Stay;
         }
-        if input.left || input.right || input.up || input.down {
-            cx.sound(Sfx::Refuse);
+        if input.back {
+            cx.sound(Sfx::Select);
+            return Step::Pop(Outcome::Cancel);
+        }
+        if input.up {
+            cx.sound(Sfx::Select);
+            self.sel = match self.sel {
+                DONE => ROWS - 1,
+                CANCEL => DONE,
+                s if s % ROWS == 0 => CANCEL,
+                s => s - 1,
+            };
+        } else if input.down {
+            cx.sound(Sfx::Select);
+            self.sel = match self.sel {
+                DONE => CANCEL,
+                CANCEL => 0,
+                s if s % ROWS == ROWS - 1 => DONE,
+                s => s + 1,
+            };
+        } else if (input.left || input.right) && self.sel < DONE {
+            cx.sound(Sfx::Select);
+            let d = if input.right { ROWS } else { DONE - ROWS };
+            self.sel = (self.sel + d) % DONE;
+        } else if input.fire {
+            cx.sound(Sfx::Select);
+            match self.sel {
+                DONE => {
+                    cx.settings.controls = self.controls.clone();
+                    cx.settings.save();
+                    return Step::Pop(Outcome::Done);
+                }
+                CANCEL => return Step::Pop(Outcome::Cancel),
+                _ => self.waiting = true,
+            }
         }
         Step::Stay
     }
 
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
-        ui.title(&cx.g(2469));
-        ui.centred(&format!("{} - {}", cx.g(2455), cx.g(2167)), ui.hy(30), 1);
-        let (l, r) = (ui.vx(40), ui.vx(280));
-        for i in 0..11 {
-            let y = ui.hy(50 + 10 * i);
-            ui.text(&cx.g(2457 + i as u32), l, y, 2);
-            ui.right(&key_name(cx, &cx.settings.keys[i as usize]), r, y, 1);
+        if self.waiting {
+            ui.wrapped(&cx.g(2468), ui.hy(80), 2);
+            ui.centred(&cx.g(2119), ui.hy(110) - 5, 2);
+            return;
         }
-        ui.centred(&cx.g(2148), ui.hy(180), ui.flash());
+        ui.title(&cx.g(2469));
+        let lit = self.flash < 2;
+        // Action names right-aligned at x = 130.
+        let label_x = ui.vx(130);
+        for i in 0..ROWS {
+            ui.right(&cx.g(2457 + i as u32), label_x, ui.hy(50 + 10 * i as i32), 2);
+        }
+        // The columns, in a view from x = 135 to the right edge with the
+        // selected one at 90 in it.
+        let x0 = ui.vx(0x87);
+        for col in 0..COLUMNS {
+            let centre = x0 + ui.vx(90 + self.scroll + 100 * col as i32);
+            let put = |ui: &mut Ui, s: &str, y: i32, colour: u8| {
+                let w = 7 * text_len(s);
+                let x = centre - w / 2;
+                if x >= x0 && x + w <= ui.w {
+                    ui.text(s, x, y, colour);
+                }
+            };
+            let (head, device) = match col {
+                0 => (2455, cx.g(2167)),
+                1 => (2455, cx.g(2166)),
+                2..=5 => (2456, format!("{} {}", cx.g(2167), col - 1)),
+                _ => (2456, format!("{} {}", cx.g(2166), col - 5)),
+            };
+            put(ui, &cx.g(head), ui.hy(30), 2);
+            put(ui, &device, H / 5, 2);
+            for i in 0..ROWS {
+                let name = match self.controls.column(col) {
+                    Table::Keys(t) => key_name(cx, t[i]),
+                    Table::Pad(t) => pad_name(cx, t[i]),
+                };
+                let colour = if self.sel == col * ROWS + i && lit { 2 } else { 1 };
+                put(ui, &name, ui.hy(50 + 10 * i as i32), colour);
+            }
+        }
+        for (item, phrase, y) in [(DONE, 2148, 170), (CANCEL, 2192, 180)] {
+            let colour = if self.sel == item && lit { 2 } else { 1 };
+            ui.centred(&cx.g(phrase), ui.hy(y), colour);
+        }
     }
 }
 

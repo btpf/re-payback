@@ -2,7 +2,8 @@
 //!
 //! Usage: `payback [--data <dir>] [--map <n>] [--level <0|1>] [--free]
 //!                 [--rampage <police 0..5>] [--multiplayer <2..4> [--kills <n>]]
-//!                 [--screenshot <out.png>]
+//!                 [--screenshot <out.png>] [--resolution <w>x<h>]
+//!                 [--window-mode windowed|borderless|fullscreen]
 //!                 [--record <file> | --play <file>] [--ticks <n>]
 //!                 [--autoplay [--autoplay-ticks <n>]] [--fast <n>]`
 //!
@@ -32,6 +33,7 @@ mod multiplayer;
 mod objects;
 mod parked;
 mod rampage;
+mod render_mode;
 mod replay;
 mod sim;
 mod vehicles;
@@ -62,11 +64,8 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Payback".into(),
-                resolution: (1280, 800).into(),
-                ..default()
-            }),
+            // Saved resolution and window mode (`--resolution`, `--window-mode`).
+            primary_window: Some(frontend::display::startup_window("Payback")),
             ..default()
         }))
         .insert_resource(data)
@@ -91,7 +90,7 @@ fn main() -> AppExit {
             frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
-            (parked::ParkedPlugin, window_icon::WindowIconPlugin),
+            (parked::ParkedPlugin, window_icon::WindowIconPlugin, render_mode::RenderModePlugin),
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
             autoplay::AutoplayPlugin,
         ))

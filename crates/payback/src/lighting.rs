@@ -38,12 +38,20 @@
 //! interpolated across the face. The shader adds the quantised light in
 //! sRGB (no palette quantisation). With the option off the light is 128
 //! everywhere (the plain texture).
+//!
+//! Hardware renderer (`crate::render_mode`; docs/re/rendering.md §11.3): the
+//! option is forced on, the base values differ (day 0xbe / shadow 0x80 /
+//! step 0x30, night 0x20,0x20,0x30 / 0x0c,0x0c,0x10 / 0x20, lit water
+//! 0xbe), every grid point gets a random `rand(16) − 8`, the dynamic lights
+//! are not halved by day, and the light modulates the texel as a W3D vertex
+//! colour `min(L, 255) / 256`.
 
 use crate::city::Pass;
 use crate::data::GameData;
 use crate::effects::Effects;
 use crate::level::AppState;
 use crate::mapedit::{self, CityRender};
+use crate::render_mode::RenderMode;
 use crate::objects::ObjectLibrary;
 use crate::sim::Obj as SimObj;
 use crate::sim::traffic::LightPhase;
@@ -79,6 +87,8 @@ pub const NEUTRAL: [f32; 3] = [128.0; 3];
 pub struct CityLighting {
     /// Indexed `(x * MAP_SIZE + y) * 3 + layer`.
     cubes: Vec<CubeLight>,
+    /// Computed for the hardware renderer (other base values, jitter).
+    pub hardware: bool,
 }
 
 impl CityLighting {
@@ -192,10 +202,25 @@ impl Lcg {
     }
 }
 
-/// Static light of the whole map (`FUN_010766c8`).
-pub fn compute(map: &Map, night: bool) -> CityLighting {
-    let (lit, shadow, step) = if night { (0x60, 0x30, 0x20) } else { (0x80, 0x30, 0x40) };
-    let (lit, shadow, step) = (lit as f32, shadow as f32, step as f32);
+/// Base light of `FUN_010766c8`: lit and shadow RGB, slope step, and the
+/// light of lit Reflect tops. Software adds the light to the texel (128 =
+/// unchanged); Warp3D modulates the texel by `min(L, 255) / 256`, so its
+/// values are higher by day and much lower at night (the cube textures are
+/// not darkened on the card).
+fn base_light(night: bool, hardware: bool) -> ([f32; 3], [f32; 3], f32, [f32; 3]) {
+    let v = |r: u8, g: u8, b: u8| [r as f32, g as f32, b as f32];
+    match (hardware, night) {
+        (false, false) => (v(0x80, 0x80, 0x80), v(0x30, 0x30, 0x30), 64.0, v(0x80, 0x80, 0x80)),
+        (false, true) => (v(0x60, 0x60, 0x60), v(0x30, 0x30, 0x30), 32.0, v(0x80, 0x80, 0x80)),
+        (true, false) => (v(0xbe, 0xbe, 0xbe), v(0x80, 0x80, 0x80), 48.0, v(0xbe, 0xbe, 0xbe)),
+        (true, true) => (v(0x20, 0x20, 0x30), v(0x0c, 0x0c, 0x10), 32.0, v(0xbe, 0xbe, 0xbe)),
+    }
+}
+
+/// Static light of the whole map (`FUN_010766c8`), for the software or the
+/// hardware renderer.
+pub fn compute(map: &Map, night: bool, hardware: bool) -> CityLighting {
+    let (lit, shadow, step, reflect) = base_light(night, hardware);
 
     // Bases of every cube.
     let mut bases = vec![[0i32; 3]; MAP_SIZE * MAP_SIZE];
@@ -241,7 +266,7 @@ pub fn compute(map: &Map, night: bool) -> CityLighting {
     }
 
     // Base light, shadows and slopes.
-    let mut cubes = vec![[[lit; 3]; 8]; MAP_SIZE * MAP_SIZE * 3];
+    let mut cubes = vec![[lit; 8]; MAP_SIZE * MAP_SIZE * 3];
     for x in 0..MAP_SIZE {
         for y in 0..MAP_SIZE {
             for (i, cube) in map.square(x, y).cubes.iter().enumerate() {
@@ -250,7 +275,7 @@ pub fn compute(map: &Map, night: bool) -> CityLighting {
                 }
                 let base = bases[x * MAP_SIZE + y][i];
                 let water = cube.faces[map::TOP].kind == FaceType::Reflect;
-                let lit = if water { 128.0 } else { lit };
+                let lit = if water { reflect } else { lit };
                 let light = &mut cubes[(x * MAP_SIZE + y) * 3 + i];
                 let edge = x == 0 || y == 0 || x == MAP_SIZE - 1 || y == MAP_SIZE - 1;
                 let heights = corner_heights(cube);
@@ -258,7 +283,7 @@ pub fn compute(map: &Map, night: bool) -> CityLighting {
                     let (gx, gy) = (2 * x + 2 * (c & 1), 2 * y + (c & 2));
                     let h = if c < 4 { base + heights[c] } else { base };
                     let dark = !edge && vox.shadowed(gx, gy, h >> 7);
-                    light[c] = [if dark { shadow } else { lit }; 3];
+                    light[c] = if dark { shadow } else { lit };
                 }
                 let (h1, h2) = (cube.height1, cube.height2);
                 let delta = match cube.slope {
@@ -269,8 +294,34 @@ pub fn compute(map: &Map, night: bool) -> CityLighting {
                     _ => 0.0,
                 };
                 for corner in &mut light[..4] {
-                    if corner[0] == lit {
+                    if corner[0] == lit[0] {
                         *corner = corner.map(|v| v + delta);
+                    }
+                }
+            }
+        }
+    }
+
+    // Warp3D only: every grid point of squares 1..126 gets a random
+    // `rand(16) − 8` on all three channels of the four cubes meeting there
+    // (same layer), once for the top corners and once for the bottom ones;
+    // negative results become 0 (`FUN_010766c8`, after the slopes). The
+    // original draws these from the shared game generator `FUN_0103ac94`,
+    // so a hardware map load shifts the game's random sequence; the port
+    // uses a local generator to keep the simulation (and replays)
+    // independent of the renderer.
+    if hardware {
+        let mut rng = Lcg(0x4a17);
+        for x in 1..MAP_SIZE - 1 {
+            for y in 1..MAP_SIZE - 1 {
+                for i in 0..3 {
+                    for half in [0, 4] {
+                        let d = (rng.rand(16) - 8) as f32;
+                        // (square dx, dy, corner) sharing grid point (x, y).
+                        for (dx, dy, c) in [(0, 0, NW), (1, 0, NE), (0, 1, SW), (1, 1, SE)] {
+                            let corner = &mut cubes[((x - dx) * MAP_SIZE + y - dy) * 3 + i][c + half];
+                            *corner = corner.map(|v| (v + d).max(0.0));
+                        }
                     }
                 }
             }
@@ -341,7 +392,7 @@ pub fn compute(map: &Map, night: bool) -> CityLighting {
             }
         }
     }
-    CityLighting { cubes }
+    CityLighting { cubes, hardware }
 }
 
 /// `.CubeTextureRemapList`: texture index → index of the texture named on
@@ -374,7 +425,7 @@ pub const MAX_LIGHTS: usize = 510;
 
 #[derive(ShaderType, Clone, Debug)]
 pub struct LightBlock {
-    /// x = number of lights.
+    /// x = number of lights, y = 1 for the hardware (Warp3D) look.
     pub params: Vec4,
     /// Per light: render position (x, y, z) and square radius; then R, G, B
     /// intensity.
@@ -421,6 +472,9 @@ impl Material for CityMaterial {
 
     fn alpha_mode(&self) -> AlphaMode {
         match self.pass {
+            // Warp3D blends genlocked faces (7, 8) with the filtered
+            // colour-key alpha of the A1R5G5B5 texture.
+            Pass::Masked if self.lights.params.y > 0.5 => AlphaMode::Blend,
             Pass::Masked => AlphaMode::Mask(0.5),
             Pass::Alpha => AlphaMode::Blend,
             _ => AlphaMode::Opaque,
@@ -454,6 +508,7 @@ impl Material for CityMaterial {
             ATTRIBUTE_CORNER_LIGHT[1].at_shader_location(8),
             ATTRIBUTE_CORNER_LIGHT[2].at_shader_location(9),
             ATTRIBUTE_CORNER_LIGHT[3].at_shader_location(10),
+            Mesh::ATTRIBUTE_UV_1.at_shader_location(11),
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
         // Both sides are in the mesh already.
@@ -497,17 +552,29 @@ impl Plugin for LightingPlugin {
             .init_resource::<DynamicLights>()
             .add_systems(
                 Update,
-                (follow_settings, rebuild_on_toggle, collect_lights, upload_lights)
+                (follow_settings, rebuild_on_toggle, sync_mode, collect_lights, upload_lights)
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             );
     }
 }
 
-/// The pause menu's option drives [`Gouraud`] (`--gouraud` wins).
-fn follow_settings(settings: Option<Res<crate::frontend::progress::Settings>>, mut g: ResMut<Gouraud>) {
+/// The pause menu's option drives [`Gouraud`] (`--gouraud` wins); hardware
+/// rendering forces it on (LoadConfig `FUN_0104199c`: `DAT_0114c7d8 != 0` →
+/// `DAT_0114c2fc = 1`).
+fn follow_settings(
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    mode: Res<RenderMode>,
+    mut g: ResMut<Gouraud>,
+) {
+    if mode.hardware() {
+        if !g.0 {
+            g.0 = true;
+        }
+        return;
+    }
     let Some(settings) = settings else { return };
-    if settings.is_changed() && crate::arg("--gouraud").is_none() && g.0 != settings.gouraud {
+    if (settings.is_changed() || mode.is_changed()) && crate::arg("--gouraud").is_none() && g.0 != settings.gouraud {
         g.0 = settings.gouraud;
     }
 }
@@ -525,17 +592,71 @@ fn rebuild_on_toggle(
     let (Some(city), Some(mut render)) = (city, render) else {
         return;
     };
-    if render.lighting.is_some() == gouraud.0 {
+    let hardware = crate::render_mode::is_hardware();
+    let current = render.lighting.as_ref().map(|l| l.hardware);
+    if current.is_some() == gouraud.0 && current.is_none_or(|h| h == hardware) {
         return;
     }
     set_lighting(&mut render, &data, &city, gouraud.0);
     mapedit::spawn_all_chunks(&mut commands, &mut render, &mut meshes, &city);
 }
 
+fn hardware_flag() -> f32 {
+    if crate::render_mode::is_hardware() { 1.0 } else { 0.0 }
+}
+
+/// Follow the renderer in the city materials: the shading flag, and at
+/// night the cube atlases (darkened through `T1[c][0x67]` in software,
+/// left alone on the Warp3D card, `FUN_0106ecf0`: the night is in the
+/// vertex colours there).
+#[allow(clippy::too_many_arguments)]
+fn sync_mode(
+    mode: Res<RenderMode>,
+    data: Res<GameData>,
+    city: Option<Res<City>>,
+    render: Option<Res<CityRender>>,
+    mut materials: ResMut<Assets<CityMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut done: Local<Option<(bool, bool)>>,
+) {
+    let (Some(city), Some(render)) = (city, render) else {
+        *done = None;
+        return;
+    };
+    let hardware = mode.hardware();
+    let fresh = city.is_added() || render.is_added();
+    if !fresh && *done == Some((hardware, city.map.night)) {
+        return;
+    }
+    let flag = hardware_flag();
+    for handle in render.materials.values() {
+        if materials.get(handle).is_some_and(|m| m.lights.params.y != flag)
+            && let Some(mut m) = materials.get_mut(handle)
+        {
+            m.lights.params.y = flag;
+        }
+    }
+    // Daytime atlases are the same for both renderers; a night map loaded
+    // in software is darkened, so a change of renderer rebuilds them.
+    let was_hardware = done.is_some_and(|d| d.0);
+    if city.map.night && (hardware || (!fresh && was_hardware)) {
+        let atlases = crate::city::build_cube_atlases(&data, !hardware);
+        for (pass, handle) in &render.materials {
+            let Some(atlas) = materials.get(handle).map(|m| m.atlas.clone()) else { continue };
+            let image = if *pass == Pass::Masked { &atlases.keyed } else { &atlases.opaque };
+            if let Some(mut slot) = images.get_mut(&atlas) {
+                *slot = image.clone();
+            }
+        }
+    }
+    *done = Some((hardware, city.map.night));
+}
+
 /// Compute (or drop) the static light and the texture remap.
 pub fn set_lighting(render: &mut CityRender, data: &GameData, city: &City, on: bool) {
     if on {
-        render.lighting = Some(Arc::new(compute(&city.map, city.map.night)));
+        let hardware = crate::render_mode::is_hardware();
+        render.lighting = Some(Arc::new(compute(&city.map, city.map.night, hardware)));
         render.remap = Some(remap_table(data));
     } else {
         render.lighting = None;
@@ -721,8 +842,9 @@ fn collect_lights(
         }
     }
 
-    // By day the dynamic lights are at half intensity (`FUN_0106ba08`).
-    if !city.map.night {
+    // By day the dynamic lights are at half intensity (`FUN_0106ba08`;
+    // software only: `DAT_0114c84c == 0 && DAT_0114c7d8 == 0`).
+    if !city.map.night && !crate::render_mode::is_hardware() {
         for l in &mut lights.0 {
             l.rgb = (l.rgb / 2.0).floor();
         }
@@ -772,6 +894,7 @@ fn upload_lights(
     let sorted: Vec<&PointLight> = sorted.into_iter().map(|(_, l)| l).collect();
     let mut block = LightBlock::default();
     block.params.x = sorted.len() as f32;
+    block.params.y = hardware_flag();
     for (i, l) in sorted.iter().enumerate() {
         let p = to_render(l.pos);
         block.data[2 * i] = p.extend(l.radius(13) as f32);

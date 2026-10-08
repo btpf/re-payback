@@ -18,6 +18,14 @@
 //! Also: traffic lights, crossing beacons and alarm boxes that change model
 //! with the light phase, spinning pickups, chimney smoke, lens-flare sources
 //! and the burnt / dented variants of vehicles.
+//!
+//! Hardware renderer (docs/re/rendering.md "Hardware (Warp3D) renderer"):
+//! objects are never Gouraud-lit there either; the textures are A1R5G5B5
+//! (5 bits per channel, colour 0 transparent), bilinear filtered; at night
+//! the darkened textures lose 64 per channel (`FUN_010bf310` re-uploads them
+//! with flag `DAT_0114c3b8`) instead of going through `T1[c][0x67]`; the
+//! CloudsReflect overlay of mode 0x11 faces is added ONE/ONE instead of
+//! table 9.
 
 use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, ViewCams};
 use crate::data::GameData;
@@ -122,7 +130,11 @@ pub type ObjectMaterial = ExtendedMaterial<StandardMaterial, EnvMapped>;
 
 /// Vertex-shader extension that maps "Shine" faces by their normal.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
-pub struct EnvMapped {}
+pub struct EnvMapped {
+    /// x = 1 for the hardware (Warp3D) look.
+    #[uniform(100)]
+    pub params: Vec4,
+}
 
 impl MaterialExtension for EnvMapped {
     fn vertex_shader() -> ShaderRef {
@@ -180,6 +192,8 @@ pub struct ObjectLibrary {
     additive: Handle<ObjectMaterial>,
     /// Night map: vehicles get the `Lights` headlight polygon.
     night: bool,
+    /// The atlas holds the hardware conversion of the textures.
+    hardware: bool,
     /// Additive faces and mode-5 lines of each built mesh, drawn as child
     /// entities by [`sync_overlays`].
     overlays: HashMap<AssetId<Mesh>, Overlay>,
@@ -230,6 +244,151 @@ struct Parts {
     lines: Option<Mesh>,
 }
 
+/// The object texture atlas (`ObjectTextures/*`, 256x128 each, file-name
+/// order; the flat palette colours in the last slot; an opaque copy in the
+/// bottom half) and the slot of every lower-cased name. Night: `Shine.*`
+/// (not the cups) and `CloudsReflect` swap in their `.dark` files, a few
+/// textures are left alone and the rest are darkened (rendering.md §4,
+/// OS4 `FUN_010bf310`): through `T1[c][0x67]` in software, by 64 per
+/// channel on the Warp3D card. `hardware` also cuts the channels to the 5
+/// bits of A1R5G5B5 and filters bilinearly.
+fn build_atlas(data: &GameData, night: bool, hardware: bool) -> (Image, HashMap<String, u32>) {
+    let mut rgba = vec![0u8; (ATLAS_W * ATLAS_FULL_H * 4) as usize];
+    let mut slots = HashMap::new();
+    let mut entries: Vec<_> = std::fs::read_dir(data.root.join("ObjectTextures"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by_key(|e| e.file_name());
+    let mut night_remap: Option<[u8; 256]> = None;
+    for entry in entries {
+        let slot = slots.len() as u32;
+        if slot >= PALETTE_SLOT {
+            warn!("object texture atlas full");
+            break;
+        }
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        // Night (rendering.md §4, OS4 `FUN_010bf310`): Shine.* (not the
+        // cups) and CloudsReflect swap in their `.dark` files; a few
+        // textures are left alone; the rest are darkened.
+        let swap = night
+            && ((name.starts_with("shine.") && !name.starts_with("shine.cup"))
+                || name == "cloudsreflect")
+            && !name.ends_with(".dark");
+        let path = if swap {
+            entry
+                .path()
+                .with_file_name(format!("{}.dark", entry.file_name().to_string_lossy()))
+        } else {
+            entry.path()
+        };
+        let read = |p: &std::path::Path| {
+            std::fs::read(p)
+                .map_err(|e| e.to_string())
+                .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
+        };
+        let Ok(mut img) = read(&path).or_else(|_| read(&entry.path())) else {
+            continue;
+        };
+        // Everything else through T1[c][0x67] (colour 0 unchanged); on the
+        // card 64 less per channel.
+        let keep = ["joystick", "red shade", "lights", "tankbits"];
+        let darken = night && !swap && !name.ends_with(".dark") && !keep.contains(&name.as_str());
+        if darken && !hardware {
+            let remap = night_remap.get_or_insert_with(|| crate::camera::postfx::night_remap(data));
+            for c in &mut img.pixels {
+                *c = remap[*c as usize];
+            }
+        }
+        let mut pixels = img.to_rgba(&data.palette, Some(0));
+        if hardware {
+            for px in pixels.chunks_mut(4) {
+                for v in &mut px[..3] {
+                    if darken {
+                        *v = v.saturating_sub(64);
+                    }
+                    *v = (*v & 0xf8) | (*v >> 5);
+                }
+            }
+        }
+        let (sx, sy) = (slot % ATLAS_COLS * TEX_W, slot / ATLAS_COLS * TEX_H);
+        for row in 0..TEX_H {
+            let src = (row * TEX_W * 4) as usize;
+            let dst = (((sy + row) * ATLAS_W + sx) * 4) as usize;
+            rgba[dst..dst + (TEX_W * 4) as usize]
+                .copy_from_slice(&pixels[src..src + (TEX_W * 4) as usize]);
+        }
+        slots.insert(name, slot);
+    }
+    // Flat palette colours, unaffected by night darkening.
+    let (px, py) = (
+        PALETTE_SLOT % ATLAS_COLS * TEX_W,
+        PALETTE_SLOT / ATLAS_COLS * TEX_H,
+    );
+    for row in 0..TEX_H {
+        for col in 0..TEX_W {
+            let c = (row / 16 * 32 + col / 8) as usize;
+            let dst = (((py + row) * ATLAS_W + px + col) * 4) as usize;
+            rgba[dst..dst + 3].copy_from_slice(&data.palette[c * 3..c * 3 + 3]);
+            rgba[dst + 3] = 255;
+        }
+    }
+    // Opaque copy in the bottom half.
+    let half = (ATLAS_W * ATLAS_H * 4) as usize;
+    let (keyed, opaque) = rgba.split_at_mut(half);
+    opaque.copy_from_slice(keyed);
+    for px in opaque.chunks_mut(4) {
+        px[3] = 255;
+    }
+    let mut atlas = Image::new(
+        Extent3d {
+            width: ATLAS_W,
+            height: ATLAS_FULL_H,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    atlas.sampler = ImageSampler::Descriptor(if hardware {
+        ImageSamplerDescriptor::linear()
+    } else {
+        ImageSamplerDescriptor::nearest()
+    });
+    (atlas, slots)
+}
+
+/// Follow the renderer: rebuild the object atlas and set the shader flag.
+fn sync_mode(
+    mode: Res<crate::render_mode::RenderMode>,
+    data: Res<GameData>,
+    library: Option<ResMut<ObjectLibrary>>,
+    mut materials: ResMut<Assets<ObjectMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut library) = library else { return };
+    let hardware = mode.hardware();
+    if library.hardware == hardware {
+        return;
+    }
+    library.hardware = hardware;
+    let (atlas, _) = build_atlas(&data, library.night, hardware);
+    let flag = if hardware { 1.0 } else { 0.0 };
+    for handle in [library.material.clone(), library.additive.clone()] {
+        let Some(mut m) = materials.get_mut(&handle) else { continue };
+        m.extension.params.x = flag;
+        if let Some(image) = m.base.base_color_texture.clone()
+            && let Some(mut slot) = images.get_mut(&image)
+        {
+            *slot = atlas.clone();
+        }
+    }
+}
+
 /// Vehicles that get the night headlight polygon (`FUN_0104e00c` runs
 /// `FUN_010bf070` over the vehicle table `DAT_012a6364…63d0` and the police
 /// variants; models with `+0x4928` set — tank, helicopter, boat — are
@@ -246,77 +405,8 @@ impl ObjectLibrary {
         materials: &mut Assets<ObjectMaterial>,
         night: bool,
     ) -> ObjectLibrary {
-        let mut rgba = vec![0u8; (ATLAS_W * ATLAS_FULL_H * 4) as usize];
-        let mut slots = HashMap::new();
-        let mut entries: Vec<_> = std::fs::read_dir(data.root.join("ObjectTextures"))
-            .map(|d| {
-                d.filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file())
-                    .collect()
-            })
-            .unwrap_or_default();
-        entries.sort_by_key(|e| e.file_name());
-        let mut night_remap: Option<[u8; 256]> = None;
-        for entry in entries {
-            let slot = slots.len() as u32;
-            if slot >= PALETTE_SLOT {
-                warn!("object texture atlas full");
-                break;
-            }
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            // Night (rendering.md §4, OS4 `FUN_010bf310`): Shine.* (not the
-            // cups) and CloudsReflect swap in their `.dark` files; a few
-            // textures are left alone; the rest are darkened.
-            let swap = night
-                && ((name.starts_with("shine.") && !name.starts_with("shine.cup"))
-                    || name == "cloudsreflect")
-                && !name.ends_with(".dark");
-            let path = if swap {
-                entry
-                    .path()
-                    .with_file_name(format!("{}.dark", entry.file_name().to_string_lossy()))
-            } else {
-                entry.path()
-            };
-            let read = |p: &std::path::Path| {
-                std::fs::read(p)
-                    .map_err(|e| e.to_string())
-                    .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
-            };
-            let Ok(mut img) = read(&path).or_else(|_| read(&entry.path())) else {
-                continue;
-            };
-            // Everything else through T1[c][0x67] (colour 0 unchanged).
-            let keep = ["joystick", "red shade", "lights", "tankbits"];
-            if night && !swap && !name.ends_with(".dark") && !keep.contains(&name.as_str()) {
-                let remap = night_remap.get_or_insert_with(|| crate::camera::postfx::night_remap(data));
-                for c in &mut img.pixels {
-                    *c = remap[*c as usize];
-                }
-            }
-            let pixels = img.to_rgba(&data.palette, Some(0));
-            let (sx, sy) = (slot % ATLAS_COLS * TEX_W, slot / ATLAS_COLS * TEX_H);
-            for row in 0..TEX_H {
-                let src = (row * TEX_W * 4) as usize;
-                let dst = (((sy + row) * ATLAS_W + sx) * 4) as usize;
-                rgba[dst..dst + (TEX_W * 4) as usize]
-                    .copy_from_slice(&pixels[src..src + (TEX_W * 4) as usize]);
-            }
-            slots.insert(name, slot);
-        }
-        // Flat palette colours, unaffected by night darkening.
-        let (px, py) = (
-            PALETTE_SLOT % ATLAS_COLS * TEX_W,
-            PALETTE_SLOT / ATLAS_COLS * TEX_H,
-        );
-        for row in 0..TEX_H {
-            for col in 0..TEX_W {
-                let c = (row / 16 * 32 + col / 8) as usize;
-                let dst = (((py + row) * ATLAS_W + px + col) * 4) as usize;
-                rgba[dst..dst + 3].copy_from_slice(&data.palette[c * 3..c * 3 + 3]);
-                rgba[dst + 3] = 255;
-            }
-        }
+        let hardware = crate::render_mode::is_hardware();
+        let (atlas, slots) = build_atlas(data, night, hardware);
         let mut flat_colours = [0u8; 64];
         match data
             .read("General/64->256.dat")
@@ -325,25 +415,6 @@ impl ObjectLibrary {
             Ok(b) if b.len() >= 64 => flat_colours.copy_from_slice(&b[..64]),
             _ => warn!("missing General/64->256.dat"),
         }
-        // Opaque copy in the bottom half.
-        let half = (ATLAS_W * ATLAS_H * 4) as usize;
-        let (keyed, opaque) = rgba.split_at_mut(half);
-        opaque.copy_from_slice(keyed);
-        for px in opaque.chunks_mut(4) {
-            px[3] = 255;
-        }
-        let mut atlas = Image::new(
-            Extent3d {
-                width: ATLAS_W,
-                height: ATLAS_FULL_H,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            rgba,
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        atlas.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
         let base = StandardMaterial {
             base_color_texture: Some(images.add(atlas)),
             unlit: true,
@@ -353,16 +424,19 @@ impl ObjectLibrary {
             cull_mode: Some(bevy::render::render_resource::Face::Back),
             ..default()
         };
+        let extension = EnvMapped {
+            params: Vec4::new(if hardware { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        };
         let material = materials.add(ExtendedMaterial {
             base: base.clone(),
-            extension: EnvMapped::default(),
+            extension: extension.clone(),
         });
         let additive = materials.add(ExtendedMaterial {
             base: StandardMaterial {
                 alpha_mode: AlphaMode::Add,
                 ..base
             },
-            extension: EnvMapped::default(),
+            extension,
         });
         ObjectLibrary {
             slots,
@@ -370,6 +444,7 @@ impl ObjectLibrary {
             material,
             additive,
             night,
+            hardware,
             overlays: HashMap::new(),
             by_path: HashMap::new(),
             models: Vec::new(),
@@ -900,7 +975,7 @@ impl Plugin for SceneryPlugin {
             .add_systems(OnExit(AppState::Playing), |mut c: ResMut<SceneryClock>| {
                 *c = SceneryClock::default();
             })
-            .add_systems(Update, (animate_scenery, vehicle_skins))
+            .add_systems(Update, (animate_scenery, vehicle_skins, sync_mode))
             .add_systems(PostUpdate, sync_overlays.before(TransformSystems::Propagate))
             .add_systems(
                 FixedUpdate,

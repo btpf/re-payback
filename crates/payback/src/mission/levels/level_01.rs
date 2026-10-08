@@ -406,7 +406,7 @@ impl Level01 {
                 s.set_wanted_level(5);
                 // Sample 0x30 = "Alarm"; the original's range 20000 has no
                 // equivalent in `add_sound`.
-                s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2e400, 0x2b400);
+                s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2e400, 0x2b400, 20000);
                 alarm_boxes(s, 22);
             }
             0xc9 => {

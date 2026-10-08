@@ -10,6 +10,7 @@ use crate::data::GameData;
 use crate::hud::icons::{HudIcons, Icon};
 use crate::hud::paint::{Blend, CANVAS_H, Painter, text_len};
 use crate::hud::{Language, Texts};
+use bevy::prelude::{GamepadButton, KeyCode};
 use payback_formats::replay::Replay;
 
 /// Menu ticks per second (the OS4 build's 30 Hz frame tick).
@@ -19,7 +20,9 @@ pub const MENU_HZ: f64 = 30.0;
 pub const TURN: i32 = 0x1680;
 
 /// Menu keys pressed since the last tick (`FUN_0103f3d0`: left, right,
-/// up, down, fire, Esc), plus typed characters for text entry.
+/// up, down, fire, Esc), plus typed characters for text entry. A gamepad
+/// drives the same keys: d-pad or left stick, A (South) or Start = fire,
+/// B (East) = back.
 #[derive(Default, Clone, Debug)]
 pub struct Input {
     pub left: bool,
@@ -33,6 +36,10 @@ pub struct Input {
     pub back: bool,
     pub typed: Vec<char>,
     pub erase: bool,
+    /// Every key and gamepad button pressed (the control setup's
+    /// redefine prompt).
+    pub keys: Vec<KeyCode>,
+    pub pad: Vec<GamepadButton>,
 }
 
 /// Menu sounds (`FUN_010053c4(id, period)`, played on Paula at full
@@ -116,6 +123,13 @@ pub struct Ctx<'a> {
     pub last_replay: Option<&'a Replay>,
     /// Multiplayer won/drawn/lost totals.
     pub mp_totals: &'a mut crate::multiplayer::MpTotals,
+    /// User maps, cities 3.. (`DAT_01170808`).
+    pub user_maps: &'a [super::usermaps::UserMap],
+    /// Hardware (Warp3D) rendering is active (`DAT_0114c7d8`,
+    /// `RenderMode`): black pause background, full-brightness title.
+    pub hardware: bool,
+    /// The window's monitor and size (graphics options).
+    pub display: &'a super::display::Display,
     pub sfx: Vec<Sfx>,
     pub requests: Vec<Request>,
 }
@@ -209,6 +223,9 @@ pub struct Ui<'a> {
     pub fe: &'a FrontendIcons,
     pub w: i32,
     pub frame: u32,
+    /// Hardware rendering: [`Ui::picture`] stretches `TitleScreen.w3d`
+    /// at full brightness.
+    pub hardware: bool,
 }
 
 pub const H: i32 = CANVAS_H as i32;
@@ -242,6 +259,37 @@ impl Ui<'_> {
     pub fn text(&mut self, s: &str, x: i32, y: i32, colour: u8) {
         let font = if colour == 2 { &self.fonts.them } else { &self.fonts.you };
         self.front.text(font, s, x, y, 7, Blend::Plain);
+    }
+
+    /// Dimmed small-font text (`FUN_0100cc78`: each glyph pixel through
+    /// the 50 % blend with colour 0, i.e. half brightness), centred. Used
+    /// for an option that cannot be changed.
+    pub fn centred_dim(&mut self, s: &str, y: i32, colour: u8) {
+        let font = if colour == 2 { &self.fonts.them } else { &self.fonts.you };
+        let pal = self.front.pal;
+        let mut x = self.cx() - 7 * text_len(s) / 2;
+        let mut chars = s.chars();
+        while let Some(mut c) = chars.next() {
+            if c == '^' {
+                match chars.next() {
+                    Some(n) => c = n,
+                    None => break,
+                }
+            }
+            let b = if (c as u32) < 256 { c as u8 } else { b'?' };
+            if let Some(g) = font.glyph(b).filter(|_| b != b' ') {
+                for iy in 0..g.h {
+                    for ix in 0..g.w {
+                        let p = g.px[iy * g.w + ix] as usize;
+                        if p != 0 {
+                            let rgb = [pal[p * 3] / 2, pal[p * 3 + 1] / 2, pal[p * 3 + 2] / 2];
+                            self.front.put_rgb(x + ix as i32, y + iy as i32, rgb);
+                        }
+                    }
+                }
+            }
+            x += 7;
+        }
     }
 
     pub fn centred(&mut self, s: &str, y: i32, colour: u8) {
@@ -304,7 +352,27 @@ impl Ui<'_> {
     /// (`FUN_0100d9c0`) and shifted down by `dy` (`FUN_0100ab78`).
     /// `dark` = the darkened sub-screen copy (`DAT_0117b6b4`, the 50 %
     /// blend with black).
+    ///
+    /// Hardware rendering draws `TitleScreen.w3d` stretched over the whole
+    /// screen instead, at full brightness on every screen (the dimmed copy
+    /// is never built there).
     pub fn picture(&mut self, dy: i32, dark: bool) {
+        if let Some(rgb) = self.fe.title_w3d.as_deref().filter(|_| self.hardware) {
+            for y in 0..H {
+                let sy = y - dy;
+                for x in 0..self.w {
+                    let c = if (0..H).contains(&sy) {
+                        let (tx, ty) = (x as usize * 256 / self.w as usize, sy as usize * 256 / H as usize);
+                        let i = (ty * 256 + tx) * 3;
+                        [rgb[i], rgb[i + 1], rgb[i + 2]]
+                    } else {
+                        [0, 0, 0]
+                    };
+                    self.back.put_rgb(x, y, c);
+                }
+            }
+            return;
+        }
         let pic: &Picture = &self.fe.title;
         let pal = self.back.pal;
         for y in 0..H {

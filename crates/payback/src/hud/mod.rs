@@ -316,8 +316,12 @@ fn load_level_texts(
     mut canvas: ResMut<Canvas>,
     mut node: Query<&mut Visibility, With<HudNode>>,
 ) {
-    texts.level = load_phrases(&data, &format!("{}{}", spec.map, spec.level), &language.0);
-    canvas.minimap = load_minimap(&data, &spec.map);
+    // Level phrases ("%d%d", e.g. "00") exist for the built-in cities only.
+    texts.level = match spec.city() {
+        Some(c) => load_phrases(&data, &format!("{c}{}", spec.level), &language.0),
+        None => Default::default(),
+    };
+    canvas.minimap = load_minimap(&data, &spec.path("mini"));
     for mut v in &mut node {
         *v = Visibility::Inherited;
     }
@@ -335,8 +339,8 @@ fn reset_hud(mut commands: Commands, mut node: Query<&mut Visibility, With<HudNo
 }
 
 /// Minimap: 65x65 cropped to 64x64, red north arrow at the top centre.
-fn load_minimap(data: &GameData, map: &str) -> Option<Icon> {
-    data.read(format!("Maps/{map}.mini")).ok().map(|b| {
+fn load_minimap(data: &GameData, path: &std::path::Path) -> Option<Icon> {
+    data.read(path).ok().map(|b| {
         let mut px = vec![0u8; 64 * 64];
         for y in 0..64 {
             for x in 0..64 {

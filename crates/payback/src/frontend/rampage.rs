@@ -3,7 +3,7 @@
 //! city and aggressiveness, Play / Cancel.
 
 use super::ui::*;
-use crate::rampage::load_scores;
+use super::usermaps::{city_name, city_thumb, initial_city, load_scores, step_city};
 use payback_formats::scores::HighScores;
 
 /// Rows: city, police aggressiveness, Play, Cancel.
@@ -28,30 +28,21 @@ pub fn unlocked(cx: &Ctx, city: usize) -> bool {
 
 impl RampageSetup {
     pub fn new(cx: &Ctx) -> RampageSetup {
-        let mut city = (cx.settings.rampage_city as usize).min(2);
-        while !unlocked(cx, city) {
-            city -= 1;
-        }
+        let city = initial_city(cx);
         RampageSetup {
             sel: 2,
             city,
             police: cx.settings.police.min(5),
-            scores: load_scores(cx.data, city),
+            scores: load_scores(cx, city),
             angle: 0xe10,
             flash: 0,
         }
     }
 
+    /// The next city: built-in ones once unlocked, then the user maps.
     fn set_city(&mut self, cx: &Ctx, d: i32) {
-        let mut c = self.city as i32;
-        loop {
-            c = (c + d).rem_euclid(3);
-            if unlocked(cx, c as usize) {
-                break;
-            }
-        }
-        self.city = c as usize;
-        self.scores = load_scores(cx.data, self.city);
+        self.city = step_city(cx, self.city, d);
+        self.scores = load_scores(cx, self.city);
     }
 }
 
@@ -98,7 +89,7 @@ impl Screen for RampageSetup {
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
         let fe = ui.fe;
-        ui.rotated(&fe.thumbs[self.city], ui.cx(), ui.cy(), 100, self.angle);
+        ui.rotated(city_thumb(fe, cx, self.city), ui.cx(), ui.cy(), 100, self.angle);
         ui.title(&cx.g(2196));
         ui.centred(&cx.g(1610), H / 5, 2);
         // "%d: %s" padded with dots to 35 characters, then the score.
@@ -120,7 +111,7 @@ impl Screen for RampageSetup {
             prev = e.score;
         }
         let on = self.flash > 1;
-        let city = format!("{} {}", cx.g(2124), cx.g(2170 + self.city as u32));
+        let city = format!("{} {}", cx.g(2124), city_name(cx, self.city));
         let police = format!("{} {}", cx.g(2055), cx.g(2491 + self.police as u32));
         let rows = [(city, 0x82), (police, 0x91), (cx.g(2095), 0xa5), (cx.g(2114), 0xb4)];
         for (i, (s, y)) in rows.iter().enumerate() {

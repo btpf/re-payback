@@ -13,6 +13,9 @@
 //      coordinates, table 9
 // Coordinates are clamped to the 256x128 texture like the original.
 
+// Hardware (Warp3D) look, params.x = 1: kind 4 (mode 0x11) adds
+// CloudsReflect ONE/ONE over the opaque face instead of table 9.
+
 #import bevy_pbr::{
     mesh_functions,
     forward_io::{Vertex, VertexOutput, FragmentOutput},
@@ -20,6 +23,8 @@
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
     pbr_fragment::pbr_input_from_standard_material,
 }
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> params: vec4<f32>;
 
 // Atlas size in texels (objects.rs ATLAS_W x ATLAS_FULL_H).
 const ATLAS: vec2<f32> = vec2<f32>(2048.0, 4096.0);
@@ -95,7 +100,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         var overlay_in = in;
         overlay_in.uv = in.uv_b;
         let s = pbr_input_from_standard_material(overlay_in, is_front).material.base_color.rgb;
-        let mixed = clamp(to_srgb(colour.rgb) + to_srgb(s) - vec3<f32>(32.0 / 255.0), vec3<f32>(0.0), vec3<f32>(1.0));
+        var bias = vec3<f32>(32.0 / 255.0);
+        if params.x > 0.5 {
+            bias = vec3<f32>(0.0);
+        }
+        let mixed = clamp(to_srgb(colour.rgb) + to_srgb(s) - bias, vec3<f32>(0.0), vec3<f32>(1.0));
         colour = vec4<f32>(to_linear(mixed), colour.a);
     }
 #endif

@@ -99,7 +99,7 @@ fn select_pursuers(
             Entity,
             &mut Obj,
             &Vehicle,
-            Option<&Ai>,
+            Option<&mut Ai>,
             Option<&mut Pursuit>,
         ),
         Without<CameraTarget>,
@@ -107,17 +107,33 @@ fn select_pursuers(
 ) {
     let aggr = aggr.map_or(2, |a| a.0);
     let wanted = player_wanted(&player);
-    for (e, mut obj, veh, ai, pursuit) in &mut q {
+    for (e, mut obj, veh, mut ai, pursuit) in &mut q {
         if !TYPES[veh.kind].police || veh.kind == vk::POLICE_VAN {
             continue;
         }
-        if !matches!(
-            obj.state,
-            State::Wander | State::PursuitRoute | State::Pursuit
-        ) || ai.is_some_and(|a| a.order != Order::Ambient)
+        // Script drive-to 0x15 and flee 0x14 are in the original's list
+        // too (68k ~124171: states 3/8/9/10/11/0x14/0x15, not 0xf), so a
+        // scripted police car leaves its order: traffic below wanted 3,
+        // pursuit from 3. The port runs script orders in State::Idle.
+        let order = ai.as_ref().map(|a| a.order);
+        let scripted =
+            matches!(order, Some(Order::Goto15(_) | Order::FleeFar)) && obj.state == State::Idle;
+        if !(scripted
+            || matches!(
+                obj.state,
+                State::Wander | State::PursuitRoute | State::Pursuit
+            ) && order.is_none_or(|o| o == Order::Ambient))
             || obj.burn > 0
         {
             continue;
+        }
+        if let (true, Some(a)) = (scripted, ai.as_mut()) {
+            info!("police {e:?}: script order {order:?} dropped (wanted {wanted})");
+            // The state byte is overwritten, so the order is gone and its
+            // trigger never fires.
+            a.order = Order::Ambient;
+            // Fall into the branches below as if from traffic / pursuit.
+            obj.state = if wanted < 3 { State::PursuitRoute } else { State::Wander };
         }
         if wanted < 3 {
             if obj.state != State::Wander {
@@ -351,9 +367,11 @@ fn roadblocks(
                 }
             };
             let f = flags_at(sq);
-            let top = city.map.square(sq.x as usize, sq.y as usize).cubes[level].faces[map::TOP];
+            // The cube must exist: slope byte +8 != 0 (68k `FUN_000cfe0c`,
+            // OS4 `FUN_01047134`); slope 0 (Off) is neither drawn nor solid.
+            let slope = city.map.square(sq.x as usize, sq.y as usize).cubes[level].slope;
             if f & 0x40 == 0
-                || !top.visible()
+                || slope == map::Slope::Off
                 || [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
                     .iter()
                     .any(|&(dx, dy)| occupied(sq + IVec2::new(dx, dy), level))
@@ -549,5 +567,42 @@ fn despawn_far(
             commands.entity(s).despawn();
         }
         commands.entity(e).despawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::Class;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A police car under script goto 0x15 drops the order: pursuit from
+    /// wanted 3, traffic below; goto 0xf is left alone (68k ~124171).
+    fn run(order: Order, wanted: i32) -> (State, Order, bool) {
+        let mut world = World::new();
+        world.insert_resource(Aggressiveness(2));
+        let mut p = Obj::new(Class::Person, 0, IVec3::ZERO, 0);
+        p.wanted = wanted;
+        world.spawn((p, CameraTarget));
+        let mut car = Obj::new(Class::Vehicle, 0, IVec3::new(5000, 0, 0), 0);
+        car.state = State::Idle;
+        let ai = Ai { order, ..default() };
+        let veh = Vehicle { kind: vk::POLICE, colour: 0, engine: None, flying: false, controls: true };
+        let e = world.spawn((car, veh, ai)).id();
+        world.run_system_once(select_pursuers).unwrap();
+        (
+            world.get::<Obj>(e).unwrap().state,
+            world.get::<Ai>(e).unwrap().order,
+            world.get::<Pursuit>(e).is_some(),
+        )
+    }
+
+    #[test]
+    fn script_police_goto_15() {
+        let g = IVec2::new(1000, 2000);
+        assert_eq!(run(Order::Goto15(g), 4), (State::PursuitRoute, Order::Ambient, true));
+        assert_eq!(run(Order::Goto15(g), 1).1, Order::Ambient);
+        assert_eq!(run(Order::Goto15(g), 1).0, State::Wander);
+        assert_eq!(run(Order::Goto(g, 1000), 4), (State::Idle, Order::Goto(g, 1000), false));
     }
 }

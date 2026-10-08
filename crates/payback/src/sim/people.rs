@@ -340,20 +340,44 @@ pub fn make_player(commands: &mut Commands, e: Entity, player: u8) {
     });
 }
 
-fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mode: Res<GameMode>, mut inputs: ResMut<PlayerInputs>) {
+/// Single-player controls: the keyboard and the first gamepad, through
+/// the control setup's tables (`frontend::bindings`, `DAT_012a63fc`
+/// tables 0 and 1). Digits 0..7 pick a weapon directly; next/previous
+/// weapon step through the carried ones.
+fn read_keyboard(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<GameMode>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    pads: Query<(Entity, &Gamepad)>,
+    player: Query<(&Obj, &crate::sim::combat::Arsenal), With<crate::camera::CameraTarget>>,
+    mut inputs: ResMut<PlayerInputs>,
+) {
+    use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
     // Multiplayer devices are read by `multiplayer::read_devices`.
     if mode.is_multiplayer() {
         return;
     }
+    let defaults;
+    let controls = match &settings {
+        Some(s) => &s.controls,
+        None => {
+            defaults = b::Controls::default();
+            &defaults
+        }
+    };
+    let (k, p) = (&controls.keys, &controls.pad);
+    let pad = pads.iter().min_by_key(|(e, _)| *e).map(|(_, g)| g);
+    let stick = pad.map_or(Vec2::ZERO, |g| g.left_stick() + g.dpad());
+    let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
+    let just = |a: usize| key_just(&keys, k[a], true) || pad.is_some_and(|g| pad_just(g, p[a]));
     let input = &mut inputs.0[0];
-    let held = |k: &[KeyCode]| keys.any_pressed(k.iter().copied());
-    input.left = held(&[KeyCode::ArrowLeft]);
-    input.right = held(&[KeyCode::ArrowRight]);
-    input.accel = held(&[KeyCode::ArrowUp]);
-    input.reverse = held(&[KeyCode::ArrowDown]);
-    input.fire = held(&[KeyCode::Space, KeyCode::ControlRight, KeyCode::ControlLeft]);
-    input.brake = held(&[KeyCode::ShiftRight, KeyCode::ShiftLeft]);
-    if keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) {
+    input.left = held(b::LEFT) || stick.x < -0.5;
+    input.right = held(b::RIGHT) || stick.x > 0.5;
+    input.accel = held(b::ACCELERATE) || stick.y > 0.5;
+    input.reverse = held(b::REVERSE) || stick.y < -0.5;
+    input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+    input.brake = held(b::BRAKE);
+    if just(b::IN_OUT) {
         input.use_pressed = true;
     }
     let digits = [
@@ -369,6 +393,19 @@ fn read_keyboard(keys: Res<ButtonInput<KeyCode>>, mode: Res<GameMode>, mut input
     for (i, k) in digits.iter().enumerate() {
         if keys.just_pressed(*k) {
             input.weapon_pressed = Some(i as u8);
+        }
+    }
+    let step = if just(b::NEXT_WEAPON) {
+        1
+    } else if just(b::PREV_WEAPON) {
+        -1
+    } else {
+        0
+    };
+    if step != 0 {
+        let ars = player.iter().find(|(o, _)| o.player.unwrap_or(0) == 0).map(|(_, a)| a);
+        if let Some(slot) = ars.and_then(|a| crate::multiplayer::cycle_weapon(a, step)) {
+            input.weapon_pressed = Some(slot);
         }
     }
 }

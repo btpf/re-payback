@@ -401,7 +401,7 @@ pub fn vehicle_orders(
             );
         let mut aim = None;
         let mut tank_fire = false;
-        match ai.order {
+        match ai.order.as_goto() {
             Order::Goto(goal, radius) => {
                 let d = (bonnet - goal).abs();
                 if d.x + d.y <= radius * 2 {
@@ -478,7 +478,8 @@ pub fn vehicle_orders(
                     }
                 }
             }
-            Order::Ambient | Order::Follow(_) => {}
+            // (`as_goto` folds 0x15 into `Goto`.)
+            Order::Ambient | Order::Follow(_) | Order::Goto15(_) => {}
         }
         let attacking = matches!(ai.order, Order::Attack { .. });
         *stick = match aim {
@@ -593,14 +594,15 @@ fn tank_cannon(
 }
 
 fn load_route(mut commands: Commands, data: Res<GameData>, spec: Res<LevelSpec>) {
-    let path = format!("Maps/{}.route", spec.map);
+    let path = spec.path("route");
     let route = data
         .read(&path)
         .ok()
         .and_then(|b| Route::parse(&b).ok())
         .unwrap_or_else(Route::empty);
     info!(
-        "{path}: {} route nodes",
+        "{}: {} route nodes",
+        path.display(),
         route.nodes.iter().filter(|n| n.used).count()
     );
     commands.insert_resource(RouteGraph(route));

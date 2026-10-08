@@ -17,6 +17,11 @@ use bevy::prelude::*;
 /// Fully open door angle (55°).
 const DOOR_OPEN: i32 = 0x370;
 
+/// A cop has opened the driving player's door: he is pulled out and
+/// busted (68k cop AI ~121990, `FUN_000dab40`).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct PullOut;
+
 /// The player walking to (stage 1) or climbing into (stage 2) a vehicle.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Boarding {
@@ -81,18 +86,23 @@ fn use_pressed(
         (Entity, &Obj, &Stick, Option<&Boarding>),
         (With<CameraTarget>, With<Person>, Without<Busted>),
     >,
-    mut driving: Query<
-        (
-            Entity,
-            &mut Obj,
-            &Vehicle,
-            &mut Drive,
-            &Stick,
-            Option<&Arsenal>,
-        ),
-        (With<CameraTarget>, Without<Person>),
-    >,
-    vehicles: Query<(Entity, &Obj, &Vehicle), Without<CameraTarget>>,
+    mut set: ParamSet<(
+        // Every vehicle, including other players' cars (multiplayer
+        // hijack; the candidates are all objects but self, `FUN_01052a4c`).
+        Query<(Entity, &Obj, &Vehicle), Without<Person>>,
+        Query<
+            (
+                Entity,
+                &mut Obj,
+                &Vehicle,
+                &mut Drive,
+                &Stick,
+                Option<&Arsenal>,
+                Option<&PullOut>,
+            ),
+            (With<CameraTarget>, Without<Person>),
+        >,
+    )>,
 ) {
     let Some(mut library) = library else { return };
     // On foot: choose a vehicle (nearest door point, no range limit).
@@ -104,6 +114,7 @@ fn use_pressed(
             commands.entity(pe).remove::<Boarding>();
             continue;
         }
+        let vehicles = set.p0();
         let best = vehicles
             .iter()
             .filter(|(_, v, veh)| {
@@ -124,60 +135,97 @@ fn use_pressed(
             });
         }
     }
-    // Driving: get out (helicopters must land first).
-    for (ve, mut v, veh, mut drive, stick, ars) in &mut driving {
-        if !stick.use_vehicle || v.state != State::Player || (veh.kind == vk::HELICOPTER && veh.flying)
+    // Driving: get out (helicopters must land first). A cop who has opened
+    // the door pulls the player out (`PullOut`, police.rs).
+    for (ve, mut v, veh, mut drive, stick, ars, pull) in &mut set.p1() {
+        let forced = pull.is_some();
+        if forced {
+            commands.entity(ve).remove::<PullOut>();
+        }
+        if v.state != State::Player
+            || !(forced || stick.use_vehicle && !(veh.kind == vk::HELICOPTER && veh.flying))
         {
             continue;
         }
-        let info = library.model(v.model).info.clone();
-        let mut exit = door_point(
-            &trig,
-            &v,
-            info.radius,
-            door_y(veh.kind, info.max_y),
-            192 * 6 / 5,
-        );
-        exit.z = v.pos.z;
-        let heading = wrap(v.heading - 0x5a0);
-        let ars = ars.cloned().unwrap_or_default();
-        let model = ars.current.person_model();
-        let Some(pe) = people::spawn_person(
+        let Some(pe) = eject(
             &mut commands,
             &data,
+            &trig,
             &mut library,
             &mut meshes,
-            model,
-            exit,
-            heading,
-            State::Player,
+            &mut session,
+            ve,
+            &mut v,
+            veh,
+            &mut drive,
+            ars,
         ) else {
             continue;
         };
-        let player = v.player.unwrap_or(0);
-        let (score, wanted, health) = (v.score, v.wanted, *session.foot_health_mut(v.player));
-        let prev = v.pos;
-        commands.entity(pe).insert((CameraTarget, ars));
-        commands.queue(move |world: &mut World| {
-            if let Some(mut o) = world.get_mut::<Obj>(pe) {
-                o.score = score;
-                o.wanted = wanted;
-                o.health = health;
-                o.player = Some(player);
-                // The first collision step tests car centre -> exit point, so
-                // walls between pull the player back (Update 4 fix).
-                o.prev_pos = prev;
-            }
-            if let Some(mut p) = world.get_mut::<Person>(pe) {
-                p.follows_weapon = true;
-            }
-        });
-        commands.entity(ve).remove::<(CameraTarget, Arsenal)>();
-        v.state = State::Parked;
-        v.player = None;
-        v.speed = 0;
-        drive.door = DOOR_OPEN;
+        if forced {
+            // Busted while driving (68k ~121990): the exit `FUN_000dab40`
+            // makes the player a person again, then the bust freezes him.
+            info!("busted: pulled out of {ve:?} at {:?} (car parked, door open)", v.pos);
+            commands.entity(pe).insert(Busted);
+            commands.queue(move |world: &mut World| {
+                if let Some(mut o) = world.get_mut::<Obj>(pe) {
+                    o.state = State::Dead;
+                }
+            });
+        }
     }
+}
+
+/// A driving player gets out (OS4 `FUN_01052398`, 68k `FUN_000dab40`): a
+/// person appears 1.2·(radius + half-width) out of the right side at the
+/// door, facing away from the car, with the car's weapons, score, wanted
+/// level and the stored on-foot health; the car is parked with its door
+/// fully open. Returns the new person.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eject(
+    commands: &mut Commands,
+    data: &GameData,
+    trig: &Trig,
+    library: &mut ObjectLibrary,
+    meshes: &mut Assets<Mesh>,
+    session: &mut PlayerSession,
+    ve: Entity,
+    v: &mut Obj,
+    veh: &Vehicle,
+    drive: &mut Drive,
+    ars: Option<&Arsenal>,
+) -> Option<Entity> {
+    let info = library.model(v.model).info.clone();
+    let mut exit = door_point(trig, v, info.radius, door_y(veh.kind, info.max_y), 192 * 6 / 5);
+    exit.z = v.pos.z;
+    let heading = wrap(v.heading - 0x5a0);
+    let ars = ars.cloned().unwrap_or_default();
+    let model = ars.current.person_model();
+    let pe = people::spawn_person(commands, data, library, meshes, model, exit, heading, State::Player)?;
+    let player = v.player.unwrap_or(0);
+    let (score, wanted, health) = (v.score, v.wanted, *session.foot_health_mut(v.player));
+    let prev = v.pos;
+    commands.entity(pe).insert((CameraTarget, ars));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut o) = world.get_mut::<Obj>(pe) {
+            o.score = score;
+            o.wanted = wanted;
+            o.health = health;
+            o.player = Some(player);
+            // The first collision step tests car centre -> exit point, so
+            // walls between pull the player back (Update 4 fix).
+            o.prev_pos = prev;
+        }
+        if let Some(mut p) = world.get_mut::<Person>(pe) {
+            p.follows_weapon = true;
+        }
+    });
+    commands.entity(ve).remove::<(CameraTarget, Arsenal)>();
+    v.state = State::Parked;
+    v.player = None;
+    v.speed = 0;
+    drive.door = DOOR_OPEN;
+    Some(pe)
 }
 
 /// Walk to the driver's door, open it, get in (and hijack a driven car).
@@ -196,11 +244,11 @@ fn walk_to_door(
         (Entity, &mut Obj, &mut Stick, &Boarding, Option<&Arsenal>),
         (With<Person>, Without<Vehicle>),
     >,
-    mut vehicles: Query<(&mut Obj, &Vehicle, &mut Drive), Without<Person>>,
+    mut vehicles: Query<(&mut Obj, &Vehicle, &mut Drive, Option<&Arsenal>), Without<Person>>,
 ) {
     let Some(mut library) = library else { return };
     for (pe, mut p, mut stick, b, ars) in &mut walkers {
-        let Ok((mut v, veh, mut drive)) = vehicles.get_mut(b.vehicle) else {
+        let Ok((mut v, veh, mut drive, v_ars)) = vehicles.get_mut(b.vehicle) else {
             commands.entity(pe).remove::<Boarding>();
             continue;
         };
@@ -240,21 +288,51 @@ fn walk_to_door(
             continue;
         }
         let t = &TYPES[veh.kind];
-        // Hijack: a driven car throws its driver out.
-        if !matches!(v.state, State::Parked) {
+        if v.state == State::Player {
+            // Multiplayer: another player is driving (OS4 `FUN_01052a4c`,
+            // `DAT_0114c7c8 != 0` and state 2). He is put out by the normal
+            // exit `FUN_01052398` and keeps playing on foot, knocked down
+            // for 50 ticks (+0x494 = 0x32). No wanted level, score or
+            // carjack count.
+            if p.player == v.player {
+                continue;
+            }
+            let v_ars = v_ars.cloned();
+            if let Some(victim) = eject(
+                &mut commands,
+                &data,
+                &trig,
+                &mut library,
+                &mut meshes,
+                &mut session,
+                b.vehicle,
+                &mut v,
+                veh,
+                &mut drive,
+                v_ars.as_ref(),
+            ) {
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut pp) = world.get_mut::<Person>(victim) {
+                        pp.stun = 50;
+                    }
+                });
+            }
+        } else if !matches!(v.state, State::Parked) {
+            // Hijack: a driven car throws its driver out.
             let police = t.police;
             p.wanted = p.wanted.max(if police { 3 } else { 2 });
             p.score += if police { 1500 } else { 1000 } * session.multiplier;
             let kind = if police { 7 } else { 6 };
-            let side = if rng.rand(2) == 0 { 1 } else { -1 };
-            let mut out = door_point(
+            // `FUN_01052714` alternates sides with `DAT_0114c628`, but the
+            // hijack sets it to 1 first, so the driver always lands on the
+            // right (door) side, 1.2·(r + half-width) out.
+            let out = door_point(
                 &trig,
                 &v,
                 info.radius,
                 door_y(veh.kind, info.max_y),
                 192 * 6 / 5,
             );
-            out.x += side;
             if let Some(driver) = people::spawn_person(
                 &mut commands,
                 &data,

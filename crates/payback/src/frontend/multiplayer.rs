@@ -7,10 +7,12 @@
 //! at least two players, else 2179), Cancel. Each device (keyboard key
 //! set or joystick) can be used by one player only.
 
-use super::rampage::unlocked;
-use super::ui::*;
+use super::bindings::{self as b, Table};
+use super::misc::{key_name, pad_name};
 use super::progress::Settings;
-use crate::multiplayer::{Device, JOYSTICK_HINT, KEY_SETS, MpTotals};
+use super::ui::*;
+use super::usermaps::{city_name, city_thumb, initial_city, step_city};
+use crate::multiplayer::{Device, KEY_SETS, MpTotals};
 
 const ROWS: usize = 12;
 const CITY: usize = 8;
@@ -30,6 +32,39 @@ fn device_label(cx: &Ctx, d: Device) -> String {
         Device::Keyboard(_) => cx.g(2167),
         Device::Joystick(n) => format!("{} {}", cx.g(2166), n + 1),
     }
+}
+
+/// A device's bindings in one line, e.g. "WASD F:Ctrl B:L-Shift In:Tab
+/// W:Q/E" (steering, fire, brake, in/out, previous/next weapon).
+fn hint(cx: &Ctx, table: Table) -> String {
+    let name = |a: usize| match table {
+        Table::Keys(t) => key_name(cx, t[a]),
+        Table::Pad(t) => pad_name(cx, t[a]),
+    };
+    let steer = match table {
+        Table::Pad(_) => "Stick/D-pad".to_string(),
+        Table::Keys(t) => {
+            let order = [b::ACCELERATE, b::LEFT, b::REVERSE, b::RIGHT];
+            let ids: Vec<String> = order.iter().map(|&a| t[a].map(b::key_id).unwrap_or_default()).collect();
+            if ids.iter().all(|i| i.starts_with("Arrow")) {
+                "Arrows".into()
+            } else if ids.iter().all(|i| i.starts_with("Numpad")) {
+                format!("Numpad {}", ids.iter().map(|i| &i[6..]).collect::<String>())
+            } else {
+                let names: Vec<String> = order.iter().map(|&a| name(a)).collect();
+                let sep = if names.iter().all(|n| n.chars().count() == 1) { "" } else { "/" };
+                names.join(sep)
+            }
+        }
+    };
+    format!(
+        "{steer} F:{} B:{} In:{} W:{}/{}",
+        name(b::SHOOT),
+        name(b::BRAKE),
+        name(b::IN_OUT),
+        name(b::PREV_WEAPON),
+        name(b::NEXT_WEAPON)
+    )
 }
 
 /// The device order the left/right keys step through.
@@ -53,10 +88,7 @@ impl MultiplayerSetup {
     /// Opening the setup starts new won/drawn/lost totals.
     pub fn new(cx: &mut Ctx) -> MultiplayerSetup {
         *cx.mp_totals = MpTotals::default();
-        let mut city = (cx.settings.rampage_city as usize).min(2);
-        while !unlocked(cx, city) {
-            city -= 1;
-        }
+        let city = initial_city(cx);
         MultiplayerSetup {
             sel: PLAY,
             city,
@@ -91,7 +123,7 @@ impl MultiplayerSetup {
             let cand = cycle[(cur as i32 + d * k).rem_euclid(cycle.len() as i32) as usize];
             let cand = match cand {
                 Device::Keyboard(_) => {
-                    match (0..KEY_SETS.len() as u8).map(Device::Keyboard).find(|&kb| !Self::used(cx, p, kb)) {
+                    match (0..KEY_SETS as u8).map(Device::Keyboard).find(|&kb| !Self::used(cx, p, kb)) {
                         Some(kb) => kb,
                         None => continue,
                     }
@@ -106,7 +138,7 @@ impl MultiplayerSetup {
 
     fn step_keys(cx: &mut Ctx, p: usize, d: i32) {
         let Device::Keyboard(cur) = cx.settings.mp_devices[p] else { return };
-        let n = KEY_SETS.len() as i32;
+        let n = KEY_SETS as i32;
         for k in 1..n {
             let cand = Device::Keyboard((cur as i32 + d * k).rem_euclid(n) as u8);
             if !Self::used(cx, p, cand) {
@@ -117,14 +149,7 @@ impl MultiplayerSetup {
     }
 
     fn set_city(&mut self, cx: &mut Ctx, d: i32) {
-        let mut c = self.city as i32;
-        loop {
-            c = (c + d).rem_euclid(3);
-            if unlocked(cx, c as usize) {
-                break;
-            }
-        }
-        self.city = c as usize;
+        self.city = step_city(cx, self.city, d);
         cx.settings.rampage_city = self.city as u8;
     }
 
@@ -202,7 +227,7 @@ impl Screen for MultiplayerSetup {
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
         let fe = ui.fe;
-        ui.rotated(&fe.thumbs[self.city], ui.cx(), ui.cy(), 100, self.angle);
+        ui.rotated(city_thumb(fe, cx, self.city), ui.cx(), ui.cy(), 100, self.angle);
         ui.title(&cx.g(2135));
         let on = self.flash > 1;
         let colour = |row: usize| if row == self.sel && on { 2 } else { 1 };
@@ -212,12 +237,12 @@ impl Screen for MultiplayerSetup {
             ui.centred(&line, Self::row_y(ui, 2 * p), colour(2 * p));
             let hint = match dev {
                 Device::Off => continue,
-                Device::Keyboard(k) => format!("{}. {}", k + 1, KEY_SETS[k as usize % KEY_SETS.len()].hint),
-                Device::Joystick(_) => JOYSTICK_HINT.to_string(),
+                Device::Keyboard(k) => format!("{}. {}", k + 1, hint(cx, cx.settings.controls.column(2 + k as usize % KEY_SETS))),
+                Device::Joystick(_) => hint(cx, cx.settings.controls.column(6 + p)),
             };
             ui.centred(&hint, Self::row_y(ui, 2 * p + 1), if 2 * p + 1 == self.sel && on { 1 } else { 2 });
         }
-        let city = format!("{} {}", cx.g(2124), cx.g(2170 + self.city as u32));
+        let city = format!("{} {}", cx.g(2124), city_name(cx, self.city));
         let kills = format!("{} {}", cx.g(2329), cx.settings.required_kills);
         for (row, s) in [(CITY, city), (KILLS, kills), (PLAY, cx.g(2095)), (CANCEL, cx.g(2114))] {
             ui.centred(&s, Self::row_y(ui, row), colour(row));
@@ -256,7 +281,7 @@ impl MpResults {
             players: players.clamp(1, 4),
             totals: *cx.mp_totals,
             sel: 1,
-            city: (cx.settings.rampage_city as usize).min(2),
+            city: initial_city(cx),
             naming: false,
         }
     }
@@ -273,14 +298,7 @@ impl Screen for MpResults {
         if (input.left || input.right) && self.sel == 0 {
             cx.sound(Sfx::Select);
             let d = if input.right { 1 } else { -1 };
-            let mut c = self.city as i32;
-            loop {
-                c = (c + d).rem_euclid(3);
-                if unlocked(cx, c as usize) {
-                    break;
-                }
-            }
-            self.city = c as usize;
+            self.city = step_city(cx, self.city, d);
             cx.settings.rampage_city = self.city as u8;
             return Step::Stay;
         }
@@ -354,7 +372,7 @@ impl Screen for MpResults {
         }
         for (i, &n) in RESULT_ITEMS.iter().enumerate() {
             let s = if i == 0 {
-                format!("{} {}", cx.g(n), cx.g(2170 + self.city as u32))
+                format!("{} {}", cx.g(n), city_name(cx, self.city))
             } else {
                 cx.g(n)
             };

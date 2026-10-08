@@ -536,8 +536,6 @@ impl Level10 {
                 s.create_actor(0xca, !11, 0x27eac, 0x21822, 0, 0x5a0, 0);
                 s.create_actor(0xcb, !11, 0x27eac, 0x21ef8, 0, 0x5a0, 0);
                 s.set_face(FACE_E, 0x4f, 0x43, 1, 0, 0, 0);
-                // TODO(api): AddSound's range argument (20000) has no
-                // parameter in `Script::add_sound`.
                 s.add_sound(
                     1,
                     0x3a,
@@ -546,6 +544,7 @@ impl Level10 {
                     0x206c as f32,
                     0x27cb8,
                     0x21c00,
+                    20000,
                 );
                 s.t(0xcc, TIMER_TICKS, 5, -1, -1, -1);
                 s.t(0xcd, ON_FOOT_NEAR_POINT, 0x27c00, 0x21c00, 0, -1);

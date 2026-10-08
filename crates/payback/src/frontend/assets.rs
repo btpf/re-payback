@@ -13,6 +13,13 @@ pub struct Picture {
 }
 
 impl Picture {
+    /// A picture that may be missing (user maps' `.thumb`): black then.
+    pub fn load_or_black(data: &GameData, path: &std::path::Path, w: usize, h: usize) -> Picture {
+        let mut px = data.read(path).unwrap_or_default();
+        px.resize(w * h, 0);
+        Picture { w, h, px }
+    }
+
     fn load(data: &GameData, path: &str, w: usize, h: usize) -> Picture {
         let mut px = data.read(path).unwrap_or_else(|e| {
             warn!("{path}: {e}");
@@ -27,6 +34,9 @@ impl Picture {
 pub struct FrontendIcons {
     /// `TitleScreen.medium` (320×256), the PAL-sized title picture.
     pub title: Picture,
+    /// `TitleScreen.w3d`: the hardware (Warp3D) title, 256×256 raw 24-bit
+    /// RGB (R, G, B; inferred), no header. None if missing or short.
+    pub title_w3d: Option<Vec<u8>>,
     pub left_arrow: Icon,
     pub right_arrow: Icon,
     pub cursor: Icon,
@@ -45,6 +55,7 @@ impl FrontendIcons {
         let cup = |n: &str| Icon::load(data, &format!("Cup.{n}"), 15, 20);
         FrontendIcons {
             title: Picture::load(data, "Icons/TitleScreen.medium", 320, 256),
+            title_w3d: data.read("Icons/TitleScreen.w3d").ok().filter(|b| b.len() >= 256 * 256 * 3),
             left_arrow: shadow_icon(data, "LeftArrow"),
             right_arrow: shadow_icon(data, "RightArrow"),
             cursor: Icon::load(data, "Cursor", 6, 10),

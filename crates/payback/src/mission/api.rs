@@ -120,7 +120,7 @@ impl<'w> Script<'w> {
                 goal,
                 if t.d > 0 { t.d } else { 1000 },
             )),
-            kind::ACTOR_GOTO_15 => Some(crate::sim::ai::Order::Goto(goal, 1000)),
+            kind::ACTOR_GOTO_15 => Some(crate::sim::ai::Order::Goto15(goal)),
             kind::ACTOR_BOARDS_PLAYER => Some(crate::sim::ai::Order::BoardPlayer),
             kind::ACTOR_FLEES => Some(crate::sim::ai::Order::FleeFar),
             kind::ACTOR_BOARDS_ACTOR => self
@@ -906,9 +906,11 @@ impl<'w> Script<'w> {
     /// Pedestrian `model` (negative = person) with script id `new_id` steps
     /// out of vehicle `veh_id` (-1: the vehicle the player drives).
     /// `side` 0 = the driver's door (model -X), 1 = the other side, -1 =
-    /// alternating, starting with the other side (`0xb43d4`/`0xb4414` call
-    /// `0xdb03e`, which flips `0x34c1b0` each time; `0xb448e` passes the
-    /// side to `0xdb196`). The ped stands (car half-width + 192)·6/5 out at
+    /// alternating (`0xb43d4`/`0xb4414` call `0xdb03e`, which flips
+    /// `0x34c1b0` each time; `0xb448e` passes the side to `0xdb196`). The
+    /// toggle is reset to 1 before each frame's triggers, so the first
+    /// alternating exit of a frame uses the driver's door, the second the
+    /// other side. The ped stands (car half-width + 192)·6/5 out at
     /// the door's longitudinal position, facing 90° left of the car; its
     /// previous position is the car's centre, so walls between push it back.
     pub fn ped_exits_vehicle(&mut self, new_id: i32, veh_id: i32, model: i32, side: i32) {
@@ -964,7 +966,13 @@ impl<'w> Script<'w> {
         });
     }
 
-    /// `AddSound(ref, sample, loop, vol, hz, x, y, z)`.
+    /// `AddSound(ref, sample, loop, vol, hz, x, y, z)` (68k `FUN_000b4bba`,
+    /// OS4 `FUN_010cda74`): passes its arguments straight to the engine's
+    /// AddSound (68k `FUN_000170ce`). The 8th argument is the sound's
+    /// downward z, not a range; it matters because the mixer's loudness is
+    /// `vol / d²` over the 3D distance (frontend_audio.md §4.3). The
+    /// shipped calls use 20000 (street level) and 19000. `y == -1` is
+    /// non-positional.
     #[allow(clippy::too_many_arguments)]
     pub fn add_sound(
         &mut self,
@@ -975,12 +983,13 @@ impl<'w> Script<'w> {
         hz: f32,
         x: i32,
         y: i32,
+        z: i32,
     ) {
         self.delete_sound(slot);
         let pos = if y == -1 {
             SoundPos::Global
         } else {
-            SoundPos::At(Vec3::new(x as f32, y as f32, 0.0))
+            SoundPos::At(Vec3::new(x as f32, y as f32, z as f32))
         };
         let sound = if looping {
             Sound::looping(sample, vol, hz, pos)

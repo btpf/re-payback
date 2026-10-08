@@ -16,10 +16,15 @@
 //! | `volume` | sound volume 0..100 |
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
+//! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
+//! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
+//! | `window_mode` | `windowed`, `borderless` (borderless fullscreen) or `fullscreen` (exclusive, video mode of `resolution`) |
 //! | `cd_mode` | CD playback 0 off, 1 radio, 2 continuous, 3 disabled |
 //! | `police` | Rampage police aggressiveness 0..5 (`DAT_0114c2ec`) |
-//! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`) |
-//! | `key.<action>` | Bevy `KeyCode` name per action (phrases 2457–2467) |
+//! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`; 3.. = user maps) |
+//! | `key.<action>` | single-player key, Bevy `KeyCode` name (actions: phrases 2457–2467); empty = disabled |
+//! | `pad.<action>` | single-player gamepad button, Bevy `GamepadButton` name |
+//! | `mp<n>.key.<action>`, `mp<n>.pad.<action>` | multiplayer key set n, player n's gamepad (`bindings.rs`) |
 
 use bevy::prelude::*;
 use std::path::PathBuf;
@@ -166,37 +171,6 @@ pub fn slot_names() -> Vec<Option<String>> {
     (0..SLOTS).map(|s| load_slot(s).map(|(d, _)| d)).collect()
 }
 
-/// Control actions in phrase order 2457..2467.
-pub const ACTIONS: [&str; 11] = [
-    "accelerate",
-    "reverse",
-    "left",
-    "right",
-    "shoot",
-    "shoot_alt",
-    "in_out",
-    "brake",
-    "next_weapon",
-    "prev_weapon",
-    "repeat_message",
-];
-
-/// The keyboard bindings the game reads (`sim::people::read_keyboard`),
-/// in [`ACTIONS`] order; empty = not bound.
-const DEFAULT_KEYS: [&str; 11] = [
-    "ArrowUp",
-    "ArrowDown",
-    "ArrowLeft",
-    "ArrowRight",
-    "Space",
-    "ControlLeft",
-    "Enter",
-    "ShiftLeft",
-    "",
-    "",
-    "",
-];
-
 /// Stored options (pause menu, language, sound, controls).
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -207,12 +181,19 @@ pub struct Settings {
     pub motion_blur: bool,
     pub gouraud: bool,
     pub rotating_view: bool,
+    /// Hardware (Warp3D) rendering, config field 19 (`DAT_0114c7d8`).
+    pub hardware: bool,
+    /// Window size in physical pixels (PaybackSetup's screen mode); None =
+    /// leave the window as created.
+    pub resolution: Option<(u32, u32)>,
+    pub window_mode: super::display::WindowChoice,
     pub cd_mode: u8,
     /// Rampage police aggressiveness 0..5 (config field 13).
     pub police: u8,
     /// Rampage and multiplayer city (config field 11).
     pub rampage_city: u8,
-    pub keys: [String; 11],
+    /// Key and gamepad bindings (`DAT_012a63fc`, `bindings.rs`).
+    pub controls: super::bindings::Controls,
     /// Multiplayer setup: each player's device (config: 4 × {device, key
     /// set}; here the key set is part of the device).
     pub mp_devices: [crate::multiplayer::Device; 4],
@@ -229,10 +210,13 @@ impl Default for Settings {
             motion_blur: false,
             gouraud: true,
             rotating_view: false,
+            hardware: false,
+            resolution: None,
+            window_mode: default(),
             cd_mode: 3,
             police: 2,
             rampage_city: 0,
-            keys: DEFAULT_KEYS.map(String::from),
+            controls: default(),
             mp_devices: {
                 use crate::multiplayer::Device;
                 [Device::Keyboard(0), Device::Keyboard(1), Device::Off, Device::Off]
@@ -269,9 +253,13 @@ impl Settings {
                 "motion_blur" => s.motion_blur = v == "1",
                 "gouraud" => s.gouraud = v == "1",
                 "rotating_view" => s.rotating_view = v == "1",
+                "hardware" => s.hardware = v == "1",
+                "resolution" => s.resolution = super::display::parse_size(v).or(s.resolution),
+                "window_mode" => s.window_mode = super::display::WindowChoice::parse(v).unwrap_or(s.window_mode),
                 "cd_mode" => s.cd_mode = num(3).unwrap_or(s.cd_mode),
                 "police" => s.police = num(5).unwrap_or(s.police),
-                "city" => s.rampage_city = num(2).unwrap_or(s.rampage_city),
+                // >= 3: a user map (checked against the list when used).
+                "city" => s.rampage_city = num(u8::MAX).unwrap_or(s.rampage_city),
                 "required_kills" => s.required_kills = num(50).unwrap_or(s.required_kills).max(1),
                 _ => {
                     if let Some(p) = k.strip_prefix("mp.player").and_then(|p| p.parse::<usize>().ok()) {
@@ -281,15 +269,22 @@ impl Settings {
                             *slot = d;
                         }
                     }
-                    if let Some(a) = k.strip_prefix("key.") {
-                        if let Some(i) = ACTIONS.iter().position(|x| *x == a) {
-                            s.keys[i] = v.to_string();
-                        }
-                    }
+                    s.controls.read(k, v);
                 }
             }
         }
+        s.apply_hardware();
         s
+    }
+
+    /// Hardware rendering forces Gouraud shading on (LoadConfig
+    /// `FUN_0104199c`: `DAT_0114c7d8 != 0` -> `DAT_0114c2fc = 1`) and has
+    /// no motion blur (the pause menu refuses it, `FUN_0101a7dc` case 3).
+    pub fn apply_hardware(&mut self) {
+        if self.hardware {
+            self.gouraud = true;
+            self.motion_blur = false;
+        }
     }
 
     pub fn save(&self) {
@@ -301,6 +296,11 @@ impl Settings {
         t += &format!("motion_blur = {}\n", b(self.motion_blur));
         t += &format!("gouraud = {}\n", b(self.gouraud));
         t += &format!("rotating_view = {}\n", b(self.rotating_view));
+        t += &format!("hardware = {}\n", b(self.hardware));
+        if let Some((w, h)) = self.resolution {
+            t += &format!("resolution = {w}x{h}\n");
+        }
+        t += &format!("window_mode = {}\n", self.window_mode.name());
         t += &format!("cd_mode = {}\n", self.cd_mode);
         t += &format!("police = {}\n", self.police);
         t += &format!("city = {}\n", self.rampage_city);
@@ -308,9 +308,7 @@ impl Settings {
         for (i, d) in self.mp_devices.iter().enumerate() {
             t += &format!("mp.player{} = {}\n", i + 1, d.name());
         }
-        for (a, k) in ACTIONS.iter().zip(&self.keys) {
-            t += &format!("key.{a} = {k}\n");
-        }
+        self.controls.write(&mut t);
         if let Err(e) = std::fs::create_dir_all(saves_dir()).and_then(|_| std::fs::write(Self::path(), t)) {
             warn!("saving settings: {e}");
         }

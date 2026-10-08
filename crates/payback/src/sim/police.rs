@@ -92,6 +92,12 @@ impl Plugin for PolicePlugin {
                     .distributive_run_if(crate::level::single_player)
                     .after(super::combat::CombatSet),
             )
+            .add_systems(
+                FixedUpdate,
+                arrest_test
+                    .run_if(|| std::env::args().any(|a| a == "--arrest-test"))
+                    .before(super::people::PeopleThink),
+            )
             // Cops steer after the ambient ped AI has reset their sticks.
             .add_systems(
                 FixedUpdate,
@@ -321,6 +327,7 @@ fn cops(
                     &mut commands,
                     pe,
                     &mut p,
+                    p_on_foot,
                     &mut session,
                     &mut record,
                     texts.as_deref(),
@@ -348,12 +355,82 @@ fn cops(
     }
 }
 
-/// Busted: frozen, crime summary, respawn after 80 ticks (§2.5).
+/// `--arrest-test` (debug, use with `--wanted 4`): the player gets into the
+/// nearest car (kept at its door while boarding) and then sits still in
+/// it, so a pursuing car drops a cop who drags him out. Logs who is the
+/// player and the car's state every 25 ticks until 4000.
+#[allow(clippy::type_complexity)]
+fn arrest_test(
+    mut tick: Local<u32>,
+    trig: Res<Trig>,
+    library: Option<Res<ObjectLibrary>>,
+    mut inputs: ResMut<super::people::PlayerInputs>,
+    mut q: Query<
+        (Entity, &mut Obj, Has<Person>, Has<Busted>, Option<&super::boarding::Boarding>),
+        With<CameraTarget>,
+    >,
+    cars: Query<(Entity, &Obj, &Vehicle, &Drive), Without<CameraTarget>>,
+    mut seen: Local<Option<Entity>>,
+) {
+    let Some(library) = library else { return };
+    if q.is_empty() && *tick == 0 {
+        return;
+    }
+    *tick += 1;
+    let t = *tick;
+    if t == 10 {
+        inputs.0[0].use_pressed = true;
+    }
+    for (_, mut o, _, _, boarding) in &mut q {
+        let Some((_, v, veh, _)) = boarding.and_then(|b| cars.get(b.vehicle).ok()) else {
+            continue;
+        };
+        let info = &library.model(v.model).info;
+        let door = super::boarding::door_point(
+            &trig,
+            v,
+            info.radius,
+            super::boarding::door_y(veh.kind, info.max_y),
+            192,
+        );
+        o.pos = door;
+        o.prev_pos = door;
+    }
+    for (e, _, foot, _, _) in &q {
+        if !foot {
+            *seen = Some(e);
+        }
+    }
+    if t % 25 == 0 && t <= 4000 {
+        for (e, o, foot, busted, _) in &q {
+            info!(
+                "arrest test: tick {t}: player {} {e:?} at {:?} state {:?} wanted {}{}",
+                if foot { "on foot" } else { "driving" },
+                o.pos,
+                o.state,
+                o.wanted,
+                if busted { " BUSTED" } else { "" },
+            );
+        }
+        if let Some((e, v, _, d)) = seen.and_then(|e| cars.get(e).ok()) {
+            info!(
+                "arrest test: tick {t}: car {e:?} at {:?} state {:?} door {}",
+                v.pos, v.state, d.door
+            );
+        }
+    }
+}
+
+/// Busted: frozen, crime summary, respawn after 80 ticks (§2.5). A
+/// driving player is first pulled out of the car (68k ~121990 calls the
+/// exit `FUN_000dab40`): the car is left parked with its door open and the
+/// new person on foot is the one frozen (`boarding::PullOut`).
 #[allow(clippy::too_many_arguments)]
 fn bust(
     commands: &mut Commands,
     pe: Entity,
     p: &mut Obj,
+    on_foot: bool,
     session: &mut PlayerSession,
     record: &mut Crimes,
     texts: Option<&Texts>,
@@ -361,8 +438,12 @@ fn bust(
     dialog: &mut Dialog,
     rng: &mut Rng,
 ) {
-    commands.entity(pe).insert(Busted);
-    p.state = State::Dead;
+    if on_foot {
+        commands.entity(pe).insert(Busted);
+        p.state = State::Dead;
+    } else {
+        commands.entity(pe).insert(super::boarding::PullOut);
+    }
     session.respawn_timer = 80;
     if let Some(t) = texts {
         title.show(t.global(2017));

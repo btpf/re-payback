@@ -1131,7 +1131,7 @@ impl Level00 {
                 s.set_cube(85, 74, 2, 0x40, 0x150, ALARM_BOX_FLASH, 0x3f, 1);
                 s.set_cube(85, 77, 2, 0x40, 0x150, ALARM_BOX_FLASH, 0x3f, 1);
                 // TODO(api): `add_sound` has no range argument (20000).
-                s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2a800, 0x26000);
+                s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2a800, 0x26000, 20000);
                 s.create_actor(RON, PEDMALE3, 0x2a84c, 0x26400, 0, 0, 0);
                 s.create_actor(TREY, PEDMALE4, 0x2a84c, 0x25c00, 0, 0, 0);
                 mt(s, 0x4e, ACTOR_GONE, &[RON]);

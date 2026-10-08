@@ -19,9 +19,14 @@ pub enum Order {
     Park,
     /// State 3: ambient pedestrian or traffic (`Actor_ReleaseIdle`).
     Ambient,
-    /// State 0xf/0x15: go to (x, y), stop within `radius`; reports
-    /// trigger 0x17.
+    /// State 0xf: go to (x, y), stop within `radius`; reports
+    /// trigger 0x17 (trigger types 0x17 / 0x32).
     Goto(IVec2, i32),
+    /// State 0x15 (trigger type 0x44): as `Goto` with radius 1000, but a
+    /// police car in it is also subject to pursuit selection (68k
+    /// `FUN_000e3a58` ~124185 lists states 3/8/9/10/11/0x14/0x15, not
+    /// 0xf): traffic below wanted 3, pursuit from 3.
+    Goto15(IVec2),
     /// State 0xe: go to (x, y) and vanish on arrival; reports 0x12.
     GotoVanish(IVec2),
     /// State 0xd: walk to the player's vehicle and get in; reports 0x0c.
@@ -36,6 +41,17 @@ pub enum Order {
     FleeFar,
     /// Follow an actor (or the player); `None` stops following.
     Follow(Option<Entity>),
+}
+
+impl Order {
+    /// State 0x15 drives exactly like 0xf (radius 1000): fold it into
+    /// `Goto` for the movement code.
+    pub fn as_goto(self) -> Order {
+        match self {
+            Order::Goto15(goal) => Order::Goto(goal, 1000),
+            o => o,
+        }
+    }
 }
 
 #[derive(Component, Clone, Debug)]
@@ -218,8 +234,9 @@ pub fn people_orders(
             continue;
         }
         let cap = ai.max_speed.min(0x30);
-        match ai.order {
-            Order::Idle | Order::Park | Order::Ambient | Order::Follow(_) => {}
+        match ai.order.as_goto() {
+            // (`as_goto` folds 0x15 into `Goto`.)
+            Order::Idle | Order::Park | Order::Ambient | Order::Follow(_) | Order::Goto15(_) => {}
             Order::Goto(goal, radius) => {
                 let d = (goal - obj.pos.truncate()).abs();
                 if d.x + d.y <= radius {
@@ -334,5 +351,18 @@ pub fn people_orders(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goto_15_drives_like_goto() {
+        let g = IVec2::new(0x3efd0, 0x21c00);
+        assert_eq!(Order::Goto15(g).as_goto(), Order::Goto(g, 1000));
+        assert_eq!(Order::Goto(g, 600).as_goto(), Order::Goto(g, 600));
+        assert_eq!(Order::Ambient.as_goto(), Order::Ambient);
     }
 }

@@ -20,6 +20,10 @@
 //!    entry becomes `min(255, rgb + flash)`), after the snap as the original
 //!    changes the palette, not the pixels.
 //!
+//! The hardware render mode (`crate::render_mode`, rendering.md §11) is
+//! true colour: only the flash (a full-screen additive quad there) is
+//! applied.
+//!
 //! What stays approximate: blends with the framebuffer (effects, Alpha
 //! tops, additive object faces) happen in linear light on the true-colour
 //! target, and only the end result is snapped, where the original snaps
@@ -163,8 +167,8 @@ pub struct PaletteTextures {
 
 /// The "Motion blur" option (`DAT_0114c6c8`, toggled by `FUN_01042308`):
 /// `Settings::motion_blur`, `--motion-blur [0|1]` wins. The original
-/// refuses it under hardware rendering; this port always renders the
-/// software look.
+/// refuses it under hardware rendering, and so does the final pass in
+/// [`crate::render_mode::RenderMode::Hardware`].
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MotionBlur(pub bool);
 
@@ -280,13 +284,17 @@ fn update_views(
     state: Res<State<AppState>>,
     blur: Res<MotionBlur>,
     flash: Res<crate::effects::ScreenFlash>,
+    mode: Res<crate::render_mode::RenderMode>,
     views: Query<(Entity, Option<&PostFx>), Or<(With<GameCamera>, With<ExtraView>)>>,
 ) {
     let playing = *state.get() == AppState::Playing;
-    let snap = !std::env::args().any(|a| a == "--no-palette-snap");
+    // Warp3D draws true colour (no palette) and has no motion blur; its
+    // flash is an additive full-screen quad of `flash / 255`, the same sum.
+    let hardware = mode.hardware();
+    let snap = !hardware && !std::env::args().any(|a| a == "--no-palette-snap");
     let want = PostFx {
         flash: flash.0.clamp(0, 255) as f32 / 255.0,
-        blur: blur.0,
+        blur: blur.0 && !hardware,
         snap,
     };
     for (e, current) in &views {

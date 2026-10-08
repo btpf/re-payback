@@ -41,6 +41,18 @@
 //! h-units; flares and weather are not (the original draws list 3 after
 //! everything). Layers are drawn bottom to top through the material's sort
 //! bias, after the city's transparent faces.
+//!
+//! Hardware renderer ([`crate::render_mode::RenderMode::Hardware`]; OS4
+//! `FUN_01033d50` with `DAT_0114c7d8 != 0`, docs/re/rendering.md "Hardware
+//! (Warp3D) renderer"): the textures are bilinear W3D textures converted at
+//! load, and the tables become W3D blend modes: tables 0, 2, 4, 9, 10 draw
+//! ONE/ONE (additive, so the 50 % average is additive too), tables 1 and 3
+//! SRC_ALPHA/ONE_MINUS_SRC_ALPHA with textures converted to carry their own
+//! alpha (smoke and shadows black with alpha = max(R, G, B), blood with
+//! saturated channels, gas pure green, dirt its colours, all alpha = max),
+//! tables 5-8 ONE/ONE with a red / amber / green / blue vertex colour. Lens
+//! flares are never occlusion-tested there; rain streaks and splashes are
+//! white lines / points at alpha 0.4.
 
 use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, view_layer};
 use crate::data::GameData;
@@ -551,7 +563,7 @@ impl Plugin for EffectsPlugin {
                 },
             )
             .configure_sets(PostUpdate, EffectsDraw.after(TransformSystems::Propagate))
-            .add_systems(PostUpdate, build_meshes.in_set(EffectsDraw));
+            .add_systems(PostUpdate, (sync_mode, build_meshes).chain().in_set(EffectsDraw));
     }
 }
 
@@ -584,7 +596,7 @@ fn update_effects(
 
 const TILE: usize = 64;
 const ATLAS_COLS: usize = 8;
-const ATLAS_ROWS: usize = 6;
+const ATLAS_ROWS: usize = 7;
 const ATLAS_W: usize = TILE * ATLAS_COLS;
 const ATLAS_H: usize = TILE * ATLAS_ROWS;
 
@@ -654,6 +666,9 @@ const GHOST_TILE: usize = 40;
 /// `Blood` and its night replacement (`FUN_01035250`).
 const BLOOD_TILE: usize = 6;
 const BLOOD_DARK_TILE: usize = 47;
+/// Hardware atlas only: `Dust` loaded black with alpha = max(R, G, B)
+/// (flag `DAT_0114c3cc`, `FUN_0104feb0`), the smoke sprite.
+const SMOKE_HW_TILE: usize = 48;
 
 /// Full-mode flare elements (`FUN_01034804`): tile, position factor f (the
 /// element sits at `c + f·(p − c)`, c = screen centre, p = flare) and
@@ -745,11 +760,45 @@ impl Effect {
     }
 }
 
+/// How the hardware renderer converts an effect texture to a W3D texture
+/// (`FUN_010024fc` flags set around the loads in `FUN_0104feb0`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HwFormat {
+    /// No flag: A1R5G5B5, colour 0 transparent.
+    Keyed,
+    /// `DAT_0114c3cc`: black, alpha = max(R, G, B) (smoke, shadows).
+    Dark,
+    /// `DAT_0114c3c8`: every non-zero channel 255, alpha = max (blood).
+    Saturated,
+    /// `DAT_0114c3c6`: pure green, alpha = max (gas).
+    Green,
+    /// `DAT_0114c3c4`: the colours, alpha = max (dirt).
+    Coverage,
+}
+
+fn hw_format(name: &str) -> HwFormat {
+    match name {
+        "Shad" => HwFormat::Dark,
+        "Blood" | "Blood.dark" => HwFormat::Saturated,
+        "Gas" => HwFormat::Green,
+        "Dirt" | "DirtSkidmark" => HwFormat::Coverage,
+        _ => HwFormat::Keyed,
+    }
+}
+
 /// Atlas of [`FILES`]: palette RGB, alpha = max(R, G, B) (the tint table's
-/// coverage) and 0 for texel 0.
-fn build_atlas(data: &GameData) -> Image {
+/// coverage) and 0 for texel 0. With `hardware`, the W3D conversions of
+/// [`HwFormat`] (5-bit channels for the A1R5G5B5 ones), the smoke tile, and
+/// bilinear filtering.
+fn build_atlas(data: &GameData, hardware: bool) -> Image {
     let mut rgba = vec![0u8; ATLAS_W * ATLAS_H * 4];
-    for (i, name) in FILES.iter().enumerate() {
+    let files = FILES.iter().copied().chain(std::iter::once("Dust"));
+    for (i, name) in files.enumerate() {
+        let format = match (hardware, i) {
+            (false, _) => None,
+            (true, SMOKE_HW_TILE) => Some(HwFormat::Dark),
+            (true, _) => Some(hw_format(name)),
+        };
         let (tx, ty) = (i % ATLAS_COLS * TILE, i / ATLAS_COLS * TILE);
         if name.is_empty() {
             for j in 0..TILE * TILE {
@@ -768,13 +817,19 @@ fn build_atlas(data: &GameData) -> Image {
         for (j, &c) in texels[..TILE * TILE].iter().enumerate() {
             let p = ((ty + j / TILE) * ATLAS_W + tx + j % TILE) * 4;
             let c = c as usize;
-            let rgb = &data.palette[c * 3..c * 3 + 3];
-            rgba[p..p + 3].copy_from_slice(rgb);
-            rgba[p + 3] = if c == 0 {
-                0
-            } else {
-                rgb[0].max(rgb[1]).max(rgb[2])
+            let rgb = [data.palette[c * 3], data.palette[c * 3 + 1], data.palette[c * 3 + 2]];
+            let max = rgb[0].max(rgb[1]).max(rgb[2]);
+            let five = |v: u8| (v & 0xf8) | (v >> 5);
+            let (out, a) = match format {
+                None => (rgb, if c == 0 { 0 } else { max }),
+                Some(HwFormat::Keyed) => (rgb.map(five), if c == 0 { 0 } else { 255 }),
+                Some(HwFormat::Dark) => ([0, 0, 0], max),
+                Some(HwFormat::Saturated) => (rgb.map(|v| if v != 0 { 255 } else { 0 }), max),
+                Some(HwFormat::Green) => ([0, 255, 0], max),
+                Some(HwFormat::Coverage) => (rgb, max),
             };
+            rgba[p..p + 3].copy_from_slice(&out);
+            rgba[p + 3] = a;
         }
     }
     let mut image = Image::new(
@@ -788,14 +843,18 @@ fn build_atlas(data: &GameData) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
+    image.sampler = ImageSampler::Descriptor(if hardware {
+        ImageSamplerDescriptor::linear()
+    } else {
+        ImageSamplerDescriptor::nearest()
+    });
     image
 }
 
 /// Effect sprite material: the atlas through one Alpha.256-like blend
 /// (`shaders/effects.wgsl`).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-#[bind_group_data(Pass)]
+#[bind_group_data(MaterialKey)]
 struct EffectMaterial {
     #[texture(0)]
     #[sampler(1)]
@@ -803,11 +862,22 @@ struct EffectMaterial {
     pass: Pass,
     /// Transparent-pass sort bias: later layers and passes draw on top.
     order: f32,
+    /// Warp3D blend modes instead of the Alpha.256 operations.
+    hardware: bool,
 }
 
-impl From<&EffectMaterial> for Pass {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct MaterialKey {
+    pass: Pass,
+    hardware: bool,
+}
+
+impl From<&EffectMaterial> for MaterialKey {
     fn from(material: &EffectMaterial) -> Self {
-        material.pass
+        MaterialKey {
+            pass: material.pass,
+            hardware: material.hardware,
+        }
     }
 }
 
@@ -844,8 +914,13 @@ impl Material for EffectMaterial {
             operation,
         };
         let (one, add) = (BlendFactor::One, BlendOperation::Add);
-        let pass = key.bind_group_data;
+        let MaterialKey { pass, hardware } = key.bind_group_data;
+        let alpha_blend = component(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha, add);
         let color = match pass {
+            // W3D_SetBlendMode(SRC_ALPHA, ONE_MINUS_SRC_ALPHA) for tables 1
+            // and 3, ONE/ONE for the others.
+            Pass::Blend(Blend::Subtract | Blend::Tint) if hardware => alpha_blend,
+            _ if hardware => component(one, one, add),
             Pass::Blend(Blend::Add) | Pass::Flare => component(one, one, add),
             Pass::Blend(Blend::Subtract) => component(one, one, BlendOperation::ReverseSubtract),
             Pass::Blend(Blend::Tint) => component(one, BlendFactor::OneMinusSrcAlpha, add),
@@ -860,7 +935,9 @@ impl Material for EffectMaterial {
             depth.depth_compare = Some(CompareFunction::Always);
         }
         if let Some(fragment) = descriptor.fragment.as_mut() {
-            if pass == Pass::Blend(Blend::Average) {
+            if hardware {
+                fragment.shader_defs.push("EFFECT_HARDWARE".into());
+            } else if pass == Pass::Blend(Blend::Average) {
                 fragment.shader_defs.push("EFFECT_AVERAGE".into());
             }
             for target in fragment.targets.iter_mut().flatten() {
@@ -891,6 +968,13 @@ struct EffectBatch {
 #[derive(Resource)]
 struct BatchMaterials(Vec<Handle<EffectMaterial>>);
 
+/// The software and the hardware atlas.
+#[derive(Resource)]
+struct Atlases {
+    software: Handle<Image>,
+    hardware: Handle<Image>,
+}
+
 /// Linear RGB of the rain colour.
 #[derive(Resource)]
 struct RainColour([f32; 4]);
@@ -901,7 +985,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<EffectMaterial>>,
 ) {
-    let atlas = images.add(build_atlas(&data));
+    let atlas = images.add(build_atlas(&data, false));
     let mut handles = Vec::new();
     for layer in 0..LAYERS {
         for pass in Pass::ORDER {
@@ -909,14 +993,39 @@ fn setup(
                 atlas: atlas.clone(),
                 pass,
                 order: 1.0e4 * (1 + layer * Pass::ORDER.len() + pass.rank()) as f32,
+                hardware: false,
             }));
         }
     }
     spawn_batches(&mut commands, &handles, 0);
     commands.insert_resource(BatchMaterials(handles));
+    commands.insert_resource(Atlases {
+        software: atlas,
+        hardware: images.add(build_atlas(&data, true)),
+    });
     let rgb = &data.palette[RAIN_COLOUR * 3..RAIN_COLOUR * 3 + 3];
     let c = Color::srgb_u8(rgb[0], rgb[1], rgb[2]).to_linear();
     commands.insert_resource(RainColour([c.red, c.green, c.blue, 1.0]));
+}
+
+/// Follow the renderer (blend modes and atlas).
+fn sync_mode(
+    mode: Res<crate::render_mode::RenderMode>,
+    batch: Option<Res<BatchMaterials>>,
+    atlases: Option<Res<Atlases>>,
+    mut materials: ResMut<Assets<EffectMaterial>>,
+) {
+    let (Some(batch), Some(atlases)) = (batch, atlases) else { return };
+    let hardware = mode.hardware();
+    let atlas = if hardware { &atlases.hardware } else { &atlases.software };
+    for handle in &batch.0 {
+        if materials.get(handle).is_some_and(|m| m.hardware != hardware)
+            && let Some(mut m) = materials.get_mut(handle)
+        {
+            m.hardware = hardware;
+            m.atlas = atlas.clone();
+        }
+    }
 }
 
 fn spawn_batches(commands: &mut Commands, materials: &[Handle<EffectMaterial>], view: usize) {
@@ -1173,11 +1282,20 @@ fn build_meshes(
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
     city: Option<Res<City>>,
+    render_mode: Res<crate::render_mode::RenderMode>,
 ) {
     // Night maps draw `Blood.dark` instead of `Blood` (`FUN_01035250`).
     let night = city.as_ref().is_some_and(|c| c.map.night);
+    let hardware = render_mode.hardware();
     let mut sources = std::mem::take(&mut flares.0);
-    let rain = rain.map_or(WHITE, |r| r.0);
+    // Warp3D: white at alpha 0.4 (`FUN_010360fc` DrawLine / DrawPoint
+    // under (7, 8)); approximated here in the additive batch as 0.4 white.
+    let rain = if hardware {
+        let c = Color::srgb(0.4, 0.4, 0.4).to_linear();
+        [c.red, c.green, c.blue, 1.0]
+    } else {
+        rain.map_or(WHITE, |r| r.0)
+    };
     // Type 11 records are flares too (AddFlare with −size: never occluded).
     for list in &effects.lists {
         for e in list {
@@ -1233,6 +1351,9 @@ fn build_meshes(
                 if night && sprite == Sprite::Single(BLOOD_TILE) {
                     sprite = Sprite::Single(BLOOD_DARK_TILE);
                 }
+                if hardware && e.tex == Tex::Dust2 && sprite == Sprite::Single(0) {
+                    sprite = Sprite::Single(SMOKE_HW_TILE);
+                }
                 if sprite == Sprite::Flare {
                     continue;
                 }
@@ -1267,7 +1388,9 @@ fn build_meshes(
                 if !on_screen || ndc.z <= 0.0 || ndc.z > 1.0 {
                     continue;
                 }
+                // Warp3D draws every flare (no overdraw test).
                 if f.occlude
+                    && !hardware
                     && let Some(city) = &city
                     && crate::objects::occluded(city, f.pos, eye)
                 {

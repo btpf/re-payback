@@ -23,14 +23,15 @@ fn spawn_parked(world: &mut World) {
     if !(mode.is_rampage() || mode.is_multiplayer()) {
         return;
     }
-    let map = world.resource::<LevelSpec>().map.clone();
-    let Ok(bytes) = world.resource::<GameData>().read(format!("Maps/{map}.vehicles")) else {
+    // `Maps/<n>.vehicles`, or next to a user map.
+    let path = world.resource::<LevelSpec>().path("vehicles");
+    let Ok(bytes) = world.resource::<GameData>().read(&path) else {
         return;
     };
     let file = match MapVehicles::parse(&bytes) {
         Ok(f) => f,
         Err(e) => {
-            warn!("Maps/{map}.vehicles: {e}");
+            warn!("{}: {e}", path.display());
             return;
         }
     };

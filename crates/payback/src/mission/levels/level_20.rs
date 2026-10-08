@@ -556,8 +556,6 @@ impl Level20 {
         // "You tripped the alarm! ..."
         s.say(2, 3);
         s.set_wanted_level(6);
-        // TODO(api): the original passes an audible range of 19000 as the
-        // 8th AddSound argument; `Script::add_sound` has no range parameter.
         s.add_sound(
             0,
             0x40,
@@ -566,6 +564,7 @@ impl Level20 {
             0x2b11 as f32,
             0xc800,
             0xc800,
+            19000,
         );
     }
 

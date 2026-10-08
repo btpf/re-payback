@@ -11,13 +11,20 @@
 //!
 //! Debug: `--frontend-screen <name>` opens a screen directly (main, game,
 //! levelselect, complete, gameover, gamecomplete, name, load, save,
-//! replays, credits, language, controls, cd, rampage, highscore,
-//! replayinfo (with `--replay-file <name in Saves/Replays>`); `loading`
-//! starts level 0.0
-//! through the loading panel; with `--map`, `pause` opens the pause menu
-//! after 3 s and `levelend` completes the level at once).
+//! replays, credits, language, controls, controls-redefine, cd, graphics,
+//! rampage, multiplayer, mpresults, highscore, replayinfo (with
+//! `--replay-file <name in Saves/Replays>`); `loading` starts level 0.0
+//! through the loading panel (`--load-delay <ms>` slows its stages down);
+//! with `--map`, `pause` opens the pause menu after 3 s (on item
+//! `--pause-item <n>`, e.g. 5 = Graphics options) and `levelend`
+//! completes the level at once).
+//!
+//! A gamepad works the menus too: d-pad or left stick, A or Start to
+//! select, B to back out; Start pauses a level.
 
 pub mod assets;
+pub mod bindings;
+pub mod display;
 mod levels;
 mod menus;
 mod misc;
@@ -27,6 +34,7 @@ pub mod progress;
 mod rampage;
 mod replays;
 pub mod ui;
+pub mod usermaps;
 
 use crate::audio::{FxVolume, Sound, SoundPos};
 use crate::camera::GameCamera;
@@ -34,7 +42,7 @@ use crate::data::GameData;
 use crate::hud::icons::HudIcons;
 use crate::hud::paint::{CANVAS_H, Painter, blank, canvas_width};
 use crate::hud::{Language, Texts};
-use crate::level::{AppState, GameMode, LevelSpec};
+use crate::level::{AppState, GameMode, LevelLoad, LevelSpec};
 use crate::rampage::ScoreHighWater;
 use crate::replay::{LastReplay, PlayRequest, ReplayState};
 use payback_formats::replay::Replay;
@@ -78,6 +86,8 @@ struct Frontend {
     needs_init: bool,
     /// The canvases are spawned (the `Layers` resource may lag a frame).
     layers_open: bool,
+    /// Gamepads' last left-stick directions (menu navigation).
+    stick: Vec<(Entity, IVec2)>,
 }
 
 /// The two canvases and their nodes, alive while a menu is shown.
@@ -108,11 +118,15 @@ struct Launch {
 
 impl Launch {
     fn story(city: u8, level: u8) -> Launch {
+        Launch::on(LevelSpec {
+            map: city.to_string(),
+            level,
+        })
+    }
+
+    fn on(spec: LevelSpec) -> Launch {
         Launch {
-            spec: LevelSpec {
-                map: city.to_string(),
-                level,
-            },
+            spec,
             mode: GameMode::Story,
             replay: None,
             back_to_game: false,
@@ -164,6 +178,8 @@ impl Plugin for FrontendPlugin {
             .init_resource::<ReplayReturn>()
             .init_resource::<model::CurrentModel>()
             .init_resource::<model::ModelCache>()
+            .init_resource::<usermaps::UserMaps>()
+            .add_plugins(display::DisplayPlugin)
             .add_systems(Startup, setup)
             .add_systems(PostStartup, default_ui_camera)
             .add_systems(OnEnter(AppState::Frontend), enter_frontend)
@@ -190,6 +206,7 @@ impl Plugin for FrontendPlugin {
 
 fn setup(mut commands: Commands, data: Res<GameData>, mut fe: ResMut<Frontend>) {
     commands.insert_resource(FrontendIcons::load(&data));
+    commands.insert_resource(usermaps::UserMaps::scan(&data));
     // Phrases/Global.<language>.phrases, keeping the middle token.
     let mut langs: Vec<String> = std::fs::read_dir(data.root.join("Phrases"))
         .map(|d| {
@@ -242,8 +259,10 @@ fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
         }
         "credits" => Box::new(misc::Credits::new(2200, 2, true, 0x2e, 100)),
         "language" => Box::new(misc::LanguageChooser::new(cx)),
-        "controls" => Box::new(misc::ControlSetup::new()),
+        "controls" => Box::new(misc::ControlSetup::new(cx)),
+        "controls-redefine" => Box::new(misc::ControlSetup::redefining(cx)),
         "cd" => Box::new(misc::CdSetup::new()),
+        "graphics" => Box::new(display::GraphicsSetup::new(cx.settings)),
         _ => return None,
     })
 }
@@ -382,6 +401,7 @@ fn watch_level_end(
     back: Res<ReplayReturn>,
     time: Res<Time<Real>>,
     game: Res<crate::multiplayer::Match>,
+    user_maps: Res<usermaps::UserMaps>,
     mut pending: ResMut<PendingEnd>,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -408,13 +428,14 @@ fn watch_level_end(
     for &outcome in outcomes.read() {
         if pending.0.is_none() {
             let city = spec
-                .map
-                .parse::<usize>()
-                .ok()
+                .city()
+                .map(|c| c as usize)
                 .filter(|&c| c < 3)
                 .map(|c| (c, spec.level.min(1) as usize));
             let rampage = match *mode {
-                GameMode::Rampage { police } => city.map(|(c, _)| (c, police, high.0)),
+                GameMode::Rampage { police } => {
+                    usermaps::city_of(&user_maps.0, &spec).map(|c| (c, police, high.0))
+                }
                 _ => None,
             };
             let mp = mode
@@ -440,7 +461,41 @@ fn watch_level_end(
     }
 }
 
-fn gather_input(keys: &ButtonInput<KeyCode>, typed: &mut MessageReader<KeyboardInput>, input: &mut Input) {
+/// The menu keys from the keyboard and every connected gamepad. The left
+/// stick counts as a press when it leaves the centre (`stick` = its last
+/// direction per pad).
+fn gather_input(
+    keys: &ButtonInput<KeyCode>,
+    typed: &mut MessageReader<KeyboardInput>,
+    pads: &Query<(Entity, &Gamepad)>,
+    stick: &mut Vec<(Entity, IVec2)>,
+    input: &mut Input,
+) {
+    input.keys.extend(keys.get_just_pressed().copied());
+    let mut seen = Vec::new();
+    for (e, pad) in pads {
+        input.pad.extend(pad.get_just_pressed().copied());
+        input.left |= pad.just_pressed(GamepadButton::DPadLeft);
+        input.right |= pad.just_pressed(GamepadButton::DPadRight);
+        input.up |= pad.just_pressed(GamepadButton::DPadUp);
+        input.down |= pad.just_pressed(GamepadButton::DPadDown);
+        let ok = pad.any_just_pressed([GamepadButton::South, GamepadButton::Start]);
+        input.fire |= ok;
+        input.enter |= ok;
+        input.back |= pad.just_pressed(GamepadButton::East);
+        let s = pad.left_stick();
+        let dir = IVec2::new(
+            if s.x > 0.5 { 1 } else if s.x < -0.5 { -1 } else { 0 },
+            if s.y > 0.5 { 1 } else if s.y < -0.5 { -1 } else { 0 },
+        );
+        let prev = stick.iter().find(|p| p.0 == e).map_or(IVec2::ZERO, |p| p.1);
+        input.left |= dir.x < 0 && prev.x >= 0;
+        input.right |= dir.x > 0 && prev.x <= 0;
+        input.up |= dir.y > 0 && prev.y <= 0;
+        input.down |= dir.y < 0 && prev.y >= 0;
+        seen.push((e, dir));
+    }
+    *stick = seen;
     input.left |= keys.just_pressed(KeyCode::ArrowLeft);
     input.right |= keys.just_pressed(KeyCode::ArrowRight);
     input.up |= keys.just_pressed(KeyCode::ArrowUp);
@@ -506,6 +561,11 @@ struct Env<'w, 's> {
     /// the full-window overlay in split screen.
     game_cam: Query<'w, 's, Entity, (With<IsDefaultUiCamera>, With<Camera3d>)>,
     current: ResMut<'w, model::CurrentModel>,
+    level_load: Option<Res<'w, LevelLoad>>,
+    pads: Query<'w, 's, (Entity, &'static Gamepad)>,
+    user_maps: Res<'w, usermaps::UserMaps>,
+    display: Res<'w, display::Display>,
+    render_mode: Option<Res<'w, crate::render_mode::RenderMode>>,
 }
 
 /// The menu loop: input, ticks, requests, drawing.
@@ -520,7 +580,8 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     let intro_on = env.intro.is_some() || fe.wait_intro;
     let playing = *env.state.get() == AppState::Playing;
 
-    // Esc in a level opens the pause menu (`FUN_0101a7dc`).
+    // Esc (or a gamepad's Start) in a level opens the pause menu
+    // (`FUN_0101a7dc`).
     let debug_pause = playing
         && !fe.debug_paused
         && crate::arg("--frontend-screen").as_deref() == Some("pause")
@@ -530,11 +591,17 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         && env.pending_end.0.is_none()
         && !intro_on
         && !env.replay.playing()
-        && (env.keys.just_pressed(KeyCode::Escape) || debug_pause)
+        && (env.keys.just_pressed(KeyCode::Escape)
+            || env.pads.iter().any(|(_, p)| p.just_pressed(GamepadButton::Start))
+            || debug_pause)
     {
         fe.debug_paused = true;
         env.virtual_time.pause();
-        fe.stack.push(Box::new(menus::PauseMenu::new()));
+        let menu = match crate::arg("--pause-item").and_then(|v| v.parse().ok()).filter(|_| debug_pause) {
+            Some(i) => menus::PauseMenu::at(i, &env.settings),
+            None => menus::PauseMenu::new(),
+        };
+        fe.stack.push(Box::new(menu));
         fe.pending = Input::default();
         fe.acc = 0.0;
         env.typed.clear();
@@ -553,6 +620,9 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         story: matches!(*env.mode, GameMode::Story),
         last_replay: env.last_replay.0.as_ref(),
         mp_totals: &mut env.mp_totals,
+        user_maps: &env.user_maps.0,
+        display: &env.display,
+        hardware: env.render_mode.as_deref().is_some_and(|m| m.hardware()),
         sfx: Vec::new(),
         requests: Vec::new(),
     };
@@ -576,7 +646,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     }
 
     let mut pending = std::mem::take(&mut fe.pending);
-    gather_input(&env.keys, &mut env.typed, &mut pending);
+    gather_input(&env.keys, &mut env.typed, &env.pads, &mut fe.stick, &mut pending);
 
     // Ticks at 30 Hz of real time (virtual time is paused in the pause
     // menu).
@@ -628,13 +698,13 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         match r {
             Request::StartLevel { city, level } => fe.loading = Some((Launch::story(city, level), 0)),
             Request::StartRampage { city, police } => {
-                let mut l = Launch::story(city, 0);
+                let mut l = Launch::on(usermaps::city_spec(cx.user_maps, city as usize, 0));
                 l.mode = GameMode::Rampage { police };
                 fe.loading = Some((l, 0));
             }
             Request::StartMultiplayer { city } => {
                 let devices = multiplayer::active_devices(cx.settings);
-                let mut l = Launch::story(city, 0);
+                let mut l = Launch::on(usermaps::city_spec(cx.user_maps, city as usize, 0));
                 l.mode = GameMode::Multiplayer {
                     players: devices.len() as u8,
                     kills: cx.settings.required_kills.clamp(1, 50),
@@ -679,11 +749,11 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                 // check at the top of the game menu (`FUN_0102ca08`).
                 if let GameMode::Rampage { police } = *env.mode {
                     if !env.replay.playing() {
-                        let city = env.spec.map.parse::<usize>().ok().filter(|&c| c < 3);
+                        let city = usermaps::city_of(&env.user_maps.0, &env.spec);
                         env.commands.insert_resource(LevelResult {
                             outcome: Some(LevelOutcome::MatchOver),
                             minutes: 0,
-                            city: city.map(|c| (c, 0)),
+                            city: city.filter(|&c| c < 3).map(|c| (c, 0)),
                             rampage: city.map(|c| (c, police, env.high.0)),
                             back_to_game: false,
                             mp: None,
@@ -707,11 +777,20 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         return;
     }
 
-    // Loading panel shown for a couple of frames, then the level loads
-    // (the last frame stays on screen while `load_level` runs).
+    // Loading panel: once it is up, the level loads one stage per frame
+    // (`level::LevelLoad`) while the bar fills, then the game starts.
+    let mut pieces = 0;
     if let Some((launch, n)) = &mut fe.loading {
         *n += 1;
-        if *n == 3 {
+        if let Some(l) = env.level_load.as_deref().filter(|l| l.spec == launch.spec) {
+            pieces = l.progress.as_ref().map_or(0, |p| p.pieces());
+            if l.done() && *n > 2 {
+                env.next.set(AppState::Playing);
+            }
+        }
+        if *n == 2 {
+            env.commands
+                .insert_resource(LevelLoad::new(&env.data, launch.spec.clone(), true));
             *env.spec = launch.spec.clone();
             *env.mode = launch.mode;
             if let Some(d) = &launch.devices {
@@ -722,7 +801,6 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                 cx.profile.played = true;
             }
             env.play_request.0 = launch.replay.take();
-            env.next.set(AppState::Playing);
         }
     }
 
@@ -763,9 +841,10 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
             fe: fe_icons,
             w: w as i32,
             frame: fe.frame,
+            hardware: cx.hardware,
         };
         match top {
-            _ if loading => draw_loading(&mut ui),
+            _ if loading => draw_loading(&mut ui, pieces),
             Some(top) => top.draw(&mut ui, &cx),
             None => {}
         }
@@ -792,9 +871,10 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
 }
 
 /// InitProgress (`FUN_01042ff8`): clear a box round the centre and draw
-/// `Loading` with its empty segments. The load itself is synchronous, so
-/// no `LoadingPiece` is filled in.
-fn draw_loading(ui: &mut Ui) {
+/// `Loading` with its empty slots; DrawProgress (`FUN_01042688`) puts a
+/// `LoadingPiece` in each of the first `pieces` slots at
+/// (cx−0x2e+8i, cy+2).
+fn draw_loading(ui: &mut Ui, pieces: usize) {
     let (cx, cy) = ((ui.w - 1) / 2, (H - 1) / 2);
     for y in cy - 0x16..=cy + 0x17 {
         for x in cx - 0x36..=cx + 0x35 {
@@ -808,5 +888,8 @@ fn draw_loading(ui: &mut Ui) {
     }
     let fe = ui.fe;
     ui.icon(&fe.loading, cx - 0x2e, cy - 0x11);
+    for i in 0..pieces.min(12) as i32 {
+        ui.icon(&fe.piece, cx - 0x2e + 8 * i, cy + 2);
+    }
 }
 

@@ -66,6 +66,9 @@ pub fn run_triggers(world: &mut World) {
     let Some(player) = player_view(world) else {
         return;
     };
+    // `DAT_0114c628 = 1` before `Trigger_Update` every frame (OS4 ~49717,
+    // 68k ~127806).
+    world.resource_mut::<MissionState>().exit_toggle = true;
     let fired = evaluate(world, &player);
 
     let mut complete = false;
@@ -357,8 +360,10 @@ fn condition(
         AT_POINT_400 => p.controlled && at(0x400),
         RC_THROTTLE => reported(RC_THROTTLE),
         // Completion reported by the AI when the ordered action finishes.
-        ACTOR_GOTO_VANISH | ACTOR_GOTO | ACTOR_GOTO_15 | ACTOR_BOARDS_PLAYER
-        | ACTOR_BOARDS_ACTOR => actor_reported(t.kind),
+        // An arrival fires the actor's 0x17 and 0x44 triggers alike (68k
+        // `FUN_000a6640`); the AI reports it as 0x17.
+        ACTOR_GOTO | ACTOR_GOTO_15 => actor_reported(ACTOR_GOTO),
+        ACTOR_GOTO_VANISH | ACTOR_BOARDS_PLAYER | ACTOR_BOARDS_ACTOR => actor_reported(t.kind),
         GARAGE => {
             let centre = IVec2::new(t.a << 11 | 0x400, t.b << 11 | 0x400);
             garage_door(world, t, within(p.pos, centre, 6 * 0x800));

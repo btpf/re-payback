@@ -12,7 +12,9 @@
 //! is no level script, and crimes, the wanted level and police are off.
 //!
 //! Controls per player (setup screen; `--multiplayer` uses keyboard sets
-//! 1..n):
+//! 1..n). The defaults below can be redefined in the control setup
+//! (`frontend::bindings`, columns "Multiplayer – Keyboard n" and
+//! "Multiplayer – Joystick n"; a joystick's stick and d-pad always steer):
 //!
 //! | Set | Steer / accelerate / reverse | Fire | Brake | In/out | Weapon −/+ |
 //! |---|---|---|---|---|---|
@@ -23,7 +25,9 @@
 //! | Joystick n | left stick or d-pad (up = accelerate), RT / LT | South (A) | East (B) | North (Y) | LB / RB |
 //!
 //! Debug: `--multiplayer <2..4> --map <city> [--kills <n>]` starts a match
-//! directly.
+//! directly. `--hijack-test` adds scripted input: player 1 gets into the
+//! nearest car, then player 2 is put beside it and hijacks it (the victim
+//! is thrown out and keeps playing on foot; logged as `hijack test:`).
 
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
@@ -70,76 +74,10 @@ impl Device {
     }
 }
 
-/// One keyboard key set.
-pub struct KeySet {
-    /// Short description for the setup screen (F fire, B brake, In
-    /// in/out of vehicles, W previous/next weapon).
-    pub hint: &'static str,
-    pub left: KeyCode,
-    pub right: KeyCode,
-    pub accel: KeyCode,
-    pub reverse: KeyCode,
-    pub fire: KeyCode,
-    pub brake: KeyCode,
-    pub in_out: KeyCode,
-    pub prev: KeyCode,
-    pub next: KeyCode,
-}
-
-/// Keyboard key sets, so that up to four players can share a keyboard.
-pub const KEY_SETS: [KeySet; 4] = [
-    KeySet {
-        hint: "Arrows F:RCtrl B:RShift In:Enter W:Del/PgDn",
-        left: KeyCode::ArrowLeft,
-        right: KeyCode::ArrowRight,
-        accel: KeyCode::ArrowUp,
-        reverse: KeyCode::ArrowDown,
-        fire: KeyCode::ControlRight,
-        brake: KeyCode::ShiftRight,
-        in_out: KeyCode::Enter,
-        prev: KeyCode::Delete,
-        next: KeyCode::PageDown,
-    },
-    KeySet {
-        hint: "WASD F:LCtrl B:LShift In:Tab W:Q/E",
-        left: KeyCode::KeyA,
-        right: KeyCode::KeyD,
-        accel: KeyCode::KeyW,
-        reverse: KeyCode::KeyS,
-        fire: KeyCode::ControlLeft,
-        brake: KeyCode::ShiftLeft,
-        in_out: KeyCode::Tab,
-        prev: KeyCode::KeyQ,
-        next: KeyCode::KeyE,
-    },
-    KeySet {
-        hint: "Numpad 8456 F:0 B:. In:Enter W:-/+",
-        left: KeyCode::Numpad4,
-        right: KeyCode::Numpad6,
-        accel: KeyCode::Numpad8,
-        reverse: KeyCode::Numpad5,
-        fire: KeyCode::Numpad0,
-        brake: KeyCode::NumpadDecimal,
-        in_out: KeyCode::NumpadEnter,
-        prev: KeyCode::NumpadSubtract,
-        next: KeyCode::NumpadAdd,
-    },
-    KeySet {
-        hint: "IJKL F:Space B:N In:H W:U/O",
-        left: KeyCode::KeyJ,
-        right: KeyCode::KeyL,
-        accel: KeyCode::KeyI,
-        reverse: KeyCode::KeyK,
-        fire: KeyCode::Space,
-        brake: KeyCode::KeyN,
-        in_out: KeyCode::KeyH,
-        prev: KeyCode::KeyU,
-        next: KeyCode::KeyO,
-    },
-];
-
-/// Setup-screen hint for joystick players.
-pub const JOYSTICK_HINT: &str = "Stick/D-pad F:A B:B In:Y W:LB/RB";
+/// Keyboard key sets, so that up to four players can share a keyboard
+/// (the bindings are `Controls::mp_keys`, redefinable in the control
+/// setup).
+pub const KEY_SETS: usize = 4;
 
 /// Devices of the players in the game, by player number.
 #[derive(Resource, Clone, Debug)]
@@ -200,6 +138,13 @@ impl Plugin for MultiplayerPlugin {
             .add_systems(PreUpdate, read_devices.run_if(is_multiplayer))
             .add_systems(
                 FixedUpdate,
+                hijack_test
+                    .run_if(is_multiplayer)
+                    .run_if(|| std::env::args().any(|a| a == "--hijack-test"))
+                    .before(crate::sim::people::PeopleThink),
+            )
+            .add_systems(
+                FixedUpdate,
                 deaths_and_respawns
                     .run_if(is_multiplayer)
                     .after(crate::sim::score::track_attackers),
@@ -233,7 +178,7 @@ pub fn pick_start(starts: &StartPoints, avoid: &[Vec3], rng: &mut Rng) -> Option
 }
 
 /// The next carried weapon slot from the current one in direction `d`.
-fn cycle_weapon(ars: &Arsenal, d: i32) -> Option<u8> {
+pub(crate) fn cycle_weapon(ars: &Arsenal, d: i32) -> Option<u8> {
     let cur = ars.current as i32;
     (1..8)
         .map(|k| (cur + d * k).rem_euclid(8) as usize)
@@ -242,15 +187,26 @@ fn cycle_weapon(ars: &Arsenal, d: i32) -> Option<u8> {
 }
 
 /// Each player's device into their controls (single player:
-/// `people::read_keyboard`).
+/// `people::read_keyboard`), through the bindings of the player's key set
+/// or of the player's gamepad column.
 fn read_devices(
     mode: Res<GameMode>,
     devices: Res<MpDevices>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<(Entity, &Gamepad)>,
     players: Query<(&Obj, &Arsenal), With<CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
 ) {
+    use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
+    let defaults;
+    let controls = match &settings {
+        Some(s) => &s.controls,
+        None => {
+            defaults = b::Controls::default();
+            &defaults
+        }
+    };
     let mut pads: Vec<(Entity, &Gamepad)> = pads.iter().collect();
     pads.sort_by_key(|p| p.0);
     for p in 0..mode.players() {
@@ -266,18 +222,20 @@ fn read_devices(
                 input.brake = false;
             }
             Device::Keyboard(set) => {
-                let k = &KEY_SETS[set as usize % KEY_SETS.len()];
-                input.left = keys.pressed(k.left);
-                input.right = keys.pressed(k.right);
-                input.accel = keys.pressed(k.accel);
-                input.reverse = keys.pressed(k.reverse);
-                input.fire = keys.pressed(k.fire);
-                input.brake = keys.pressed(k.brake);
-                input.use_pressed |= keys.just_pressed(k.in_out);
-                if keys.just_pressed(k.prev) {
+                let k = &controls.mp_keys[set as usize % KEY_SETS];
+                let held = |a: usize| key_held(&keys, k[a], false);
+                let just = |a: usize| key_just(&keys, k[a], false);
+                input.left = held(b::LEFT);
+                input.right = held(b::RIGHT);
+                input.accel = held(b::ACCELERATE);
+                input.reverse = held(b::REVERSE);
+                input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+                input.brake = held(b::BRAKE);
+                input.use_pressed |= just(b::IN_OUT);
+                if just(b::PREV_WEAPON) {
                     step = -1;
                 }
-                if keys.just_pressed(k.next) {
+                if just(b::NEXT_WEAPON) {
                     step = 1;
                 }
             }
@@ -286,18 +244,20 @@ fn read_devices(
                     *input = Default::default();
                     continue;
                 };
+                let t = &controls.mp_pad[p.min(3)];
+                let held = |a: usize| pad_held(g, t[a]);
                 let s = g.left_stick() + g.dpad();
-                input.left = s.x < -0.5;
-                input.right = s.x > 0.5;
-                input.accel = s.y > 0.5 || g.pressed(GamepadButton::RightTrigger2);
-                input.reverse = s.y < -0.5 || g.pressed(GamepadButton::LeftTrigger2);
-                input.fire = g.pressed(GamepadButton::South);
-                input.brake = g.pressed(GamepadButton::East);
-                input.use_pressed |= g.just_pressed(GamepadButton::North);
-                if g.just_pressed(GamepadButton::LeftTrigger) {
+                input.left = s.x < -0.5 || held(b::LEFT);
+                input.right = s.x > 0.5 || held(b::RIGHT);
+                input.accel = s.y > 0.5 || held(b::ACCELERATE);
+                input.reverse = s.y < -0.5 || held(b::REVERSE);
+                input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+                input.brake = held(b::BRAKE);
+                input.use_pressed |= pad_just(g, t[b::IN_OUT]);
+                if pad_just(g, t[b::PREV_WEAPON]) {
                     step = -1;
                 }
-                if g.just_pressed(GamepadButton::RightTrigger) {
+                if pad_just(g, t[b::NEXT_WEAPON]) {
                     step = 1;
                 }
             }
@@ -307,6 +267,101 @@ fn read_devices(
             if let Some(slot) = ars.and_then(|a| cycle_weapon(a, step)) {
                 input.weapon_pressed = Some(slot);
             }
+        }
+    }
+}
+
+/// `--hijack-test`: player 1 presses in/out 10 ticks after both players
+/// appear and walks to the
+/// nearest car; once he drives it, player 2 is moved next to its door and
+/// presses in/out. Logs who drives what each 25 ticks until tick 600.
+#[allow(clippy::type_complexity)]
+fn hijack_test(
+    mut tick: Local<u32>,
+    mut stage: Local<u8>,
+    trig: Res<crate::sim::Trig>,
+    library: Option<Res<ObjectLibrary>>,
+    mut inputs: ResMut<PlayerInputs>,
+    mut q: Query<
+        (
+            Entity,
+            &mut Obj,
+            Has<Person>,
+            Option<&crate::sim::boarding::Boarding>,
+            Option<&crate::vehicles::Vehicle>,
+            Option<&Person>,
+        ),
+        With<CameraTarget>,
+    >,
+    cars: Query<(&Obj, &crate::vehicles::Vehicle), Without<CameraTarget>>,
+) {
+    let Some(library) = library else { return };
+    // Count from the first tick both players exist.
+    if q.iter().filter(|(_, o, ..)| o.player.is_some()).count() < 2 && *tick == 0 {
+        return;
+    }
+    *tick += 1;
+    let t = *tick;
+    if t == 10 {
+        inputs.0[0].use_pressed = true;
+        info!("hijack test: player 1 presses in/out");
+    }
+    // Player 1 is kept at the door of the car he goes for (no long walk).
+    for (_, mut o, _, boarding, ..) in &mut q {
+        let Some((v, veh)) = boarding.and_then(|b| cars.get(b.vehicle).ok()) else {
+            continue;
+        };
+        if o.player == Some(0) {
+            let info = &library.model(v.model).info;
+            let door = crate::sim::boarding::door_point(
+                &trig,
+                v,
+                info.radius,
+                crate::sim::boarding::door_y(veh.kind, info.max_y),
+                192,
+            );
+            o.pos = door;
+            o.prev_pos = door;
+        }
+    }
+    let car = q
+        .iter()
+        .find(|(_, o, foot, ..)| !foot && o.player == Some(0))
+        .map(|(e, o, _, _, v, _)| (e, o.clone(), v.map_or(0, |v| v.kind)));
+    if *stage == 0 {
+        if let Some((_, v, kind)) = &car {
+            let info = &library.model(v.model).info;
+            let door = crate::sim::boarding::door_point(
+                &trig,
+                v,
+                info.radius,
+                crate::sim::boarding::door_y(*kind, info.max_y),
+                192 * 3,
+            );
+            for (_, mut o, foot, ..) in &mut q {
+                if foot && o.player == Some(1) {
+                    o.pos = door;
+                    o.prev_pos = door;
+                }
+            }
+            inputs.0[1].use_pressed = true;
+            info!("hijack test: tick {t}: player 1 drives {:?}; player 2 goes for it", car.as_ref().map(|c| c.0));
+            *stage = 1;
+        }
+    }
+    if t % 25 == 0 && t <= 600 {
+        for (e, o, foot, boarding, _, p) in &q {
+            let boarding = boarding.is_some();
+            info!(
+                "hijack test: tick {t}: player {:?} {}{} {e:?} at {:?} state {:?} health {} stun {}",
+                o.player.map(|n| n + 1),
+                if foot { "on foot" } else { "driving" },
+                if boarding { " (boarding)" } else { "" },
+                o.pos,
+                o.state,
+                o.health,
+                p.map_or(0, |p| p.stun),
+            );
         }
     }
 }
@@ -455,18 +510,6 @@ mod tests {
             assert_eq!(Device::parse(&d.name()), Some(d));
         }
         assert_eq!(Device::parse("kb5"), None);
-    }
-
-    #[test]
-    fn key_sets_distinct() {
-        let mut all: Vec<KeyCode> = KEY_SETS
-            .iter()
-            .flat_map(|k| [k.left, k.right, k.accel, k.reverse, k.fire, k.brake, k.in_out, k.prev, k.next])
-            .collect();
-        let n = all.len();
-        all.sort_by_key(|k| format!("{k:?}"));
-        all.dedup();
-        assert_eq!(all.len(), n, "a key is in two sets");
     }
 
     #[test]

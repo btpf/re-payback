@@ -62,9 +62,11 @@ pub struct MissionState {
     pub forced_traffic: i32,
     /// Script id for dropped bombs (`0x11a77e`), -1 = none.
     pub projectile_id: i32,
-    /// Door side toggle of `Ped_ExitVehicle` (`0x34c1b0`). The original
-    /// never resets it; here it restarts with each level so a level plays
-    /// (and replays) the same however it was reached.
+    /// Door side toggle of `Ped_ExitVehicle` (68k `0x34c1b0`, OS4
+    /// `DAT_0114c628`; true = 1). The main loop sets it to 1 right before
+    /// each frame's trigger update (68k `FUN_000ec686` ~127806, OS4
+    /// ~49717) and at level start, and every exit flips it first, so the
+    /// first alternating exit of a frame is on the driver's door side.
     pub exit_toggle: bool,
 }
 
@@ -83,7 +85,7 @@ impl Default for MissionState {
             finished: false,
             forced_traffic: -1,
             projectile_id: -1,
-            exit_toggle: false,
+            exit_toggle: true,
         }
     }
 }

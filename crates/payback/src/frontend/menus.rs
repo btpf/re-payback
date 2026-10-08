@@ -6,11 +6,14 @@ use super::multiplayer::MultiplayerSetup;
 use super::misc::{CdSetup, ControlSetup, Credits, LanguageChooser, LoadGame, Message, SaveGame, TextEntry};
 use super::rampage::RampageSetup;
 use super::replays::{ReplayInfo, ReplayList};
+use super::display::{self, GraphicsSetup, ITEMS};
 use super::progress::Profile;
 use super::ui::*;
 
-/// Option models by main-menu item (`DAT_0117b6f8[0..9]`).
-const MAIN_MODELS: [&str; 9] = [
+/// Option models by main-menu item (`DAT_0117b6f8[0..9]`), plus item 8
+/// "Graphics options" (not in the original, whose PaybackSetup launcher
+/// chose the screen mode and renderer) with the pause menu's model.
+const MAIN_MODELS: [&str; 10] = [
     "options/joystick.obj",
     "options/disk.obj",
     "options/moviereel.obj",
@@ -19,6 +22,7 @@ const MAIN_MODELS: [&str; 9] = [
     "options/controlsetup.obj",
     "options/world.obj",
     "options/moviereel.obj",
+    "options/questionmarks.obj",
     "options/amiga.obj",
 ];
 
@@ -114,7 +118,8 @@ impl MainMenu {
             5 => 2454,
             6 => 2132,
             7 => 2109,
-            8 => 2130,
+            8 => 1600,
+            9 => 2130,
             i => 2090 + i as u32,
         }
     }
@@ -152,7 +157,7 @@ impl Screen for MainMenu {
         }
         if input.left || input.right {
             let d = if input.right { 1 } else { -1 };
-            self.sel = (self.sel as i32 + d).rem_euclid(9) as usize;
+            self.sel = (self.sel as i32 + d).rem_euclid(MAIN_MODELS.len() as i32) as usize;
             self.obj.change(MAIN_MODELS[self.sel], d);
             cx.sound(Sfx::Move);
             return Step::Stay;
@@ -181,8 +186,9 @@ impl Screen for MainMenu {
             2 => Step::Push(Box::new(ReplayList::new(cx))),
             3 => Step::Push(Box::new(Credits::new(2200, 2, true, 0x2e, 100))),
             4 => Step::Push(Box::new(CdSetup::new())),
-            5 => Step::Push(Box::new(ControlSetup::new())),
+            5 => Step::Push(Box::new(ControlSetup::new(cx))),
             6 => Step::Push(Box::new(LanguageChooser::new(cx))),
+            8 => Step::Push(Box::new(GraphicsSetup::new(cx.settings))),
             _ => {
                 self.confirm = Some(Confirm::default());
                 Step::Stay
@@ -357,7 +363,7 @@ fn replay_file_name(name: &str) -> Option<String> {
 impl Screen for GameMenu {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         if let Some((city, police, score)) = self.high_score.take() {
-            if crate::rampage::load_scores(cx.data, city).rank(police as usize, score).is_some() {
+            if super::usermaps::load_scores(cx, city).rank(police as usize, score).is_some() {
                 self.wait = GameWait::ScoreName(city, police, score);
                 let name = cx.profile.name.clone();
                 return Step::Push(Box::new(TextEntry::new(cx.g(1611), &name, 25)));
@@ -445,9 +451,9 @@ impl Screen for GameMenu {
                     Outcome::Text(n) => n,
                     _ => cx.profile.name.clone(),
                 };
-                let mut table = crate::rampage::load_scores(cx.data, city);
+                let mut table = super::usermaps::load_scores(cx, city);
                 if table.insert(police as usize, &name, score).is_some() {
-                    crate::rampage::save_scores(city, &table);
+                    super::usermaps::save_scores(cx, city, &table);
                 }
                 Step::Stay
             }
@@ -496,7 +502,8 @@ pub struct PauseMenu {
     sel: usize,
     obj: OptionObj,
     confirm: Option<Confirm>,
-    /// Graphics options sub-item.
+    /// Graphics options sub-item (index into [`display::ITEMS`]; the
+    /// original has Gouraud shading and Rotating view, `local_5c`).
     sub: usize,
     /// Rotation of the person model (`[3] += 0x20`).
     person: i32,
@@ -516,11 +523,24 @@ impl PauseMenu {
         }
     }
 
+    /// Opened on item `sel` (debug `--pause-item`).
+    pub fn at(sel: usize, settings: &super::progress::Settings) -> PauseMenu {
+        let sel = sel.min(PAUSE_MODELS.len() - 1);
+        PauseMenu {
+            sel,
+            obj: OptionObj::new(PAUSE_MODELS[sel], 600, 0x1964).slow(),
+            sub: display::first_item(settings),
+            ..PauseMenu::new()
+        }
+    }
+
     fn label(&self, cx: &Ctx) -> String {
         let s = cx.settings.clone();
         let on_off = |b: bool| cx.g(if b { 2081 } else { 2080 });
         match self.sel {
             2 => format!("{}{}", cx.g(2052), cx.g(2060 + s.fx as u32)),
+            // Hardware: always the base phrase 0x820 "Off" (drawn dimmed).
+            3 if cx.hardware => format!("{}{}", cx.g(2053), cx.g(2080)),
             3 => format!("{}{}", cx.g(2053), on_off(s.motion_blur)),
             5 => cx.g(1600),
             i => cx.g(2050 + i as u32),
@@ -552,7 +572,7 @@ impl Screen for PauseMenu {
         if input.left || input.right {
             let d = if input.right { 1 } else { -1 };
             self.sel = (self.sel as i32 + d).rem_euclid(6) as usize;
-            self.sub = 0;
+            self.sub = display::first_item(cx.settings);
             self.obj.change(PAUSE_MODELS[self.sel], d);
             cx.sound(Sfx::Move);
             return Step::Stay;
@@ -566,7 +586,7 @@ impl Screen for PauseMenu {
                 cx.sound(Sfx::Move);
             }
             5 if input.up || input.down => {
-                self.sub ^= 1;
+                self.sub = display::step_item(self.sub, if input.down { 1 } else { -1 }, s);
                 cx.sound(Sfx::Move);
             }
             _ if !input.fire => {}
@@ -583,17 +603,17 @@ impl Screen for PauseMenu {
                 s.fx = (s.fx + 1) % 3;
                 cx.sound(Sfx::Select);
             }
+            // Refused under hardware rendering (case 3: `DAT_0114c7d8`).
+            3 if s.hardware || cx.hardware => cx.sound(Sfx::Refuse),
             3 => {
                 s.motion_blur = !s.motion_blur;
                 cx.sound(Sfx::Select);
             }
             5 => {
-                if self.sub == 0 {
-                    s.gouraud = !s.gouraud;
-                } else {
-                    s.rotating_view = !s.rotating_view;
+                if !ITEMS[self.sub].selectable(s) {
+                    self.sub = display::first_item(s);
                 }
-                cx.sound(Sfx::Select);
+                ITEMS[self.sub].activate(cx, 1);
             }
             _ => {}
         }
@@ -601,14 +621,27 @@ impl Screen for PauseMenu {
     }
 
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
-        // FadeDarken3 over the box 50..269 × 26..229 (virtual).
-        let (x0, x1) = (ui.vx(50), ui.vx(269));
-        ui.back.darken(x0, 26, x1, 229);
+        if cx.hardware {
+            // Hardware clears the screen every frame: no game picture.
+            for yy in 0..H {
+                for x in 0..ui.w {
+                    ui.back.put_rgb(x, yy, [0, 0, 0]);
+                }
+            }
+        } else {
+            // FadeDarken3 over the box 50..269 × 26..229 (virtual).
+            let (x0, x1) = (ui.vx(50), ui.vx(269));
+            ui.back.darken(x0, 26, x1, 229);
+        }
         let y = ui.hy(0x50);
-        ui.centred(&self.label(cx), y, 1);
+        if self.sel == 3 && cx.hardware {
+            // `FUN_0100cc78` under hardware.
+            ui.centred_dim(&self.label(cx), y, 1);
+        } else {
+            ui.centred(&self.label(cx), y, 1);
+        }
         let y1 = ui.hy(0x6e);
         let y2 = ui.hy(0x79);
-        let on_off = |b: bool| cx.g(if b { 2081 } else { 2080 });
         match self.sel {
             0 => {
                 // Not in rampage or multiplayer (`DAT_0114c7c6`, `DAT_0114c7c8`).
@@ -633,13 +666,18 @@ impl Screen for PauseMenu {
                 }
             }
             5 => {
-                let lines = [
-                    format!("{}{}", cx.g(1601), on_off(cx.settings.gouraud)),
-                    format!("{}{}", cx.g(1602), on_off(cx.settings.rotating_view)),
-                ];
-                for (i, (l, yy)) in lines.iter().zip([y1, y2]).enumerate() {
-                    let c = if i == self.sub { ui.flash() } else { 1 };
-                    ui.centred(l, yy, c);
+                // 1601 at 0x6e/200 and 1602 at 0x79/200 as in the
+                // original, the added items continue 11/200 apart. A
+                // dimmed item uses `FUN_0100cc78`.
+                for (i, item) in ITEMS.iter().enumerate() {
+                    let yy = ui.hy(0x6e + 11 * i as i32);
+                    let l = item.label(cx);
+                    if item.dimmed(cx.settings) {
+                        ui.centred_dim(&l, yy, 1);
+                    } else {
+                        let c = if i == self.sub { ui.flash() } else { 1 };
+                        ui.centred(&l, yy, c);
+                    }
                 }
             }
             _ => {}

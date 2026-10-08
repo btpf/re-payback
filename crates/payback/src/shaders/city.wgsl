@@ -9,6 +9,15 @@
 // texel: pal[texel] + light − 128 (`Gouraud.256`), in gamma-encoded RGB.
 // The palette snap of `Gouraud.256` is done by the view's final pass
 // (`postfx.wgsl`).
+//
+// Hardware (Warp3D) look, `lights.params.y = 1` (docs/re/rendering.md,
+// "Hardware (Warp3D) renderer"; `FUN_010920d8`, `FUN_010a4004`): the
+// texture is A1R5G5B5 (5 bits per channel, colour 0 transparent),
+// bilinear filtered (W3D_SetFilter LINEAR/LINEAR) and repeated in its tile;
+// the light is a W3D vertex colour `min(L, 255) / 256`, interpolated per
+// triangle (each quad is drawn as two triangles split along its corner 1 -
+// corner 3 diagonal: NE-SW on tops), not quantised, and multiplies the
+// texel (the default MODULATE texture environment).
 
 #import bevy_pbr::{
     mesh_functions,
@@ -41,6 +50,7 @@ struct Vertex {
     @location(8) l1: vec3<f32>,
     @location(9) l2: vec3<f32>,
     @location(10) l3: vec3<f32>,
+    @location(11) tile: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -51,6 +61,7 @@ struct VertexOutput {
     @location(3) @interpolate(flat) l1: vec3<f32>,
     @location(4) @interpolate(flat) l2: vec3<f32>,
     @location(5) @interpolate(flat) l3: vec3<f32>,
+    @location(6) @interpolate(flat) tile: vec2<f32>,
 };
 
 // Static plus dynamic light at a corner (world position), clamped to 255.
@@ -83,6 +94,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.clip = position_world_to_clip(wp.xyz);
     out.uv = v.uv;
     out.st = v.st;
+    out.tile = v.tile;
     let w = array<vec3<f32>, 4>(
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(v.p0, 1.0)).xyz,
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(v.p1, 1.0)).xyz,
@@ -109,8 +121,56 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3(0.04045));
 }
 
+// One texel of the 64x64 tile (wrapping), as the card holds it:
+// gamma-encoded A1R5G5B5 expanded to 8 bits.
+fn texel_hw(tile: vec2<f32>, p: vec2<f32>) -> vec4<f32> {
+    let q = vec2<i32>(tile) + (vec2<i32>(p) % vec2<i32>(64) + vec2<i32>(64)) % vec2<i32>(64);
+    let t = textureLoad(atlas, q, 0);
+    let c5 = floor(round(to_srgb(t.rgb) * 255.0) / 8.0);
+    let c8 = (c5 * 8.0 + floor(c5 / 4.0)) / 255.0;
+    return vec4<f32>(c8, select(0.0, 1.0, t.a > 0.5));
+}
+
+fn fragment_hw(in: VertexOutput) -> vec4<f32> {
+    // Bilinear: texel centres at +0.5.
+    let p = in.uv * 2048.0 - in.tile - vec2<f32>(0.5);
+    let i = floor(p);
+    let f = p - i;
+    let t = mix(
+        mix(texel_hw(in.tile, i), texel_hw(in.tile, i + vec2(1.0, 0.0)), f.x),
+        mix(texel_hw(in.tile, i + vec2(0.0, 1.0)), texel_hw(in.tile, i + vec2(1.0, 1.0)), f.x),
+        f.y,
+    );
+    // Gouraud per triangle (corners 0-1-3 and 1-2-3).
+    let st = clamp(in.st, vec2(0.0), vec2(1.0));
+    var light: vec3<f32>;
+    if st.x + st.y <= 1.0 {
+        light = in.l0 + st.x * (in.l1 - in.l0) + st.y * (in.l3 - in.l0);
+    } else {
+        light = in.l2 + (1.0 - st.x) * (in.l3 - in.l2) + (1.0 - st.y) * (in.l1 - in.l2);
+    }
+    let colour = min(light, vec3<f32>(255.0)) / 256.0;
+    let rgb = t.rgb * colour;
+#ifdef CITY_MASKED
+    if t.a <= 0.0 {
+        discard;
+    }
+    return vec4<f32>(to_linear(rgb), t.a);
+#else
+#ifdef CITY_ALPHA
+    // Ice2 / RoofWindow are loaded as ARGB with alpha 0x7f (`FUN_0106b7a0`).
+    return vec4<f32>(to_linear(rgb), 127.0 / 255.0);
+#else
+    return vec4<f32>(to_linear(rgb), 1.0);
+#endif
+#endif
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    if lights.params.y > 0.5 {
+        return fragment_hw(in);
+    }
     let t = textureSample(atlas, atlas_sampler, in.uv);
 #ifdef CITY_MASKED
     if t.a < 0.5 {
