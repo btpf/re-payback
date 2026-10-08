@@ -367,6 +367,11 @@ after LoadMap:
    RVert/RHoriz with h1 > h2, Vert/Horiz with h1 < h2 — and `−step` on slopes facing
    away (Vert/Horiz with h1 > h2, RVert/RHoriz with h1 < h2); flat tops and shadowed
    corners are unchanged.
+   **Vert height quirk (CONFIRMED, not reproduced):** for Vert (slope 2) cubes the
+   lighting pass adds h1 twice (`FUN_010766c8` ~01076cf4; Mac `DoLightSourcing` @
+   1015bd18, same bug). Its corner heights are NW/SW = base + 2·h1 and NE/SE =
+   base + h1 + h2, and the next cube up starts at base + 2·h1. The port deliberately
+   uses the correct heights (decision in `mac_version.md`).
 5. **Static lamps** (`FUN_0106c904`, never removed): scenery 33 (`lamppost_dark`; the
    loop renumbers it to 36 afterwards) and 36 (`lamppost_dark2`):
    `(800M + rand(100M), 600M + rand(80M), 400M + rand(60M))`; 35 (`lamp`):

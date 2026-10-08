@@ -97,3 +97,39 @@ Headlines:
 - The sound samples are identical. Per-area research notes are in `analysis/mac/*.md`.
 Confirmed facts get merged into the relevant `docs/re/*.md` notes, citing the
 Mac function name and address (e.g. `drawCubeTop_None` @ `100c8160`).
+
+## Decisions (2026-10-08)
+
+How the port treats the Mac differences. These override the recommendations in
+`mac_differences.html` where they disagree.
+
+Principle: where the Mac and Amiga content differ and both are reasonable, offer
+both through an in-game setting. Default to the Mac version, since it is the more
+definitive copy. Graphics variants go in the Graphics menu (`frontend/display.rs`),
+the sound variant in the sound options, and the random missions in the Rampage
+setup. Settings are saved with the other options. Render-only and audio-only
+settings are not stored in replays. Settings that change the simulation (random
+missions) must be recorded in the replay header, or playback would diverge.
+
+| Topic | Decision |
+|---|---|
+| Vert (slope 2) lighting height quirk (rendering §3.3, port fix L2) | **Not reproduced.** The original adds h1 twice for Vert cubes in the lighting pass (Amiga `FUN_010766c8` ~01076cf4, Mac `DoLightSourcing` @ 1015bd18). The port keeps the correct heights. The quirk stays documented as an intentional departure. |
+| Payback Setup dialog (`CPaybackPreferences::EditPreferences`) | **Not implemented.** Everything it configures (window/fullscreen, resolution, renderer, rotating view, Gouraud, motion blur, FX) belongs in the in-game Graphics menu. |
+| Blood effect texture | **Setting:** Mac (one smaller, darker `Blood`, day and night) or Amiga (`Blood` plus the `Blood.dark` night swap). Default: Mac. |
+| Menu props (`Objects/Options/*`, PC vs Amiga, remodelled cup/world/CD) | **Setting:** Mac or Amiga props. Default: Mac. |
+| Intro film | **Setting:** Mac MPEG film or Amiga FLC. Default: Mac when the film is present, otherwise FLC. |
+| Title screens (`Icons/TitleScreen*`) | **Setting:** Mac or Amiga art. Default: Mac. |
+| Shorter phones, traffic lights and tree crowns (scenery models) | **Setting:** Mac or Amiga scenery heights. Default: Mac. |
+| 1. Continuous CD music wrap | **Stop after the last track, like the Mac.** |
+| 2. One-shot sound cut-off (~65 %) | **Setting.** The cut is driven by recorded ticks, so replays sound the same. Default: off (play to the end). |
+| 3. Quiet-voice +6 dB | **Ignored** as a platform artefact. |
+| 4. Mac game models and placement | **Adopt the Mac models.** People use per-model offsets (origin at the feet). Vehicles and doors follow after their placement code is checked. |
+| 5. Mac textures | **Mac cube textures are the default.** An "Amiga look" setting brings back the Amiga set. |
+| 6. Mac MPEG intro (judgement call) | **Decode at run time** with the vendored `pl_mpeg` (single C file, MIT, built with `cc`). Players need no ffmpeg and the extractor stays pure Python. Falls back to the FLC when the film is missing. |
+| 7. Ghidra re-export with jump-table overrides (judgement call) | **Yes.** Fold the SwitchOverride pass into `tools/ghidra/` and re-export `analysis/ghidra_macx` and `analysis/ghidra_mac9`, so the level scripts, `SetTrigger_Long`, input and movie code are in the export. The Amiga exports stay as they are. |
+| 8. Random phone missions | **Setting** in the Rampage setup, recorded in replays. Default: on, the Mac behaviour. |
+| 9. `Gouraud.256` (judgement call) | **Compute it** from the loaded palette, as the port does today, and ignore the shipped file. The file was built from the stale CD palette. Computing works for either texture set, and the file differs in only ~0.25 % of entries (all colour 8). |
+| 10. German "Gas" in the blood slot | **Setting, default off.** |
+| 11. Mac menu props and title art | **Offer both** (see the settings above). |
+| 12. Phrase 1799 on a Rampage level end | **Keep phrase 2023 "Level complete!".** 1799 exists in no phrase file. |
+| 13. Unchecked areas | **Follow-up pass after the re-export (7).** It covers effect-size arguments past the 8th, `GetNextWeapon`, input and movie code, and anything else in the recovered jump-table bodies. |
