@@ -9,9 +9,10 @@ Status values:
 
 - **CONFIRMED, applied**: resolved from code (address given) and written into the
   original doc.
-- **CONFIRMED, to merge**: resolved, but the doc is being edited by another agent
+- **CONFIRMED, merged**: resolved while the doc was being edited by another agent
   (`rendering.md`, `frontend_menus.md`, `vehicles.md`, `combat_police.md` §2.2/2.3/2.5,
-  `people.md` §6.1/6.3). The answer is in §1 below, ready to merge.
+  `people.md` §6.1/6.3), so the answer was held in §1 below; it has since been merged
+  into the target doc (same day).
 - **OPEN**: still unknown; the "evidence needed" column says what would settle it.
 - **INFERRED, kept**: a reasoned interpretation that the code cannot prove (design
   intent, visual meaning); left marked INFERRED.
@@ -29,7 +30,7 @@ in the corresponding `decompiled.c`.
 | `vehicles.md` | 4 | 3 | 1 |
 | `people.md` | 10 | 7 | 3 |
 | `combat_police.md` | 17 | 15 | 2 |
-| `frontend_menus.md` | 14 | 10 | 4 |
+| `frontend_menus.md` | 14 | 11 | 3 |
 | `frontend_audio.md` | 17 | 12 | 5 |
 | `script_api.md` | 25 | 23 | 2 |
 | `missions_00.md` | 16 | 13 | 3 |
@@ -38,14 +39,22 @@ in the corresponding `decompiled.c`.
 | `missions_11.md` | 13 | 6 | 7 |
 | `missions_20.md` | 10 | 7 | 3 |
 | `missions_21.md` | 17 | 14 | 3 |
-| **Total** | **201** | **156** | **45** |
+| **Total** | **201** | **157** | **44** |
 
-"Resolved" counts every CONFIRMED row: applied here, waiting to be merged (§1), or
-already fixed by another agent in the same pass.
+"Resolved" counts every CONFIRMED row: applied here, merged from §1, or already fixed
+by another agent in the same pass.
 
-## 1. Findings waiting to be merged
+## 1. Findings held back, now merged
+
+These were written down here while other agents were editing the target docs. All of
+them have now been merged (each subsection says where); the "Still OPEN" bullets remain
+open and are tracked in §2.
 
 ### 1.1 `rendering.md`
+
+**Merged**: §1 Side faces (culling), §4 Night (`TankBits`), §6 Map edges (off-map
+black), §7 (tick length), §10 (mode 3, mode 0x22, face depth sorting, info-sign axis
+order). Nothing contradicts §11.
 
 - **Inner-side wall culling (§1 Side faces, "INFERRED")**: CONFIRMED as an explicit
   test. `FUN_0107b910` (Normal) and `FUN_0107bd3c` (Gouraud) return unless the sign of
@@ -83,7 +92,10 @@ already fixed by another agent in the same pass.
 
 ### 1.2 `frontend_menus.md`
 
-Replace the "Open items" list; all but two are resolved (CONFIRMED):
+**Merged**: §1 (CD command), §2 (model 16), §3 (View intro), §6 (config fields), §7
+(Play again; city row now follows §11), §8 (weapon values, version-3 records), §10 (68k
+startup Loading screen), §11 (`.mini` glyph); the "Open items" list now holds only the
+two open items. Original notes:
 
 - **§1 CD music, pause menu `FUN_01008cec(0)`**: command 0x5000+0 = "keep music running".
   The receiver is the "Payback CDDA Thread" (entry 0x010087a0, from the start tags at
@@ -154,6 +166,9 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 
 ### 1.3 `vehicles.md`
 
+**Merged**: §5 (summary + link to `formats.md`), §1.2 `+0x4928` row (OS4 vs 68k), §6.2
+(link to the `Actor_SetAggro` readers), §6.3 renamed "Port deviations".
+
 - **§5 `Maps/<n>.vehicles`** is an empty placeholder; the layout is now in `formats.md`
   (Companion map files): loader OS4 `FUN_0106dbbc`, version, three city booleans, count
   ≤ 6, records {model, x, y, layer, heading}; parked vehicles spawn only in Rampage and
@@ -168,6 +183,9 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 - Still OPEN: §2.10 Slopes (I) (`FUN_010cbc7c`). Not investigated in this pass.
 
 ### 1.4 `combat_police.md` §2.2, §2.3, §2.5
+
+**Merged**: §2.2 model table and traffic weight, square test, port pursuit note; §2.5
+respawn defaults.
 
 - **§2.2 "Square test ... special&0x7f must not be 0 or 4"** (~line 303): the code tests the
   **top face type** (cube `+9`): not Off, not Reflect (68k `FUN_000cf5cc`). CONFIRMED.
@@ -185,6 +203,8 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 - §2.3 roadblock cube `+8`: already fixed in the doc.
 
 ### 1.5 `people.md` §6.3
+
+**Merged**: exit speed (C) and the helicopter line now points to §9.
 
 - **Exit speed "(I)" (~801)**: CONFIRMED. The exit code writes no velocity (68k
   `FUN_000dab40`, OS4 `FUN_01052398`) and the new person is zero-filled.
@@ -231,24 +251,24 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 (Sound sample rates "TBD" and the mission-script status are covered by the rows of
 `research.md` and `script_api.md`.)
 
-### `docs/re/rendering.md` (not edited here; §1.1)
+### `docs/re/rendering.md` (merged from §1.1)
 
 | Item | Status | Evidence / where |
 |---|---|---|
-| Inner-side wall culling (§1) | CONFIRMED, to merge | `FUN_0107b910`, `FUN_0107bd3c`, `FUN_0107c260`, `FUN_0107d74c` |
+| Inner-side wall culling (§1) | CONFIRMED, merged | `FUN_0107b910`, `FUN_0107bd3c`, `FUN_0107c260`, `FUN_0107d74c` |
 | Unrolled Gouraud copies "same diagonal" (§4) | OPEN | decode the remaining unrolled offsets |
-| Off-map colour black (§6) | CONFIRMED, to merge | buffers zeroed at level start only |
-| Tick length "not traced here" (§7) | CONFIRMED, to merge | `people.md` §1.1 |
-| Mode 3 texel 0 transparent (§10) | CONFIRMED, to merge | `FUN_0111e410` |
-| Info-sign axis order (§10) | CONFIRMED, to merge | `FUN_010c7218` |
+| Off-map colour black (§6) | CONFIRMED, merged | buffers zeroed at level start only |
+| Tick length "not traced here" (§7) | CONFIRMED, merged | `people.md` §1.1 |
+| Mode 3 texel 0 transparent (§10) | CONFIRMED, merged | `FUN_0111e410` |
+| Info-sign axis order (§10) | CONFIRMED, merged | `FUN_010c7218` |
 
-### `docs/re/vehicles.md` (not edited here; §1.3)
+### `docs/re/vehicles.md` (merged from §1.3)
 
 | Item | Status | Evidence / where |
 |---|---|---|
-| §5 `.vehicles` placeholder | CONFIRMED, to merge | `FUN_0106dbbc` |
-| `+0x4928` offset (OS4 vs 68k) | CONFIRMED, to merge | 68k `+0x4926` / `+0x4928` |
-| §6.3 Port notes (I) | CONFIRMED, to merge | relabel as port deviations |
+| §5 `.vehicles` placeholder | CONFIRMED, merged | `FUN_0106dbbc` |
+| `+0x4928` offset (OS4 vs 68k) | CONFIRMED, merged | 68k `+0x4926` / `+0x4928` |
+| §6.3 Port notes (I) | CONFIRMED, merged | relabel as port deviations |
 | §2.10 Slopes (I) | OPEN | trace `FUN_010cbc7c` against the 68k twin |
 
 ### `docs/re/people.md`
@@ -263,7 +283,7 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 | Cannot climb out of rivers (§4.4) | OPEN | step limit is C; scan the maps for banks within 64 h-units of the water |
 | Respawn weapons/wanted "fresh" (§4.5) | CONFIRMED, applied | zero-filled object |
 | Update 4 "on top of a building" fix (§6.3) | INFERRED, kept | changelog link only |
-| Exit gives no speed (§6.3) | CONFIRMED, to merge | `FUN_000dab40` / `FUN_01052398` |
+| Exit gives no speed (§6.3) | CONFIRMED, merged | `FUN_000dab40` / `FUN_01052398` |
 | `+0x2ee` wander heading (§8) | CONFIRMED, applied | 68k `FUN_000e3a58` ~122305 |
 
 ### `docs/re/combat_police.md`
@@ -273,11 +293,11 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 | Footstep sound ids [I] (§0) | CONFIRMED, applied | OS4 `FUN_01005864` load order |
 | Route `used` byte value 1 (§1) | INFERRED, kept | getter `FUN_000a43d0` has no callers |
 | Editor's next-hop algorithm (§1) | OPEN | reverse-engineer the map editor; BFS matches 99.98 % |
-| Square test "special&0x7f" (§2.2) | CONFIRMED, to merge | top face type, `FUN_000cf5cc` |
-| Tank/heli never random traffic [I] (§2.2) | CONFIRMED, to merge | weight `+0x4934` = 0 |
-| Port pursuit note [I] (§2.2) | CONFIRMED, to merge | `sim/pursuit.rs` |
+| Square test "special&0x7f" (§2.2) | CONFIRMED, merged | top face type, `FUN_000cf5cc` |
+| Tank/heli never random traffic [I] (§2.2) | CONFIRMED, merged | weight `+0x4934` = 0 |
+| Port pursuit note [I] (§2.2) | CONFIRMED, merged | `sim/pursuit.rs` |
 | Roadblock cube `+8` [I] (§2.3) | CONFIRMED (already fixed) | slope byte |
-| Ammo defaults not traced (§2.5) | CONFIRMED, to merge | zero-filled player object |
+| Ammo defaults not traced (§2.5) | CONFIRMED, merged | zero-filled player object |
 | Missile hitting scenery [I] (§3.3) | CONFIRMED, applied | removed without exploding, `FUN_000cdfdc` |
 | `burnt` trigger not traced (§3.4) | CONFIRMED, applied | burn timer ≥ 1, `FUN_010c101c` |
 | Radar/briefcase/phones effect [I] (§4) | CONFIRMED, applied | no exe code tests radar; briefcase not traced further |
@@ -288,22 +308,22 @@ Replace the "Open items" list; all but two are resolved (CONFIRMED):
 | OS4 AI/firing addresses (header, §8) | CONFIRMED, applied | landmarks inside `FUN_0105f594` |
 | Rampage end condition (§8) | CONFIRMED, applied | `FUN_010692bc` ~50022 |
 
-### `docs/re/frontend_menus.md` (not edited here; §1.2)
+### `docs/re/frontend_menus.md` (merged from §1.2)
 
 | Item | Status | Evidence / where |
 |---|---|---|
-| Pause menu `FUN_01008cec(0)` | CONFIRMED, to merge | CDDA thread 0x010087a0, policy 0x010085cc |
-| "View intro" | CONFIRMED, to merge | 68k `FUN_00033192`, OS4 has no caller |
-| Config `DAT_0114c72c`, `c304`, `c300`, `c310` | CONFIRMED, to merge | `FUN_0104107c`, `FUN_010692bc` |
-| "Play again" after multiplayer | CONFIRMED, to merge | `FUN_01027330` → `FUN_0102fc44` |
-| Version-3 replay records | CONFIRMED, to merge | CD exe 0x473cc / 0x4773c |
-| Weapon-select values 0..7 | CONFIRMED, to merge | `FUN_01051a10`, 68k `FUN_000da2e0` |
-| `.mini` overlay glyph | CONFIRMED, to merge (meaning INFERRED) | `FUN_010727f0` |
-| `.mini` stored as HUD radar texture (I) | CONFIRMED, to merge | minimap `FUN_01018954` |
-| 68k startup Loading screen | CONFIRMED, to merge | `FUN_000cc0c2` at 0xed4fe |
-| Model 16 `cross` use | CONFIRMED, to merge | Game Over `FUN_01021434` |
+| Pause menu `FUN_01008cec(0)` | CONFIRMED, merged | CDDA thread 0x010087a0, policy 0x010085cc |
+| "View intro" | CONFIRMED, merged | 68k `FUN_00033192`, OS4 has no caller |
+| Config `DAT_0114c72c`, `c304`, `c300`, `c310` | CONFIRMED, merged | `FUN_0104107c`, `FUN_010692bc` |
+| "Play again" after multiplayer | CONFIRMED, merged | `FUN_01027330` → `FUN_0102fc44` |
+| Version-3 replay records | CONFIRMED, merged | CD exe 0x473cc / 0x4773c |
+| Weapon-select values 0..7 | CONFIRMED, merged | `FUN_01051a10`, 68k `FUN_000da2e0` |
+| `.mini` overlay glyph | CONFIRMED, merged (meaning INFERRED) | `FUN_010727f0` |
+| `.mini` stored as HUD radar texture (I) | CONFIRMED, merged | minimap `FUN_01018954` |
+| 68k startup Loading screen | CONFIRMED, merged | `FUN_000cc0c2` at 0xed4fe |
+| Model 16 `cross` use | CONFIRMED, merged | Game Over `FUN_01021434` |
 | Screen modes chosen in PaybackSetup (I) | INFERRED, kept | the game only reads the ModeIDs; the setup tool is not decompiled |
-| City row unlock rule (I) vs §11 (C) | OPEN (doc conflict) | §11's `DAT_0117aecc[c*2]` rule is the traced one |
+| City row unlock rule (I) vs §11 (C) | CONFIRMED, merged | §7 now follows §11's `DAT_0117aecc[c*2]` rule |
 | Game Menu p3 "(I: replay state)" | OPEN | trace `DAT_0114c8a8` writers |
 | Language select `FUN_0103da68` "(I: input reset)" | OPEN | read `FUN_0103da68` |
 

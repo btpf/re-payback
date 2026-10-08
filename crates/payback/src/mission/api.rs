@@ -483,6 +483,15 @@ impl<'w> Script<'w> {
             o.script_id = id;
             o.level = floor.clamp(0, 2) as usize;
         }
+        // Every new object starts with skill `+0x346 = Random(100)` (68k
+        // object constructor `FUN_000a2b80`); scripts change it with
+        // `Actor_SetAggro`.
+        let skill = self.world.resource_mut::<crate::sim::Rng>().rand(100);
+        if self.world.get::<crate::sim::ai::Ai>(e).is_none() {
+            self.world
+                .entity_mut(e)
+                .insert(crate::sim::ai::Ai { aggro: skill, ..Default::default() });
+        }
         Some(e)
     }
 

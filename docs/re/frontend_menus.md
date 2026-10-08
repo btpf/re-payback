@@ -56,7 +56,9 @@ Open items are listed at the end.
 **CD music** (`FUN_01008cec(track)` sends command 0x5000+track; C):
 - Menus use track 13 (0xd).
 - Level complete uses 8; game complete 8; game over 16 (0x10).
-- The pause menu calls it with 0 (meaning not traced).
+- The pause menu calls it with 0: "keep music running" (C). The receiver is the "Payback CDDA Thread" (entry 0x010087a0, from the start tags at 0x0112ee18; no Ghidra function). It waits on signal 0x1000 and switches on `DAT_0114c2b4 & 0xF000`: 0x2000 quit, 0x3000 stop, 0x4000+n play track n now (`FUN_010084bc`), 0x5000+n the policy at 0x010085cc (low 12 bits 0x64 = stop). Bit 0x10000 only toggles, so a repeated command counts as new.
+- Policy(n) (C): a track is playing and its TOC length (start + frames/75) has not run out → nothing, whatever n is; it has run out → n > 0 replays n, n = 0 moves to the next track (the last wraps to the first); nothing playing → n = 0 starts a random track in first..last, n > 0 plays n. `FUN_01008cec` skips a repeat of the same n within one second (clock/50).
+- The main loop polls the policy only in mode 2 (Continuous); the pause loop `FUN_0101a7dc` in any mode ≠ 0. Side effect (I): pausing in Radio mode on foot starts a random track.
 - It is only active when CD mode `DAT_0114c30c ≠ 0`.
 
 ## 2. Option 3D objects and how they are drawn (C)
@@ -81,7 +83,7 @@ Open items are listed at the end.
 | 13 | moviereel | View replay |
 | 14 | moviereel | Save replay |
 | 15 | amiga | End game |
-| 16 | cross | loaded, use not found |
+| 16 | cross | the spinning object on the Game Over screen `FUN_01021434` (z 0x898) |
 
 Index 9 becomes cup_bronze/silver/gold (`DAT_0117bbf8[rating−1]`) once an overall rating exists.
 
@@ -118,7 +120,7 @@ Index 9 becomes cup_bronze/silver/gold (`DAT_0117bbf8[rating−1]`) once an over
 - 4 "CD audio setup" (2094): `FUN_0102dd30`.
 - 5 "Control setup" (2454): `FUN_0102e75c`.
 - 6 "Set Language" (2132): `FUN_0101267c`, then reloads global phrases.
-- 7 "View intro" (2109): only plays the refuse sound in this build.
+- 7 "View intro" (2109): only plays the refuse sound in the OS4 build (its video code `FUN_01000978`, player ~0x01000e10, has no callers). Update 7 68k plays it (C): main menu `FUN_00033192` item 7 → `FUN_00010364("intro")`, `FUN_000106c0` (play), `FUN_00011402` (cleanup); refused only if the files are in neither `PROGDIR:Videos` nor `PaybackCD:Payback/Videos`. 68k `FUN_000ec686` also plays it automatically at the end of the startup load (call at 0xeda52, after CubeTextures, before CloseProgress). The CD release does the same: startup call at file offset 0x65caa, menu item index 6 at 0x14b70, loader at 0x894c0 (offsets into `extracted/iso/Payback/Payback.exe`).
 - 8 "Quit game" (2130): "Are you sure?" 2070 with Yes 2071 / No 2072.
 
 **Game menu `FUN_0102ca08`.** 7 items. Title 2086 "GAME MENU".
@@ -256,26 +258,32 @@ The config is mostly written by `PaybackSetup`. Screen modes and resolutions are
 | # | Field | Notes |
 |---|---|---|
 | 1 | version | 10; < 10 gives "Config file too old" |
-| 2 | `DAT_0114c72c` | I: screen-mode related |
+| 2 | `DAT_0114c72c` | saved motion blur (C, see below) |
 | 3 | lens-flare FX mode | 0..2 |
 | 4 | char[40] CD device name | `DAT_0114c7e0` |
 | 5 | CD unit | `DAT_0114c308`, default −1 |
 | 6 | CD playback mode | `DAT_0114c30c`: 0 Off 2142, 1 Radio 2143, 2 Continuous 2144, 3 Disabled 2145 (default 3) |
-| 7 | `DAT_0114c304` | screen mode ID (used by `0104feb0`) |
+| 7 | `DAT_0114c304` | software-render screen ModeID (C, see below) |
 | 8 | char[40] language name | `DAT_012a63d4`; empty means ask at start |
 | 9 | 4 × {device `DAT_0114b59c[p]`, key set `DAT_0114b5ac[p]`} | per multiplayer player |
 | 10 | required kills | `DAT_0114c2e8` |
 | 11 | multiplayer/rampage city | `DAT_0114c7c0` |
-| 12 | `DAT_0114c310` | set to 0x100 under hardware rendering |
+| 12 | `DAT_0114c310` | 3-D view size in 1/256 (C, see below); set to 0x100 under hardware rendering |
 | 13 | police aggressiveness | `DAT_0114c2ec`, 0..5 |
 | 14 | 11 × 11 key codes | `DAT_012a63fc` |
 | 15 | volume | 0..100 |
-| 16 | `DAT_0114c300` | second screen mode ID |
+| 16 | `DAT_0114c300` | Warp3D screen ModeID (C, see below) |
 | 17 | Gouraud | `DAT_0114c2fc` |
 | 18 | rotating view | `DAT_0114c7dc` |
 | 19 | hardware (Warp3D) | `DAT_0114c7d8` |
 
 Total 656 bytes.
+
+**Fields 2, 7, 12, 16 (C; full text in `frontend_audio.md` §3.7):**
+- `DAT_0114c72c` = saved motion blur. The live flag is `DAT_0114c6c8`, toggled by `FUN_01042308` / pause item 3; level start (`FUN_010692bc` ~49442) turns blur on if c72c is set, level end (~49887) stores c6c8 back and turns blur off.
+- `DAT_0114c304` = software-render screen ModeID: `FUN_0104107c` gets W/H from it via GetDisplayInfoData and sets `DAT_0114c2e0` = native non-RTG (8 bitplanes + c2p `FUN_0112d1d0`); OpenScreen SA_DisplayID at 0x0104ff88 and 0x010509c4.
+- `DAT_0114c300` = Warp3D screen ModeID: OpenScreen at 0x0105013c, W3D_CC_ModeID in `FUN_01002024`, and `FUN_0104107c` when `DAT_0114c7d8 != 0`.
+- `DAT_0114c310` = 3-D view size in 1/256 of the screen, 0xB0..0x100 step 0x10, keys '=' (raw 0x0C) and '-' (0x0B) in `FUN_01051940` / `FUN_01051a10`, refused under Warp3D; `FUN_01051800` clears the buffers and sets `DAT_0114c6c4`; forced to 0x100 under Warp3D.
 
 **Key tables:** 11 actions per table, in the order of phrases 2457–2467: accelerate, reverse/brake, left, right, shoot, shoot alt, in/out, brake only, next weapon, prev weapon, repeat message.
 - Table 0 (keyboard), Amiga raw keys: 4C 4D 4F 4E 40 00 44 31 5F 46 37 (up, down, left, right, Space, –, Return, Z, Help, Del, M).
@@ -304,7 +312,7 @@ Total 656 bytes.
 - Device codes: −1 Off 2168; 0–3 Joystick n 2166; 4–7 PSX n 2164; 8–11 CD32 n 2165 (via lowlevel ReadJoyPort); 12 Keyboard 2167. Defaults P1 = 0, P2 = 12, P3/P4 = −1. Each device can be used by one player only.
 - "CPU" 2169 is never used.
 - Rows 1/3/5/7: key-set hint 2175–2178 for joystick players, one set per player.
-- Row 8: City (2124 + 2170–2172, a user-map name, or 2039 "Not found!") at 149/200. Cities 1 and 2 are only offered if the previous city's first level has a cup (I).
+- Row 8: City (2124 + 2170–2172, a user-map name, or 2039 "Not found!") at 149/200. The row skips built-in city c+1 while city c's last level (`DAT_0117aecc[c*2]`) has no cup; user maps are always offered (C, §11).
 - Row 9: "Required kills" 2329 (1..50, default 5) at 161/200.
 - Row 10: "Play" 2095 at 173/200. It needs at least 2 active players, else 2179 is shown. It returns city*2 and sets `DAT_0114c7c0`, `DAT_0114c7c8 = 1` and `DAT_0114c2e4` = player count.
 - Row 11: "Cancel" at 185/200.
@@ -320,7 +328,8 @@ Total 656 bytes.
 **Results `FUN_01027330(result, input)`:**
 - Header: 2173 "Player %d won the match!", 2128 draw (−1), 2174 aborted (−2), nothing after a replay (−3).
 - Title 2129 "RESULTS". Columns Won 2161 / Drawn 2163 / Lost 2162. Totals keep adding up until the setup screen is opened again.
-- Menu: City, Play again 2198, View replay, Save replay, End game.
+- Menu: City, Play again 2198, View replay, Save replay, End game (items 0..4).
+- `FUN_01027330` returns void. "Play again" sets `DAT_0114c7c0` = the chosen city, slides out and returns with `DAT_0114c7c8` still 1; the caller (`FUN_010692bc` ~50007) calls `FUN_0102fc44`, which with c7c8 set skips the title and returns `c7c0*2` (LAB_01030208), so LoadMap starts the next match at once: same players and kill target, chosen city, level 0 (C). "End game" ("Are you sure") sets `DAT_0114c7c8 = 0` instead.
 
 **Rampage setup `FUN_0102a428`:**
 - Title 2196, "Top 5 high scores:" 1610.
@@ -361,6 +370,9 @@ Total 656 bytes.
 | 8 | brake only |
 | 7..3 | weapon selected this frame, 10 = no change |
 | 2..0 | 30 Hz ticks in that frame (1..5) |
+
+- Weapon-select values (C, `FUN_01051a10`, 68k `FUN_000da2e0`): 0 fist (`+0x360` id 0), 1 pistol (id 0xD, ammo `+0x378`), 2 shotgun (5, `+0x364`), 3 flamethrower (2, `+0x36c`), 4 grenade (3, `+0x370`), 5 minigun (4, `+0x374`), 6 bazooka (1, `+0x368`), 7 remote bomb (0xE, `+0x37c > 0` or a placed bomb `+0x380`); 10 = no change; 8 and 9 unused. A change happens only if the player has that weapon and is not already holding it. Same order as the HUD weapon icons; not the trigger 0x22 numbering.
+- Version-3 records (CD release) use the same bit layout (C): encoder at file offset 0x4773c..0x477de (bits 14..8 flags, weapon << 3 or 0x50, ticks separate), decoder 0x473cc (`(w & 0xF8) >> 3`, 10 = none, 0xFFFF = end, `w & 7` = ticks), reader 0x7a7a0 (0xFFFF at end of data), comment skip 0x7a7d2 (bit 15 as `FUN_010bbcf4`). Only the header differs.
 
 - The recording buffer is 150,000 bytes and silently stops filling when full.
 - Playback reuses the stored seed and the per-frame tick counts. It ends when the reader returns 0xFFFF (data exhausted) or Esc is pressed.
@@ -407,6 +419,7 @@ Both are single-player. In each, the tick values add up exactly to the header du
 
 - LoadMap calls DrawProgress(50000) and (30000).
 - Reimplementation: a level started from the menus loads in stages, one per frame (`level::LevelLoad`), with `map.size` as the unit and microseconds of work as DrawProgress units; the calibrated value is written to `Saves/map.size` (read before `General/map.size`). `--load-delay <ms>` (debug) idles between stages.
+- **68k startup Loading screen** (C): InitProgress = `FUN_000cc0c2("startup.size")`, called from `FUN_000ec686` at 0xed4fe right after the fade (`FUN_0003eb0c`). Software path: clears the box with `FUN_000365ea` (cx−0x36..cx+0x35, cy−0x16..cy+0x17), draws `icons/Loading` with `FUN_00018a9e` at (cx−0x2e, cy−0x11) and shows it with `FUN_000cbf20`. DrawProgress = `FUN_000cc456`; CloseProgress is inline at the end of `FUN_000ec686`. A duplicate sequence in `FUN_000f0a72` has no callers.
 - `FUN_0100b288(x, y, filled, total)` is a separate segment-bar helper (`LoadingPiece2` = empty piece) with no callers in OS4. The pause-menu volume bar draws its own 10 pieces inline.
 
 ## 11. `.thumb`, `.mini`, icon format (C)
@@ -426,22 +439,17 @@ Both are single-player. In each, the tick values add up exactly to the header du
 
 **`.mini`:**
 - 65×65 8bpp. Loaded at the end of LoadMap as `FUN_010727f0("<map>.mini")`.
-- Cropped to 64×64. A few pixels near (0x1d..0x22, rows 0..4) are overwritten with colours 0xB0 and 0x08 (I: a north/marker glyph).
-- Stored at `DAT_0130e254` as the HUD radar texture (I).
+- Cropped to 64×64. Pixels at x 29..34 (0x1d..0x22), rows 0..4, are overwritten (C, `FUN_010727f0`, stores at 0x010728c0): a red (0xB0) up-pointing arrowhead with a black (0x08) shadow row (picture in `frontend_audio.md` §6.2). Baked into the texture, so it turns with the map in rotating view: a north pointer (I).
+- Stored at `DAT_0130e254` as the HUD radar texture (C: the minimap `FUN_01018954` draws it, `frontend_audio.md` §2.4).
 
 **Icons:**
 - Raw 8bpp chunky; the row stride is the width rounded up to 16. Examples: cursor 6×10 is a 160-byte file; cup icons 15×20 are 320 bytes; PaybackLogo 166×80 is 14080 bytes.
 - Loader `FUN_0100d3c4(dst, path, w, h, bytes)`.
 
 ## Open items
-- Which action the pause-menu call `FUN_01008cec(0)` performs (pause the CD?).
-- What "View intro" was meant to do; in this build it only plays the refuse sound.
-- Exact meaning of `DAT_0114c72c` and `DAT_0114c304`/`DAT_0114c300` in the config, which PaybackSetup writes.
-- What the main menu does after "Play again" in multiplayer (I: the next match starts straight away).
-- Whether the version-3 replay records use the same bit layout (I: the tick totals match).
-- Names for weapon-select values 0..7.
-- The `.mini` overlay glyph.
-- Where the 68k build draws its startup Loading screen (it loads the icons in `FUN_000ec686`).
+Resolved in the 2026-10-08 pass (see `open_questions.md`): pause-menu CD command (§1), View intro (§3), config fields (§6), Play again (§7), version-3 records and weapon-select values (§8), the 68k startup Loading screen (§10), the `.mini` glyph (§11), model 16 `cross` (§2), the city-row unlock rule (§7 now follows §11). Still open:
+- §1 Game Menu p3 "(I: replay state)": trace the writers of `DAT_0114c8a8`.
+- §9 `FUN_0103da68` "(I: input reset)": read its body.
 
 Scripts are in `D:\Payback Reverse Engineered\analysis\`:
 - `fn.sh` / `where.sh` (decompile helpers)

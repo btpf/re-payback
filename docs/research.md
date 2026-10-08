@@ -75,7 +75,7 @@ Facts are marked CONFIRMED (with the original function address) or INFERRED.
 | `docs/re/missions_00.md` … `missions_21.md` | the six level scripts, one note per level |
 | `docs/re/open_questions.md` | every open or INFERRED item across the notes, with its status |
 
-## Status (2026-10-08, `12698b5`)
+## Status (2026-10-08, `ffefe7e`)
 
 The reimplementation is playable end to end. All six story levels are ported
 from the 68k mission code and an automated bot (`--autoplay`) completes each
@@ -96,35 +96,44 @@ MATCH). `progress.html` (local, git-ignored) has the per-area estimates.
 | Rampage, replays, multiplayer | done: rampage with high scores, record/play replays, 2–4 player split screen | `rampage`, `replay`, `multiplayer` |
 | Tooling | `--screenshot`, `--record`/`--play`, `--autoplay`, `--fast` | `main`, `replay`, `autoplay` |
 
-In progress in the working tree (not yet committed): a switchable hardware
-(Warp3D) render mode (`render_mode`); graphics options for renderer,
-resolution and window mode (`frontend/display`); key and gamepad redefinition
-(`frontend/bindings`); user maps (`frontend/usermaps`); staged level loading
-that fills the loading bar; in-car arrest, script police order 0x15 and
-multiplayer hijacking.
+Recent commits:
+
+- `9801800` Graphics options and hardware render mode: a switchable
+  hardware (Warp3D) render mode reverse-engineered from the OS4 build
+  (`render_mode`, `rendering.md` §11: vertex-colour lighting, bilinear 15-bit
+  textures, `.chunky2` water, effect blends; the sim is unaffected); graphics
+  options for renderer, resolution and window mode in the pause menu and a
+  new main-menu screen (`frontend/display`); key and gamepad redefinition
+  (`frontend/bindings`); user maps in rampage and multiplayer
+  (`frontend/usermaps`); staged level loading that fills the loading bar.
+  Sim gap fixes: in-car arrest, script police dropping goto 0x15 for
+  pursuit, 0x44 arrival triggers, multiplayer hijacking, `AddSound` z, the
+  exit-side reset, roadblock squares testing the slope byte.
+- `ffefe7e` RE docs: `open_questions.md` (inventory of 201 open or INFERRED
+  items, 156 resolved), `formats.md` rewritten, `rendering.md` §11 (hardware
+  renderer), and the resolved items applied across the notes. The findings
+  that `open_questions.md` §1 held back have since been merged into
+  `rendering.md`, `frontend_menus.md`, `vehicles.md`, `combat_police.md`
+  and `people.md`.
 
 ## Roadmap
 
 Done: formats; city and scenery rendering; player on foot; vehicles;
 pedestrians and traffic; weapons, pickups, police and wanted level; the
 mission script API and all six level scripts; front end, HUD, sound, saves,
-replays; rampage and multiplayer; the rotating-view and motion-blur options.
+replays; rampage and multiplayer; the rotating-view and motion-blur options;
+the hardware render mode, graphics options, key redefinition and user maps; script `AddSound` z
+(`script_api.md` §5).
 
 Remaining, by priority:
 
-1. Land the work in progress listed above (simulation fixes, hardware render
-   mode, graphics options, bindings, user maps).
-2. Framebuffer blends (effects, alpha tops, additive faces) are done in linear
+1. Framebuffer blends (effects, alpha tops, additive faces) are done in linear
    light and snapped to the palette at the end; mode 0x14 (`CD.obj`, 50 %) is
    drawn opaque.
-3. Front end: the startup loading bar (`startup.size`, 68k `FUN_000cc0c2`);
+2. Front end: the startup loading bar (`startup.size`, 68k `FUN_000cc0c2`);
    the repeat-last-message action; the `.vehicles` city flags for traffic on
    user maps.
-4. Script `AddSound`: the last argument is the sound's z, not an audible range
-   (`script_api.md` §5); audibility is `vol / d²` only. (Trigger 0x42 is
-   RC-car-only, so level 21's rocket-car line never fires; the port already
-   never reports it.)
-5. Close the remaining questions in `docs/re/open_questions.md`.
+3. Close the remaining questions in `docs/re/open_questions.md`.
 
 Not planned: CD music (no audio tracks are available); the shipped version-3
 replays, which the original also rejects.

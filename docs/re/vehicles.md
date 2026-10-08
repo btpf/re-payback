@@ -117,7 +117,7 @@ Defaults come from the `.Obj` reader (OS4 `FUN_010bf8bc` tail). The per-type ove
 | +0x491c | 3 | **Horn sound id**: 3 CarHorn, 0x0b Siren (police), 0x2c IceCream (ice-cream van) |
 | +0x4920 | −1 | **Reversing sound id** (0x17 Bleep: bus, truck, bomb truck). Looped while reversing. |
 | +0x4924 | 1 | **Engine sound id** (§7) |
-| +0x4928 | 0 (u16) | "tracked/no-wheel" flag (tank, helicopter, boat). Yaw rate is not limited by speed, no skid marks, and no J-turn. |
+| +0x4928 | 0 (u16) | "tracked/no-wheel" flag (tank, helicopter, boat). Yaw rate is not limited by speed, no skid marks, and no J-turn. **OS4 offset**: 68k `+0x4926`. The 68k `+0x4928` that `Heli_TakeOff` / `Heli_Land` write (mission docs use 68k offsets) is the next field, OS4 `+0x492a` "flies" (C). |
 | +0x492a | 0 (u16) | flies (helicopter) |
 | +0x492c | 0 (u16) | boat (water vehicle) |
 | +0x492e | 0 (u16) | inverts the visual roll (boat) |
@@ -461,7 +461,10 @@ See §3 (damage and collisions).
 
 ## 5. `Maps/<n>.vehicles`
 
-(See below.)
+Layout in `formats.md` (Companion map files, `.vehicles`). In short (C, loader OS4 `FUN_0106dbbc`, 68k
+`FUN_00043148`): big-endian i32 version, three city booleans (allow the home-city 0/1/2 traffic models on a
+user map, §1.2 `+0x48d4`), count ≤ 6, then count records {model, x, y, layer, heading}. The parked vehicles
+spawn only in Rampage and multiplayer (`FUN_010692bc` ~49456).
 
 ---
 
@@ -554,11 +557,13 @@ Last, the script speed cap: `if speed > +0x386: speed = +0x386` (default 1000000
 helicopter (`+0x4928`) never honks; a flying model (`+0x492a`) gets no input while `+0x338` is 0.
 
 Default skill: traffic `clamp(rand(90) + aggr·8 − 30, 0, 99)` (§1.4); police in pursuit `wanted + 0x5c`
-(`+0x5e` when aggr ≥ 4); script actors keep the object default (0) until `Actor_SetAggro`. The race scripts set
+(`+0x5e` when aggr ≥ 4); script actors keep the object default `Random(100)` (0..99, set by the constructor 68k `FUN_000a2b80`) until `Actor_SetAggro` (all readers of
+the skill `+0x346`: `script_api.md` §5). The race scripts set
 95–100, so the leaders (98+) run the uncapped band and the 99/100 cars skip the look-ahead.
 
-### 6.3 Port notes (I)
+### 6.3 Port deviations
 
+Not facts about the original (those are in §6.1–6.2, C); this is what the port does differently on purpose.
 The port follows §6.1–6.2 for states 0x0f/0x15/0x14 and police 10/11 (`sim/vehicle_ai.rs`,
 `sim/pursuit.rs`). Where the original leaves a vehicle idle, the port drives it: attack = ram the target like
 state 9 (an attacking tank fires within 6000 with the guards' `rand(101 − aggro)` rule when facing it), follow =

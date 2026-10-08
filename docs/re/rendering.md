@@ -123,8 +123,12 @@ S `FUN_010a9e64`, W `FUN_010afcc4`)
 * Face order in the file/struct: top, **N (y0 edge), E (x1 edge), S (y1 edge),
   W (x0 edge)**.
 * Back faces are culled (hardware/rotating paths: screen-space cross-product sign,
-  CONFIRMED; software top-down path: the projected trapezoid degenerates/inverts when
-  the camera is on the inner side and nothing is drawn, INFERRED).
+  CONFIRMED; software top-down path: an explicit test, CONFIRMED: `FUN_0107b910`
+  (Normal) and `FUN_0107bd3c` (Gouraud) return unless the sign of the edge offset from
+  the camera matches the top/bottom depth order, and return on zero-height walls;
+  `FUN_0107c260` / `FUN_0107d74c` (the other face types) return when the projected top
+  row is above the bottom row. The absolute sign convention was not re-derived: Ghidra
+  confuses `in_r6` and `param_4` there).
 * Draw order within a layer (§6) is: all side faces of cube layer L, then all tops of
   layer L, so a sloped top **paints over** the part of a side rectangle that rises
   above a lower slope edge. Where a slope edge is *higher* than h1 (h2 > h1 at that
@@ -300,7 +304,9 @@ over ice (map 1, on a zero-height cube 1 above the Reflect ice), `RoofWindow.chu
 * Effect texture `Blood` is replaced by `Blood.dark` (`FUN_01035250`).
 * Object textures (`FUN_010bf310(1)`): `Shine.*` (not `Shine.cup*`) and
   `CloudsReflect` are swapped for their `.dark` files; `Joystick`, `Red Shade`,
-  `Lights` untouched; everything else (except `TankBits`) darkened through T1[c][0x67].
+  `Lights` untouched; everything else darkened through T1[c][0x67] except `TankBits`,
+  the one object texture exempt from both the `.dark` swap and the darkening
+  (CONFIRMED: OS4 `FUN_010bf310`, 68k `FUN_00095efa`).
 * Vehicles get an extra polygon textured `Lights` — the **headlight beam**
   (CONFIRMED, `FUN_0104e00c` → `FUN_010bf070` on night load; `FUN_0104e0a4` →
   `FUN_010bf254` removes it again for a day map). It is added to the model itself (4
@@ -578,8 +584,12 @@ at camH 10000 and eases with 16/17 smoothing for 35 ticks; after death camH sink
 by 2·ticks/tick to 0; a destroyed vehicle holds camH = 2000 for 60 ticks.
 
 **Map edges**: camX/camY clamped to [0, 0x7fffff]; the renderer clamps its square
-ranges to 0…127 and draws nothing outside the map (framebuffer clear colour shows;
-INFERRED black). **Visible range** (top-down): half-width `D·cx/(fx<<12) + 1` squares,
+ranges to 0…127 and draws nothing outside the map, so the framebuffer's old contents
+show: black, CONFIRMED with a caveat. The software framebuffers
+(`DAT_0114c7a4/7b0/7ac`) are zeroed only at level start (`FUN_01051800`,
+`FUN_010692bc`, zero-fill `FUN_01111180`) and palette entry 0 is black; there is no
+per-frame clear, so (INFERRED) sprites crossing the off-map area leave trails there and
+the lightning palette flash brightens it too. **Visible range** (top-down): half-width `D·cx/(fx<<12) + 1` squares,
 half-height `D·cy/(fy<<12) + 1` with `D = camH + 1500` (≈ 4×3 at camH 0, 11×9 at the
 maximum camH 3000); no other far clip.
 
@@ -721,8 +731,8 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
 * **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47). `Bubble` is loaded but unused. FadeDarken*,
   HealthBar are HUD textures.
 
-Lifetimes are in game ticks (`DAT_0114c6a0` = ticks elapsed this frame; tick length
-not traced here).
+Lifetimes are in game ticks (`DAT_0114c6a0` = ticks elapsed this frame; a tick is
+1/25 s on 68k (2 DateStamp ticks) and 1/30 s on OS4, CONFIRMED in `people.md` §1.1).
 
 ---
 
@@ -798,9 +808,20 @@ one active slot are single-sided, faces with none are invisible. Low nibble of `
 `param` is the raw Alpha.256 table for mode 6, otherwise the 64→256 colour.
 Without `& 0x10`, `& 0x20` sends the face down the mode-4 branch (CONFIRMED,
 `FUN_010c101c`): mode 0x22, the four "White sand" leg faces of
-PedMale1–4, is drawn additively (port: the additive overlay). Mode 0x14 (`CD.obj`) is
+PedMale1–4 (slot 1 active, texture "White sand", param 3), is drawn additively (the
+low bits are not 1/2/3, so the software path falls into the mode-4 branch; Warp3D also
+blends it, §11.6; port: the additive overlay). Bit 0x20 alone does nothing else: it
+does not set the shine flag `+0x4906`. Mode 0x14 (`CD.obj`) is
 environment-mapped through table 4 (50 %); the port still draws it opaque (remaining
-gap). Mode 3: texel 0 transparent is CONFIRMED (`FUN_0111e410`).
+gap). Mode 3: texel 0 transparent is CONFIRMED (`FUN_0111e410` jumps into an unrolled
+span ending at 0x01128ae8; every pixel does `lbz; cmpwi 0; beq skip; stb`).
+
+**Face depth sorting** (CONFIRMED, `FUN_010bf8bc`, `FUN_010c101c`, `FUN_010c4fec`,
+`FUN_010c7218`): the `.Obj` header flag sets model `+0x490c = (flag == 1)`, which turns
+on painter's sorting of the model's faces: moving objects insertion-sort by the sum of
+the three vertex depths (re-sorted when roll/pitch changes), scenery sorts once by the
+deepest vertex, the tumbling info sign every frame. Models with flag 0 draw their faces
+in file order. Details and counts: `formats.md` Objects.
 
 Mode-6 faces in the shipped models: `TrafficLight1` (table 5 = red), `TrafficLight2`
 (5 red + 6 red+green = amber), `TrafficLight3` (7 green), `TrafficLight4` (6 amber),
@@ -842,8 +863,11 @@ Flares are only added for objects that are not burning (`obj+0x33c < 1`).
   are drawn at heading `rotation·22.5 + DAT_0114c770`, a global angle advancing 60 per
   tick (one turn per 96 ticks; 68k `DAT_0034c09c`). The info sign ('P') goes through
   `FUN_010c7218` with two more angles (68k `DAT_0034c0a4` +30/tick, `DAT_0034c0a0`
-  −45/tick), so it also tumbles (axis order INFERRED). Snowman (0xfe) and the rest stay
-  still.
+  −45/tick), so it also tumbles. Axis order CONFIRMED (`FUN_010c7218`, call site
+  0x0104cec4): rotate in the X–Z plane by `DAT_0114c76c`, then in the Y–Z plane by
+  `DAT_0114c768`, then yaw by `rotation·22.5 + DAT_0114c770`. Per tick (0x0105fe08):
+  c770 += 60, c76c += 30, c768 −= 45, each wrapping at 5760; initial values
+  (0x01069954) c76c = 20, c768 = 5, c770 = 0. Snowman (0xfe) and the rest stay still.
 * **Chimney** (17): while drawn, each frame with `rand(3) == 1` (one set of random
   numbers per frame for all chimneys) it adds per tick a type 6 `Dust2` smoke puff
   (subtractive) at the square centre + (rand(100)−50 + 100·i, rand(100)−50), z = its

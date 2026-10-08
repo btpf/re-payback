@@ -767,8 +767,8 @@ The longitudinal door position overrides the default `0x48f8` (default = maxY/2)
 
 Press in/out while driving:
 
-- **Helicopter** (`0x492a ≠ 0`): the first press sets +0x49c to request landing; the exit happens on a later
-  press once +0x49e is set. This sequencing is I.
+- **Helicopter** (`0x492a ≠ 0`): the use key cycles engine on (+0x49c) → engine off and exit armed (+0x49e)
+  → get out; the full sequence is C, see §9 (Helicopter exit).
 - **Every other vehicle** exits immediately, **even while moving** (no speed check found).
 
 The new person:
@@ -806,7 +806,8 @@ a building" (I).
 
 Boat exits keep prev_pos = the exit point.
 
-Exiting a moving car gives the person no extra velocity: speed starts at 0 (I).
+Exiting a moving car gives the person no extra velocity: speed starts at 0 (C: the exit code writes no
+velocity, 68k `FUN_000dab40` / OS4 `FUN_01052398`, and the new person is zero-filled).
 
 Separately, ejected drivers and peds spawned by `FUN_01052714` start with frames 0/11 and stand at
 `1.2·(person.r − veh.0x48f4)` on alternating sides (`DAT_0114c628` toggles each call; toggled value 0 =

@@ -294,8 +294,12 @@ shunt, carjack, murder, firearms, criminal damage, speeding, GBH. It uses ", " b
 |---|---|---|---|---|
 | `police.obj` (68k `DAT_00348144`) | 200 | −1 (any map) | 1600 | horn = 11 Siren |
 | `policevan.obj` | 50 | 1 ("police vans" per-map toggle, editor object-mode key 2) | 2500 | |
-| `tank.obj` | 0 | – | – | never random traffic; script-only [I] |
-| `helicopter.obj` | 0 | – | – | never random traffic; script-only [I] |
+| `tank.obj` | 0 | – | – | never random traffic; script-only [C] |
+| `helicopter.obj` | 0 | – | – | never random traffic; script-only [C] |
+
+Traffic keeps a randomly drawn model only if `rand(256) < model+0x4934` (the weight); tank and helicopter
+have weight 0, so they are never kept (OS4 `FUN_01047af4` ~37785; weights set in `FUN_0104e13c` ~41164 /
+~41247). [C]
 
 `police_red` / `police_blue` and `policevan_red` / `_blue` are only light-flash frames.
 
@@ -309,7 +313,8 @@ shunt, carjack, murder, firearms, criminal damage, speeding, GBH. It uses ", " b
 - **Edge.** Spawns go on the window edge ahead of the player. The edge comes from the dominant
   axis of the player's velocity (random if stationary). Random points on that edge are tried for
   cube levels 0..2, `ticks·2` times per frame.
-- **Square test.** The square must exist and its special&0x7f must not be 0 or 4. The square and
+- **Square test.** The square must exist and its **top face type** (cube `+9`) must not be Off (0) or
+  Reflect (4, water) (68k `FUN_000cf5cc`) [C]. The square and
   its 4 neighbours must be free in the occupancy grid (68k `DAT_003178a0[x][y][cube]`). A traffic
   flow bit (1 N, 2 E, 4 S, 8 W) must continue into the neighbouring square; that picks the heading
   0xb40 / 0x5a0 / 0 / 0x10e0. Squares with flag 0x20 spawn a pedestrian with chance 1/5 instead.
@@ -361,7 +366,8 @@ ambient. None of the shipped scripts gives 0x43/0x44 to a police car (their only
   aggr < 4) the look-ahead sees the player's car as an obstacle, so the car brakes behind it and then drops
   a cop; only skill ≥ 99 cars ram. [C]
 - Port (`sim/pursuit.rs`): the target's nearest node is cached per chaser (refreshed every 20 ticks) instead
-  of on the target object; a missing route file sends pursuers straight to state 11. [I]
+  of on the target object; a missing route file sends pursuers straight to state 11. (Port fact, checked in
+  `sim/pursuit.rs` ~216–231: nearest node refreshed every 20 frames; empty route → straight to Pursuit.)
 
 **Flee (0x14).** The target is the route node farthest from the player (`FarthestNode`, stored at
 +0x3ba). Used by script objects. [C]
@@ -470,9 +476,11 @@ When the timer expires (68k `FUN_000ec686` ~127679; OS4 `FUN_010692bc` ~49630):
   (68k `FUN_00043c96`), or at the script's respawn square if one is set (`DAT_0026c040 != −1`);
 - **the score is restored**: there is no money penalty.
 
-The new object starts with defaults, so weapons, ammo and wanted level are presumably lost: fist
-only, wanted 0. [I] The default-initialiser `FUN_000a2b80` sets health 100 [C]; ammo defaults
-were not traced.
+The new player object is freshly allocated and zero-filled, so at level start and after every respawn
+the player has fists only (`+0x35e = 0`), no ammo (`+0x362..+0x37e` all 0) and wanted 0; only the
+score is restored (68k `FUN_000ec686` ~127150 / ~127750 via `FUN_000cf11e`; `FUN_0003feb2`). The
+default-initialiser `FUN_000a2b80` sets health 100. Weapons come only from pickups: no script gives the
+player weapons. [C]
 
 ### 2.6 Guard line of sight [C]
 
