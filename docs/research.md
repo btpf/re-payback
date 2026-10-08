@@ -107,6 +107,28 @@ divergences:
 - **The fixed-tick schedules run single-threaded**, so systems without an
   explicit order still run in the same order every run.
 
+Performance (`perf.rs`): `PAYBACK_PERF=1` logs every frame over 25 ms with
+its fixed-tick count and main-app split (pre / fixed / update / wait for the
+render thread and present), and every 10 s and at exit: frame-time
+p50/p95/p99/max, the count of frames over 25 ms, ticks per frame, the tick
+cadence (time between frames that ran a tick: ideal 33.3 ms; the sim is not
+interpolated, so spread there is visible judder) and the audio mixer (longest
+gap between mixer renders, how far ahead it rendered, underruns, voice-lock
+wait). `PAYBACK_PERF_EXIT=<s>` quits after s seconds; e.g. `--map 2 --level 0
+--record x --script-input --ticks 1800 --seed 1234 --hardware`. Off, it
+costs one atomic load per mixer block. Pitfalls found with it:
+
+- `World::resource_scope` removes and re-inserts the resource (Bevy 0.19
+  stores resources as entities), so the resource reads as *added* (and
+  changed) afterwards. Do not scope a resource that systems watch with
+  `is_added()` / `is_changed()`: traffic scoping `City` every tick made the
+  night atlas rebuild in `lighting::sync_mode` (~70 ms) run every frame in
+  hardware mode, and `water::sync_mode` reload the sky.
+- A `&mut ResMut<T>` handed on as `&mut T` flags `T` changed even if
+  nothing is written. The menu loop's `Ctx` borrows `Settings`, `Language`
+  and `Profile` past change detection and flags them only on a real change
+  (the phrase reload in `hud::load_global_texts` ran every frame).
+
 | Area | State | Code (`crates/payback/src/`) |
 |---|---|---|
 | Data formats | done; every shipped file parses in the tests | `payback-formats`: `map`, `obj`, `texture`, `palette`, `phrases`, `sound`, `motion`, `route`, `flc`, `replay`, `scores` |

@@ -203,8 +203,8 @@ fn spawn_traffic(world: &mut World) {
     let aggr = world.get_resource::<Aggressiveness>().map_or(2, |a| a.0);
     let c = cam.square();
     let h = cam.window();
-    let spawns = world.resource_scope(|world, city: Mut<City>| {
-        let mut rng = world.resource_mut::<Rng>();
+    let spawns = world.resource_scope(|world, mut rng: Mut<Rng>| {
+        let city = world.resource::<City>();
         let mut spawns = Vec::new();
         for _ in 0..2 {
             let along = rng.rand(2 * h + 1) - h;

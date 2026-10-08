@@ -433,7 +433,10 @@ impl Iterator for MixerDecoder {
             self.buf.clear();
             self.buf.resize(BLOCK * 2, 0.0);
             self.at = 0;
-            if let Ok(mut voices) = self.mixer.0.lock() {
+            let asked = std::time::Instant::now();
+            let lock = self.mixer.0.lock();
+            crate::perf::audio_block(BLOCK, MIX_RATE, asked.elapsed());
+            if let Ok(mut voices) = lock {
                 for v in voices.values_mut().filter(|v| !v.done && !v.paused) {
                     for frame in self.buf.chunks_mut(2) {
                         if v.pos as usize >= v.pcm.len() {

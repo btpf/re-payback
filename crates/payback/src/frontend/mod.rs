@@ -602,8 +602,26 @@ struct Env<'w, 's> {
 }
 
 /// The menu loop: input, ticks, requests, drawing.
-fn run(mut fe: ResMut<Frontend>, mut env: Env) {
-    let env = &mut env;
+fn run(fe: ResMut<Frontend>, mut env: Env) {
+    // The screens get plain `&mut` to the settings, language and profile
+    // (`Ctx`); taking those through `ResMut` would flag the resources
+    // changed every frame (the language reload in `hud::load_global_texts`
+    // then ran every frame), so they are borrowed past change detection and
+    // flagged here only when they really changed.
+    let before = (env.settings.clone(), env.language.clone(), env.profile.clone());
+    run_menus(fe, &mut env);
+    if *env.settings != before.0 {
+        env.settings.set_changed();
+    }
+    if *env.language != before.1 {
+        env.language.set_changed();
+    }
+    if *env.profile != before.2 {
+        env.profile.set_changed();
+    }
+}
+
+fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     if env.fx.0 != env.settings.volume {
         env.fx.0 = env.settings.volume;
     }
@@ -657,9 +675,9 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     let mut cx = Ctx {
         data: &env.data,
         texts: &env.texts,
-        profile: &mut env.profile,
-        settings: &mut env.settings,
-        language: &mut env.language,
+        profile: env.profile.bypass_change_detection(),
+        settings: env.settings.bypass_change_detection(),
+        language: env.language.bypass_change_detection(),
         languages: &env.languages.0,
         goal: env.mission.goal,
         level_ticks: env.clock.0,
