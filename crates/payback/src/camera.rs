@@ -5,9 +5,22 @@
 //! with its own camera state ([`ViewCams`]). Player 1 keeps the
 //! [`GameCamera`]; players 2..4 get [`ExtraView`] cameras, each drawn into
 //! its viewport; a full-window [`OverlayCamera`] draws the HUD on top.
+//!
+//! Rotating view (pause menu option, `DAT_0114c7dc`; [`RotatingView`]):
+//! the camera turns with the followed object's heading and tilts forward
+//! with its speed ([`ViewAngles`], updated once per frame by the render loop
+//! `FUN_0105bd98`), follows with its own parameters (`FUN_010556e0`) and
+//! projects with half the focal length (`FUN_01091f84`); rendering.md §6.
+//!
+//! The game views render in palette space (`postfx.rs`): HDR targets that
+//! hold palette-encoded RGB, snapped to the palette, motion-blurred and
+//! flashed by one final pass.
+
+#[path = "postfx.rs"]
+pub mod postfx;
 
 use crate::level::{AppState, GameMode, LevelEntity};
-use crate::sim::{Obj, Trig};
+use crate::sim::{Obj, TURN, Trig};
 use crate::vehicles::Vehicle;
 use crate::world::H_PER_SQUARE;
 use bevy::{
@@ -54,12 +67,53 @@ impl GameCam {
     pub fn square(&self) -> IVec2 {
         IVec2::new((self.x >> 16) as i32, (self.y >> 16) as i32)
     }
+
+    /// Squares drawn either side of the camera square, (x, y), by the city
+    /// renderer `FUN_01049374` with the screen constants of a layout of
+    /// `players` views: top-down `D·cx / (fx << 12) + 1` and
+    /// `D·cy / (fy << 12) + 1`, rotating `D·cx / (fx << 10) + 1` both ways
+    /// (two side-by-side views: `3·D·cx / (fx << 11) + 1`), D = camH + 1500.
+    pub fn visible_squares(&self, players: usize, rotating: bool) -> (i32, i32) {
+        let d = self.h + 1500;
+        let (cx, cy, fx, fy) = match players {
+            0 | 1 => (160, 128, 16, 16),
+            2 => (80, 128, 11, 11),
+            _ => (80, 64, 8, 8),
+        };
+        if !rotating {
+            (d * cx / (fx << 12) + 1, d * cy / (fy << 12) + 1)
+        } else if players == 2 {
+            let r = d * cx * 3 / (fx << 11) + 1;
+            (r, r)
+        } else {
+            let r = d * cx / (fx << 10) + 1;
+            (r, r)
+        }
+    }
 }
 
 /// Split screen: each player's camera state, by player number (empty
 /// outside multiplayer; [`GameCam`] then holds player 1's copy).
 #[derive(Resource, Default, Clone)]
 pub struct ViewCams(pub Vec<GameCam>);
+
+impl ViewCams {
+    /// The camera state of every view: the players' in split screen, else
+    /// the one [`GameCam`].
+    pub fn all<'a>(&'a self, single: &'a GameCam) -> &'a [GameCam] {
+        if self.0.is_empty() {
+            std::slice::from_ref(single)
+        } else {
+            &self.0
+        }
+    }
+}
+
+/// Render layer of view `p`'s own effect sprites and flares (the views
+/// also see layer 0, the world).
+pub fn view_layer(p: usize) -> usize {
+    10 + p
+}
 
 /// The split-screen view camera of player `.0` (1..3; player 0 uses the
 /// [`GameCamera`]).
@@ -127,13 +181,15 @@ impl FreeRig {
     }
 }
 
-/// Follow parameters (rendering.md §6, top-down view): look-ahead K,
-/// velocity lead V, base height B, speed factor c.
+/// Follow parameters (rendering.md §6): look-ahead K, velocity lead V,
+/// base height B, speed factor c and, in the rotating view, the height
+/// offset R (`camH = (2·camH + min(t, 3000) − R) / 3`, t not clamped below).
 struct Follow {
     k: i64,
     v: i64,
     b: i32,
     c: i32,
+    r: Option<i32>,
 }
 
 const ON_FOOT: Follow = Follow {
@@ -141,13 +197,87 @@ const ON_FOOT: Follow = Follow {
     v: 0x140,
     b: 1000,
     c: 3,
+    r: None,
 };
 const DRIVING: Follow = Follow {
     k: 150,
     v: 200,
     b: 800,
     c: 3,
+    r: None,
 };
+/// Rotating view, on foot (`FUN_010556e0`, model `+0x4909` set: people).
+const ON_FOOT_ROTATING: Follow = Follow {
+    k: 150,
+    v: 0x140,
+    b: 1500,
+    c: 2,
+    r: Some(800),
+};
+/// Rotating view, driving (vehicle model `+0x4909` clear).
+const DRIVING_ROTATING: Follow = Follow {
+    k: 225,
+    v: 200,
+    b: 1000,
+    c: 2,
+    r: Some(600),
+};
+
+/// The "Rotating view" option (`DAT_0114c7dc`, pause menu → Graphics
+/// options; needs `DAT_0114c2f4`, initialised to 1). Follows
+/// `Settings::rotating_view`; `--rotating-view [0|1]` wins. It changes the
+/// camera state the simulation sees (as in the original), so a replay must
+/// be played with the setting it was recorded with.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RotatingView(pub bool);
+
+impl Default for RotatingView {
+    fn default() -> Self {
+        RotatingView(forced_rotating().unwrap_or(false))
+    }
+}
+
+fn forced_rotating() -> Option<bool> {
+    std::env::args()
+        .any(|a| a == "--rotating-view")
+        .then(|| crate::arg("--rotating-view").is_none_or(|v| v != "0"))
+}
+
+fn follow_settings(
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    mut rotating: ResMut<RotatingView>,
+) {
+    let Some(settings) = settings else { return };
+    if settings.is_changed() && forced_rotating().is_none() && rotating.0 != settings.rotating_view {
+        rotating.0 = settings.rotating_view;
+    }
+}
+
+/// Rotating view: each view's yaw (`DAT_012f5bd8[p]`, copied to
+/// `DAT_0114c7d0` for the projection) and pitch (`DAT_0114b5dc[p]`, copied
+/// to `DAT_0114c2f0`), in 1/0x1680 turns. Render-only state, by player.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct ViewAngles(pub Vec<ViewAngle>);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewAngle {
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Default for ViewAngle {
+    fn default() -> Self {
+        ViewAngle {
+            yaw: 0.0,
+            pitch: PITCH_DOWN as f32,
+        }
+    }
+}
+
+/// Pitch straight down (0x167f) and fully tilted (0x157c, 260 units =
+/// 16.25° short of a turn).
+pub const PITCH_DOWN: i32 = 0x167f;
+pub const PITCH_TILTED: i32 = 0x157c;
 const LEAD_CAP: i64 = 0x2af80;
 
 pub struct CameraPlugin;
@@ -156,16 +286,22 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GameCam>()
             .init_resource::<ViewCams>()
+            .init_resource::<RotatingView>()
+            .init_resource::<ViewAngles>()
+            .add_plugins(postfx::PostFxPlugin)
+            .add_systems(PreUpdate, follow_settings)
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 OnEnter(AppState::Playing),
                 |mut commands: Commands,
                  mut cam: ResMut<GameCam>,
                  mut views: ResMut<ViewCams>,
+                 mut angles: ResMut<ViewAngles>,
                  mode: Res<GameMode>,
                  primary: Query<Entity, With<GameCamera>>| {
                     *cam = GameCam::default();
                     views.0.clear();
+                    angles.0 = vec![ViewAngle::default(); mode.players().max(1)];
                     if mode.is_multiplayer() {
                         views.0 = vec![GameCam::default(); mode.players()];
                         spawn_views(&mut commands, mode.players(), primary.single().ok());
@@ -185,7 +321,15 @@ impl Plugin for CameraPlugin {
             .add_systems(FixedUpdate, follow_tick)
             .add_systems(
                 PostUpdate,
-                (toggle_mode, place_game_camera, place_extra_views, free_controls, layout_views, separators)
+                (
+                    toggle_mode,
+                    turn_views,
+                    place_game_camera,
+                    place_extra_views,
+                    free_controls,
+                    layout_views,
+                    separators,
+                )
                     .chain()
                     .before(TransformSystems::Propagate),
             );
@@ -203,11 +347,27 @@ fn arg_f32(name: &str) -> Option<f32> {
 /// 2·atan(128/256) = 53.1°.
 fn projection() -> Projection {
     Projection::Perspective(PerspectiveProjection {
-        fov: 2.0 * (128.0f32 / 256.0).atan(),
+        fov: view_fov(1, false),
         near: 0.05,
         far: 400.0,
         ..default()
     })
+}
+
+/// Vertical field of view of a view, from the screen constants of
+/// `FUN_0104107c` / `FUN_0105bd98` (rendering.md §6): `2·atan(cy / f)` with
+/// focal length `f = 16·fy` pixels top-down and `8·fy` in the rotating
+/// view (`FUN_01091f84`). One view: cy 128, fy 16 (53.1°; rotating 90°).
+/// Two (side by side, 159×256): cy 128, fy = 264·16/384 = 11 (72.1°;
+/// rotating 111.0°). Three or four (159×127): cy 64, fy 8 (53.1°; 90°).
+pub fn view_fov(players: usize, rotating: bool) -> f32 {
+    let (cy, fy) = match players {
+        0 | 1 => (128.0, 16.0),
+        2 => (128.0, 11.0),
+        _ => (64.0, 8.0),
+    };
+    let focal: f32 = if rotating { 8.0 * fy } else { 16.0 * fy };
+    2.0 * (cy / focal).atan()
 }
 
 /// Split screen: view cameras for players 2..n and the UI overlay, which
@@ -223,6 +383,7 @@ fn spawn_views(commands: &mut Commands, n: usize, primary: Option<Entity>) {
             projection(),
             Transform::from_xyz(64.0, 30.0, 64.0).looking_at(Vec3::new(64.0, 0.0, 64.0), Vec3::NEG_Z),
             ExtraView(p as u8),
+            RenderLayers::from_layers(&[0, view_layer(p)]),
             LevelEntity,
         ));
     }
@@ -260,6 +421,7 @@ fn spawn_camera(mut commands: Commands) {
         Camera3d::default(),
         projection(),
         free.transform(),
+        RenderLayers::from_layers(&[0, view_layer(0)]),
         GameCamera {
             mode: if free_requested {
                 CameraMode::Free
@@ -284,6 +446,7 @@ fn toggle_mode(keys: Res<ButtonInput<KeyCode>>, mut cam: Single<&mut GameCamera>
 /// split screen; a dead player's view stays put until the respawn).
 fn follow_tick(
     trig: Res<Trig>,
+    rotating: Res<RotatingView>,
     mut cam: ResMut<GameCam>,
     mut views: ResMut<ViewCams>,
     target: Query<(&Obj, Has<Vehicle>), With<CameraTarget>>,
@@ -292,23 +455,28 @@ fn follow_tick(
         let Ok((obj, driving)) = target.single() else {
             return;
         };
-        follow(&trig, &mut cam, obj, driving);
+        follow(&trig, &mut cam, obj, driving, rotating.0);
         return;
     }
     for (obj, driving) in &target {
         if let Some(v) = obj.player.and_then(|p| views.0.get_mut(p as usize)) {
-            follow(&trig, v, obj, driving);
+            follow(&trig, v, obj, driving, rotating.0);
         }
     }
     *cam = views.0[0];
 }
 
-fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool) {
-    let f = if driving { DRIVING } else { ON_FOOT };
+fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool, rotating: bool) {
+    let f = match (driving, rotating) {
+        (false, false) => ON_FOOT,
+        (true, false) => DRIVING,
+        (false, true) => ON_FOOT_ROTATING,
+        (true, true) => DRIVING_ROTATING,
+    };
     let lead = |v: i32| (v as i64 * f.v).clamp(-LEAD_CAP, LEAD_CAP);
     let tx = obj.pos.x as i64 * 32 + f.k * trig.sin(obj.heading) as i64 + lead(obj.vel.x);
     let ty = obj.pos.y as i64 * 32 + f.k * trig.cos(obj.heading) as i64 + lead(obj.vel.y);
-    let t = ((f.c * obj.speed).abs() + f.b - (obj.pos.z >> 4)).clamp(1, 3000);
+    let t = (f.c * obj.speed).abs() + f.b - (obj.pos.z >> 4);
     if !cam.initialised {
         cam.x = tx;
         cam.y = ty;
@@ -316,7 +484,69 @@ fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool) {
     }
     cam.x = (4 * cam.x + tx) / 5;
     cam.y = (4 * cam.y + ty) / 5;
-    cam.h = (2 * cam.h + t) / 3;
+    cam.h = match f.r {
+        None => (2 * cam.h + t.clamp(1, 3000)) / 3,
+        Some(r) => (2 * cam.h + t.min(3000) - r) / 3,
+    };
+}
+
+/// Rotating view, once per frame per view (`FUN_0105bd98`): the yaw moves
+/// half-way towards `(0xb40 − heading) mod 0x1680` the short way round and
+/// the pitch half-way towards `clamp(0x167f − speed, 0x157c, 0x167f)` (the
+/// followed object: the driven vehicle, else the player). While the player
+/// is dead the yaw turns `0x20` and the pitch drops `4` per tick down to
+/// 0x157c. The original halves once per rendered frame (about one tick);
+/// here the step is scaled to the 25 Hz tick so the motion doesn't depend on
+/// the frame rate.
+fn turn_views(
+    time: Res<Time>,
+    rotating: Res<RotatingView>,
+    mut angles: ResMut<ViewAngles>,
+    target: Query<&Obj, With<CameraTarget>>,
+) {
+    if angles.0.is_empty() {
+        angles.0.push(ViewAngle::default());
+    }
+    if !rotating.0 {
+        return;
+    }
+    let ticks = time.delta_secs() * 25.0;
+    // Fraction of the remaining difference closed this frame (1/2 per tick).
+    let step = 1.0 - 0.5f32.powf(ticks);
+    let turn = TURN as f32;
+    let single = angles.0.len() == 1;
+    for (p, a) in angles.0.iter_mut().enumerate() {
+        let obj = target.iter().find(|o| single || o.player == Some(p as u8));
+        match obj {
+            Some(obj) => {
+                let want_yaw = (0xb40 - obj.heading).rem_euclid(TURN) as f32;
+                let d = (want_yaw - a.yaw + turn / 2.0).rem_euclid(turn) - turn / 2.0;
+                a.yaw = (a.yaw + d * step).rem_euclid(turn);
+                let want_pitch = (PITCH_DOWN - obj.speed).clamp(PITCH_TILTED, PITCH_DOWN) as f32;
+                a.pitch += (want_pitch - a.pitch) * step;
+            }
+            None => {
+                a.yaw = (a.yaw + 0x20 as f32 * ticks).rem_euclid(turn);
+                a.pitch = (a.pitch - 4.0 * ticks).max(PITCH_TILTED as f32);
+            }
+        }
+    }
+}
+
+/// Camera orientation of a view: straight down with north up, or in the
+/// rotating view with the heading up and tilted forward by
+/// `0x1680 − pitch` units (rendering.md §6, `FUN_01091f84`).
+fn view_transform(pos: Vec3, angle: Option<ViewAngle>) -> Transform {
+    let Some(a) = angle else {
+        return Transform::from_translation(pos).looking_at(pos - Vec3::Y, Vec3::NEG_Z);
+    };
+    // yaw = 0xb40 − heading: the heading (sin h, cos h) on the map points
+    // up the screen.
+    let h = (0xb40 as f32 - a.yaw) * std::f32::consts::TAU / TURN as f32;
+    let ahead = Vec3::new(h.sin(), 0.0, h.cos());
+    let tilt = (TURN as f32 - a.pitch) * std::f32::consts::TAU / TURN as f32;
+    let look = Vec3::NEG_Y * tilt.cos() + ahead * tilt.sin();
+    Transform::from_translation(pos).looking_to(look, ahead)
 }
 
 /// Render position of a camera state.
@@ -328,21 +558,33 @@ fn eye(game: &GameCam) -> Vec3 {
     )
 }
 
-fn place_game_camera(game: Res<GameCam>, cam: Single<(&mut GameCamera, &mut Transform)>) {
+fn place_game_camera(
+    game: Res<GameCam>,
+    rotating: Res<RotatingView>,
+    angles: Res<ViewAngles>,
+    cam: Single<(&mut GameCamera, &mut Transform)>,
+) {
     let (mut cam, mut transform) = cam.into_inner();
     let pos = eye(&game);
     if cam.mode == CameraMode::Follow {
-        // Straight down, north (-y) at the top of the screen.
-        *transform = Transform::from_translation(pos).looking_at(pos - Vec3::Y, Vec3::NEG_Z);
+        let angle = rotating.0.then(|| angles.0.first().copied().unwrap_or_default());
+        *transform = view_transform(pos, angle);
         cam.free.focus = Vec3::new(pos.x, 1.0, pos.z);
     }
 }
 
-fn place_extra_views(views: Res<ViewCams>, mut q: Query<(&ExtraView, &mut Transform)>) {
+fn place_extra_views(
+    views: Res<ViewCams>,
+    rotating: Res<RotatingView>,
+    angles: Res<ViewAngles>,
+    mut q: Query<(&ExtraView, &mut Transform)>,
+) {
     for (v, mut transform) in &mut q {
         if let Some(game) = views.0.get(v.0 as usize) {
-            let pos = eye(game);
-            *transform = Transform::from_translation(pos).looking_at(pos - Vec3::Y, Vec3::NEG_Z);
+            let angle = rotating
+                .0
+                .then(|| angles.0.get(v.0 as usize).copied().unwrap_or_default());
+            *transform = view_transform(eye(game), angle);
         }
     }
 }
@@ -386,15 +628,31 @@ fn gaps(n: usize, w: u32, h: u32) -> Vec<(f32, f32, f32, f32)> {
 /// Split-screen viewports from the window size; the whole window (order
 /// 0) otherwise. The first view clears the window to the sky colour (as in
 /// single player) and the separators are black overlay rectangles.
+#[allow(clippy::type_complexity)]
 fn layout_views(
     mode: Res<GameMode>,
     state: Res<State<AppState>>,
+    rotating: Res<RotatingView>,
     window: Query<&Window, With<PrimaryWindow>>,
-    mut primary: Query<&mut Camera, (With<GameCamera>, Without<ExtraView>)>,
-    mut extras: Query<(&ExtraView, &mut Camera), Without<GameCamera>>,
+    mut primary: Query<(&mut Camera, &mut Projection, &GameCamera), Without<ExtraView>>,
+    mut extras: Query<(&ExtraView, &mut Camera, &mut Projection), Without<GameCamera>>,
 ) {
-    let Ok(mut cam) = primary.single_mut() else { return };
+    let Ok((mut cam, mut projection, game_camera)) = primary.single_mut() else { return };
     let split = mode.is_multiplayer() && *state.get() == AppState::Playing;
+    // Field of view of the original's screen constants for this layout.
+    let free = game_camera.mode == CameraMode::Free;
+    let fov = view_fov(if split { mode.players() } else { 1 }, rotating.0 && !free);
+    let set_fov = |p: &mut Projection| {
+        if let Projection::Perspective(pp) = p
+            && pp.fov != fov
+        {
+            pp.fov = fov;
+        }
+    };
+    set_fov(&mut projection);
+    for (_, _, mut p) in &mut extras {
+        set_fov(&mut p);
+    }
     let size = window.single().map(|w| w.physical_size()).unwrap_or(UVec2::new(1280, 800));
     let rects = view_rects(mode.players(), size.x.max(2), size.y.max(2));
     let viewport = |i: usize| {
@@ -424,7 +682,7 @@ fn layout_views(
     if key(&cam.viewport) != key(&vp) {
         cam.viewport = vp;
     }
-    for (v, mut cam) in &mut extras {
+    for (v, mut cam, _) in &mut extras {
         let vp = viewport(v.0 as usize);
         if key(&cam.viewport) != key(&vp) {
             cam.viewport = vp;

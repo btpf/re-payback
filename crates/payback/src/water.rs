@@ -15,7 +15,7 @@ use payback_formats::IndexedImage;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct WaterMaterial {
-    /// x = scroll offset in bytes (0..63).
+    /// x = scroll offset in bytes (0..63), y = 1 in the rotating view.
     #[uniform(0)]
     pub params: Vec4,
     /// Cube texture atlas of raw palette indices.
@@ -42,7 +42,23 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/water.wgsl");
         app.add_plugins(MaterialPlugin::<WaterMaterial>::default())
-            .add_systems(FixedUpdate, scroll_water);
+            .add_systems(FixedUpdate, scroll_water)
+            .add_systems(Update, rotating_water);
+    }
+}
+
+/// The rotating view reads the background differently (`water.wgsl`).
+fn rotating_water(
+    water: Option<Res<Water>>,
+    rotating: Res<crate::camera::RotatingView>,
+    mut materials: ResMut<Assets<WaterMaterial>>,
+) {
+    let Some(water) = water else { return };
+    let y = if rotating.0 { 1.0 } else { 0.0 };
+    if materials.get(&water.0).is_some_and(|m| m.params.y != y)
+        && let Some(mut m) = materials.get_mut(&water.0)
+    {
+        m.params.y = y;
     }
 }
 

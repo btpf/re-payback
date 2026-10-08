@@ -9,10 +9,33 @@ use crate::world::{H_PER_SQUARE, stack_height, top_corners};
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageSampler, ImageSamplerDescriptor},
-    mesh::Indices,
+    mesh::{Indices, MeshVertexAttribute, VertexFormat},
     prelude::*,
     render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat},
 };
+
+/// Position of a vertex in its quad: (0,0) at the first corner, s along
+/// the first edge, t along the last (`shaders/city.wgsl` interpolates the
+/// Gouraud light bilinearly with it).
+pub const ATTRIBUTE_QUAD_ST: MeshVertexAttribute =
+    MeshVertexAttribute::new("QuadSt", 0x5042_0001, VertexFormat::Float32x2);
+
+/// The four corners of the vertex's quad (mesh space), the same on all four
+/// vertices: the shader adds the dynamic lights at each corner.
+pub const ATTRIBUTE_CORNER_POS: [MeshVertexAttribute; 4] = [
+    MeshVertexAttribute::new("CornerPos0", 0x5042_0010, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerPos1", 0x5042_0011, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerPos2", 0x5042_0012, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerPos3", 0x5042_0013, VertexFormat::Float32x3),
+];
+
+/// Static Gouraud light of the four corners (0..255+, 128 = unchanged).
+pub const ATTRIBUTE_CORNER_LIGHT: [MeshVertexAttribute; 4] = [
+    MeshVertexAttribute::new("CornerLight0", 0x5042_0020, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerLight1", 0x5042_0021, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerLight2", 0x5042_0022, VertexFormat::Float32x3),
+    MeshVertexAttribute::new("CornerLight3", 0x5042_0023, VertexFormat::Float32x3),
+];
 use payback_formats::IndexedImage;
 use payback_formats::map::{self, Face, FaceType, MAP_SIZE, Map, Slope};
 
@@ -30,12 +53,12 @@ pub struct CubeAtlases {
 }
 
 /// Night darkening: every cube texture whose name doesn't start with `#` or
-/// `$` maps colour c to the palette colour nearest pal[c] - (87, 87, 87)
-/// (rendering.md §4; approximated here by direct subtraction).
-pub const NIGHT_DARKEN: u8 = 87;
-
+/// `$` maps colour c to `T1[c][0x67]`, the palette colour nearest
+/// pal[c] - (87, 87, 87) (rendering.md §4, `FUN_0106ecf0(1)`; the table is
+/// read from the shipped `Alpha.256`).
 pub fn build_cube_atlases(data: &GameData, night: bool) -> CubeAtlases {
     let n = (ATLAS_SIZE * ATLAS_SIZE) as usize;
+    let remap = night.then(|| crate::camera::postfx::night_remap(data));
     let mut opaque = vec![0u8; n * 4];
     let mut keyed = vec![0u8; n * 4];
     let mut indices = vec![0u8; n];
@@ -52,13 +75,13 @@ pub fn build_cube_atlases(data: &GameData, night: bool) -> CubeAtlases {
         let (tx, ty) = (i as u32 % ATLAS_TILES * TILE, i as u32 / ATLAS_TILES * TILE);
         for row in 0..TILE {
             for col in 0..TILE {
-                let c = img.pixels[(row * TILE + col) as usize];
+                let mut c = img.pixels[(row * TILE + col) as usize];
                 let p = ((ty + row) * ATLAS_SIZE + tx + col) as usize;
+                if let (true, Some(remap)) = (darken, &remap) {
+                    c = remap[c as usize];
+                }
                 let mut rgb = [0u8; 3];
                 rgb.copy_from_slice(&data.palette[c as usize * 3..c as usize * 3 + 3]);
-                if darken && c != 0 {
-                    rgb = rgb.map(|v| v.saturating_sub(NIGHT_DARKEN));
-                }
                 opaque[p * 4..p * 4 + 3].copy_from_slice(&rgb);
                 opaque[p * 4 + 3] = 255;
                 keyed[p * 4..p * 4 + 3].copy_from_slice(&rgb);
@@ -128,8 +151,12 @@ struct MeshBuilder {
     uvs: Vec<[f32; 2]>,
     /// Tile origin in atlas texels (+ SCROLL_FLAG for scrolling water).
     uvs_b: Vec<[f32; 2]>,
-    /// Gouraud light / 255 per corner (128 = unchanged; `lighting.rs`).
-    light: Vec<[f32; 4]>,
+    /// Position in the quad (0..1, 0..1).
+    st: Vec<[f32; 2]>,
+    /// The quad's corners and their Gouraud light (128 = unchanged;
+    /// `lighting.rs`), repeated on each vertex.
+    corner_pos: [Vec<[f32; 3]>; 4],
+    corner_light: [Vec<[f32; 3]>; 4],
     indices: Vec<u32>,
 }
 
@@ -152,8 +179,12 @@ impl MeshBuilder {
             .cross(corners[3] - corners[0])
             .normalize_or_zero();
         let base = self.positions.len() as u32;
-        for ((c, t), l) in corners.iter().zip(tex_uv).zip(light) {
-            self.light.push([l[0] / 255.0, l[1] / 255.0, l[2] / 255.0, 1.0]);
+        for ((c, t), st) in corners.iter().zip(tex_uv).zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]) {
+            self.st.push(st);
+            for k in 0..4 {
+                self.corner_pos[k].push(corners[k].to_array());
+                self.corner_light[k].push(light[k]);
+            }
             // Keep a quarter-texel inside the tile so nearest sampling never
             // bleeds into the neighbour.
             let t = t.clamp(Vec2::splat(0.25), Vec2::splat(63.75));
@@ -172,7 +203,7 @@ impl MeshBuilder {
     }
 
     fn build(self) -> Mesh {
-        Mesh::new(
+        let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
@@ -180,8 +211,12 @@ impl MeshBuilder {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.uvs_b)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.light)
-        .with_inserted_indices(Indices::U32(self.indices))
+        .with_inserted_attribute(ATTRIBUTE_QUAD_ST, self.st);
+        for (k, (p, l)) in self.corner_pos.into_iter().zip(self.corner_light).enumerate() {
+            mesh.insert_attribute(ATTRIBUTE_CORNER_POS[k], p);
+            mesh.insert_attribute(ATTRIBUTE_CORNER_LIGHT[k], l);
+        }
+        mesh.with_inserted_indices(Indices::U32(self.indices))
     }
 }
 

@@ -17,8 +17,10 @@
 //! Lens flares (`AddFlare` OS4 `FUN_0103451c`, drawn by `FUN_01034804`) are
 //! collected each frame in [`Flares`] (type 11 records here, model faces in
 //! `crate::objects`) and drawn at a fixed screen size with the ghost chain
-//! through the screen centre, per [`FxMode`]. [`ScreenFlash`] is the palette
-//! brightening of explosions and lightning (`DAT_0114c748`).
+//! through the screen centre, per [`FxMode`], separately for every view
+//! (split screen) with its own occlusion test. [`ScreenFlash`] is the
+//! palette brightening of explosions and lightning (`DAT_0114c748`), applied
+//! by the views' final pass (`crate::camera::postfx`).
 //!
 //! Not reproduced:
 //! - deletion of records outside the view rectangle (the simulation has no
@@ -27,24 +29,27 @@
 //!   `FUN_01036574` are in `crate::lighting`);
 //! - debris fragments (`FUN_01035438`), a separate list;
 //!
-//! Rendering: every (layer, blend) pair, plus one lens-flare pass per layer,
-//! is one mesh rebuilt each frame from horizontal quads ("screen-aligned"
-//! for the overhead camera: aligned with the camera's yaw) that sample a
+//! Rendering: every (view, layer, blend) triple, plus one lens-flare pass per
+//! layer, is one mesh rebuilt each frame on the view's render layer from
+//! horizontal quads ("screen-aligned" for the overhead camera: aligned with
+//! that view's yaw, which differs in the rotating view) that sample a
 //! 512x256 atlas of the effect textures. [`EffectMaterial`] sets the blend
 //! equation per [`Blend`], which gives the Alpha.256 operations exactly (in
-//! linear colour rather than palette space), including subtraction via
+//! linear colour rather than palette space; the final pass snaps the result
+//! to the palette), including subtraction via
 //! `ReverseSubtract`. Sprites are depth-tested against the city, lifted 16
 //! h-units; flares and weather are not (the original draws list 3 after
 //! everything). Layers are drawn bottom to top through the material's sort
 //! bias, after the city's transparent faces.
 
-use crate::camera::{GameCam, GameCamera};
+use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, view_layer};
 use crate::data::GameData;
 use crate::sim::Rng;
 use crate::world::{City, SQUARE, to_render, z_of_h};
+use std::collections::HashMap;
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
-    camera::visibility::NoFrustumCulling,
+    camera::visibility::{NoFrustumCulling, RenderLayers},
     image::{ImageSampler, ImageSamplerDescriptor},
     mesh::{Indices, MeshVertexBufferLayoutRef},
     pbr::{MaterialPipeline, MaterialPipelineKey},
@@ -111,6 +116,9 @@ pub struct FlareSource {
     pub size: i32,
     /// Alpha.256 table of the face (`blend >> 16`; 3 counts as 0).
     pub table: u8,
+    /// Hidden when the city is in front of it (`AddFlare` with a positive
+    /// size; explosion flares pass a negative one).
+    pub occlude: bool,
 }
 
 /// Flares added this frame; drawn and cleared by the effect renderer.
@@ -129,31 +137,38 @@ impl Flares {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectsDraw;
 
-/// The game camera as the effect updater sees it: position in object units
-/// and `camH` (h-units).
+/// The game camera as the effect updater sees it: position in object units,
+/// `camH` (h-units) and whether the view rotates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct View {
     x: i32,
     y: i32,
     h: i32,
+    rotating: bool,
 }
 
 impl View {
-    fn of(cam: &GameCam) -> View {
+    fn of(cam: &GameCam, rotating: bool) -> View {
         View {
             x: (cam.x >> 5) as i32,
             y: (cam.y >> 5) as i32,
             h: cam.h,
+            rotating,
         }
     }
 
-    /// The view rectangle `[x0, x1] × [y0, y1]` in object units: the screen
-    /// projected at depth `camH·16 + 0x2af2` plus one square
-    /// (`FUN_010386e8`, non-rotating view).
+    /// The view rectangle `[x0, x1] × [y0, y1]` in object units
+    /// (`FUN_010386e8`): the screen projected at depth `camH·16 + 0x2af2`
+    /// plus one square, or in the rotating view a fixed ±0xf00000 >> 9 =
+    /// ±0x7800 (15 squares) around the camera.
     fn rect(&self) -> (i32, i32, i32, i32) {
-        let d = self.h as i64 * 16 + 0x2af2;
         let (cx, cy) = (self.x as i64 * 512, self.y as i64 * 512);
-        let (hw, hh) = (d * SCREEN_W + 0x800, d * SCREEN_H + 0x800);
+        let (hw, hh) = if self.rotating {
+            (0xf00000, 0xf00000)
+        } else {
+            let d = self.h as i64 * 16 + 0x2af2;
+            (d * SCREEN_W + 0x800, d * SCREEN_H + 0x800)
+        };
         (
             ((cx - hw) >> 9) as i32,
             ((cx + hw) >> 9) as i32,
@@ -545,12 +560,13 @@ fn update_effects(
     mut flash: ResMut<ScreenFlash>,
     rng: Option<ResMut<Rng>>,
     cam: Res<GameCam>,
+    rotating: Res<RotatingView>,
     city: Option<Res<City>>,
 ) {
     // The flash decays x3/4 per tick before anything adds to it.
     flash.0 = flash.0 * 3 >> 2;
     let Some(mut rng) = rng else { return };
-    effects.view = Some(View::of(&cam));
+    effects.view = Some(View::of(&cam, rotating.0));
     if !effects.is_empty() {
         // Top of the ground cube under (x, y), as an object z.
         let ground = |x: i32, y: i32| {
@@ -859,12 +875,21 @@ impl Material for EffectMaterial {
     }
 }
 
-/// One mesh entity per (layer, pass).
+/// One mesh entity per (view, layer, pass), on the view's render layer
+/// (`crate::camera::view_layer`): sprites face each view's camera and
+/// flares sit on its screen, as the original draws every view's effects
+/// and flares in its own pass (`FUN_0105bd98` → `FUN_01049374`,
+/// `FUN_01034804`).
 #[derive(Component)]
 struct EffectBatch {
+    view: usize,
     layer: usize,
     pass: Pass,
 }
+
+/// Materials by `layer * Pass::ORDER.len() + pass rank`.
+#[derive(Resource)]
+struct BatchMaterials(Vec<Handle<EffectMaterial>>);
 
 /// Linear RGB of the rain colour.
 #[derive(Resource)]
@@ -877,25 +902,37 @@ fn setup(
     mut materials: ResMut<Assets<EffectMaterial>>,
 ) {
     let atlas = images.add(build_atlas(&data));
+    let mut handles = Vec::new();
     for layer in 0..LAYERS {
         for pass in Pass::ORDER {
-            let material = materials.add(EffectMaterial {
+            handles.push(materials.add(EffectMaterial {
                 atlas: atlas.clone(),
                 pass,
                 order: 1.0e4 * (1 + layer * Pass::ORDER.len() + pass.rank()) as f32,
-            });
+            }));
+        }
+    }
+    spawn_batches(&mut commands, &handles, 0);
+    commands.insert_resource(BatchMaterials(handles));
+    let rgb = &data.palette[RAIN_COLOUR * 3..RAIN_COLOUR * 3 + 3];
+    let c = Color::srgb_u8(rgb[0], rgb[1], rgb[2]).to_linear();
+    commands.insert_resource(RainColour([c.red, c.green, c.blue, 1.0]));
+}
+
+fn spawn_batches(commands: &mut Commands, materials: &[Handle<EffectMaterial>], view: usize) {
+    for layer in 0..LAYERS {
+        for pass in Pass::ORDER {
+            let material = materials[layer * Pass::ORDER.len() + pass.rank()].clone();
             commands.spawn((
-                EffectBatch { layer, pass },
+                EffectBatch { view, layer, pass },
                 MeshMaterial3d(material),
                 Transform::default(),
                 Visibility::Hidden,
                 NoFrustumCulling,
+                RenderLayers::layer(view_layer(view)),
             ));
         }
     }
-    let rgb = &data.palette[RAIN_COLOUR * 3..RAIN_COLOUR * 3 + 3];
-    let c = Color::srgb_u8(rgb[0], rgb[1], rgb[2]).to_linear();
-    commands.insert_resource(RainColour([c.red, c.green, c.blue, 1.0]));
 }
 
 const WHITE: [f32; 4] = [1.0; 4];
@@ -1115,97 +1152,140 @@ fn table_colour(table: u8) -> [f32; 4] {
     }
 }
 
-/// Rebuild the batch meshes from the effect lists, the frame's flares and
-/// the screen flash.
-#[allow(clippy::too_many_arguments)]
+/// Rebuild every view's batch meshes from the effect lists and the
+/// frame's flares. (The palette flash is applied by the views' final pass,
+/// `crate::camera::postfx`.)
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn build_meshes(
     mut commands: Commands,
     effects: Res<Effects>,
     mode: Res<FxMode>,
-    flash: Res<ScreenFlash>,
     rain: Option<Res<RainColour>>,
+    materials: Option<Res<BatchMaterials>>,
     mut flares: ResMut<Flares>,
-    camera: Query<(&Camera, &GlobalTransform, &Projection), With<GameCamera>>,
+    cameras: Query<(
+        &Camera,
+        &GlobalTransform,
+        &Projection,
+        Option<&ExtraView>,
+        Has<GameCamera>,
+    )>,
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
     city: Option<Res<City>>,
 ) {
     // Night maps draw `Blood.dark` instead of `Blood` (`FUN_01035250`).
-    let night = city.is_some_and(|c| c.map.night);
+    let night = city.as_ref().is_some_and(|c| c.map.night);
     let mut sources = std::mem::take(&mut flares.0);
-    let Ok((cam, cam_tf, projection)) = camera.single() else {
-        return;
-    };
-    // Sprites face up, with their top towards the top of the screen.
-    let right = cam_tf.right().with_y(0.0).normalize_or(Vec3::X);
-    let tan_half = match projection {
-        Projection::Perspective(p) => (p.fov * 0.5).tan(),
-        _ => 0.5,
-    };
-    let view = ViewInfo {
-        pos: cam_tf.translation(),
-        forward: cam_tf.forward().into(),
-        axes: (right, right.cross(Vec3::Y)),
-        tan_half,
-    };
     let rain = rain.map_or(WHITE, |r| r.0);
-
-    let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();
-    for (layer, list) in effects.lists.iter().enumerate() {
+    // Type 11 records are flares too (AddFlare with −size: never occluded).
+    for list in &effects.lists {
         for e in list {
-            let (mut sprite, half, pass) = e.sprite();
-            if night && sprite == Sprite::Single(BLOOD_TILE) {
-                sprite = Sprite::Single(BLOOD_DARK_TILE);
+            if e.kind == 11 && sources.len() < MAX_FLARES {
+                sources.push(FlareSource {
+                    pos: to_render(e.pos.as_vec3()) + Vec3::Y * NEARER,
+                    size: e.size,
+                    table: 0,
+                    occlude: false,
+                });
             }
-            if sprite == Sprite::Flare {
-                // AddFlare with −size: never occluded.
-                let pos = to_render(e.pos.as_vec3()) + Vec3::Y * NEARER;
-                if sources.len() < MAX_FLARES {
-                    sources.push(FlareSource {
-                        pos,
-                        size: e.size,
-                        table: 0,
-                    });
-                }
-                continue;
-            }
-            quads[layer][pass.rank()].effect(&view, e, sprite, half, rain);
         }
     }
 
-    // Flares and the flash go last, in the top list's additive batch.
-    let top = &mut quads[LAYERS - 1][Pass::Flare.rank()];
-    let aspect = cam
-        .logical_viewport_size()
-        .map_or(1.6, |s| s.x / s.y.max(1.0));
-    let ky = 2.0 / SCREEN_H as f32;
-    let screen = Screen {
-        camera: cam,
-        transform: cam_tf,
-        px: Vec2::new(ky / aspect, ky),
-    };
-    if mode.0 > 0 {
-        for f in &sources {
-            let Some(ndc) = cam.world_to_ndc(cam_tf, f.pos) else {
-                continue;
+    let views: Vec<(usize, &Camera, &GlobalTransform, &Projection)> = cameras
+        .iter()
+        .filter_map(|(cam, tf, projection, extra, primary)| {
+            let view = match (extra, primary) {
+                (Some(v), _) => v.0 as usize,
+                (None, true) => 0,
+                (None, false) => return None,
             };
-            let on_screen = ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0;
-            if !on_screen || ndc.z <= 0.0 || ndc.z > 1.0 {
-                continue;
+            cam.is_active.then_some((view, cam, tf, projection))
+        })
+        .collect();
+    // Batches for views that have none yet (split screen).
+    if let Some(materials) = &materials {
+        for &(view, ..) in &views {
+            if !batches.iter().any(|(_, b, ..)| b.view == view) {
+                spawn_batches(&mut commands, &materials.0, view);
             }
-            let r = (f.size >> 4) as f32;
-            screen.flare(top, ndc.truncate(), r, table_colour(f.table), mode.0 >= 2);
         }
     }
-    if flash.0 > 0 {
-        let v = (flash.0.min(255) as f32) / 255.0;
-        let c = Color::srgb(v, v, v).to_linear();
-        let color = [c.red, c.green, c.blue, 1.0];
-        screen.quad(top, Vec2::NEG_ONE, Vec2::ONE, SOLID_TILE, color);
+
+    let mut built: HashMap<usize, [[Quads; Pass::ORDER.len()]; LAYERS]> = HashMap::new();
+    for &(view_index, cam, cam_tf, projection) in &views {
+        // Sprites face up, with their top towards the top of the screen.
+        let right = cam_tf.right().with_y(0.0).normalize_or(Vec3::X);
+        let tan_half = match projection {
+            Projection::Perspective(p) => (p.fov * 0.5).tan(),
+            _ => 0.5,
+        };
+        let view = ViewInfo {
+            pos: cam_tf.translation(),
+            forward: cam_tf.forward().into(),
+            axes: (right, right.cross(Vec3::Y)),
+            tan_half,
+        };
+        let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();
+        for (layer, list) in effects.lists.iter().enumerate() {
+            for e in list {
+                let (mut sprite, half, pass) = e.sprite();
+                if night && sprite == Sprite::Single(BLOOD_TILE) {
+                    sprite = Sprite::Single(BLOOD_DARK_TILE);
+                }
+                if sprite == Sprite::Flare {
+                    continue;
+                }
+                quads[layer][pass.rank()].effect(&view, e, sprite, half, rain);
+            }
+        }
+
+        // Flares go last, in the top list's additive batch; the original
+        // keeps at most 199 per view and tests whether each one's centre
+        // pixel was overdrawn (here: whether the city is in the way).
+        let top = &mut quads[LAYERS - 1][Pass::Flare.rank()];
+        let aspect = cam
+            .logical_viewport_size()
+            .map_or(1.6, |s| s.x / s.y.max(1.0));
+        let ky = 2.0 / SCREEN_H as f32;
+        let screen = Screen {
+            camera: cam,
+            transform: cam_tf,
+            px: Vec2::new(ky / aspect, ky),
+        };
+        if mode.0 > 0 {
+            let eye = cam_tf.translation();
+            let mut drawn = 0;
+            for f in &sources {
+                if drawn >= MAX_FLARES {
+                    break;
+                }
+                let Some(ndc) = cam.world_to_ndc(cam_tf, f.pos) else {
+                    continue;
+                };
+                let on_screen = ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0;
+                if !on_screen || ndc.z <= 0.0 || ndc.z > 1.0 {
+                    continue;
+                }
+                if f.occlude
+                    && let Some(city) = &city
+                    && crate::objects::occluded(city, f.pos, eye)
+                {
+                    continue;
+                }
+                drawn += 1;
+                let r = (f.size >> 4) as f32;
+                screen.flare(top, ndc.truncate(), r, table_colour(f.table), mode.0 >= 2);
+            }
+        }
+        built.insert(view_index, quads);
     }
 
     for (entity, batch, mesh, mut visibility) in &mut batches {
-        let q = std::mem::take(&mut quads[batch.layer][batch.pass.rank()]);
+        let q = built
+            .get_mut(&batch.view)
+            .map(|quads| std::mem::take(&mut quads[batch.layer][batch.pass.rank()]))
+            .unwrap_or_default();
         if q.indices.is_empty() {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
@@ -1456,6 +1536,7 @@ mod tests {
             x: 100_000,
             y: 100_000,
             h: 1000,
+            rotating: false,
         });
         let (x0, x1, _, _) = fx.view.unwrap().rect();
         // A drop just past the right edge wraps to the left side.
@@ -1482,6 +1563,7 @@ mod tests {
             x: 0,
             y: 0,
             h: 1000,
+            rotating: false,
         });
         fx.add(
             12,

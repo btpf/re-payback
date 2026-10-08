@@ -367,8 +367,10 @@ pub fn remap_table(data: &GameData) -> Vec<u16> {
 // ---------------------------------------------------------------------------
 // Material
 
-/// Dynamic lights sent to the shader per frame (nearest the camera first).
-pub const MAX_LIGHTS: usize = 64;
+/// Dynamic lights sent to the shader per frame: those whose square box
+/// reaches a view's drawn squares, nearest a view first (the original adds
+/// up to 1000; 510 lights fit a 16 KB uniform block, the portable limit).
+pub const MAX_LIGHTS: usize = 510;
 
 #[derive(ShaderType, Clone, Debug)]
 pub struct LightBlock {
@@ -439,10 +441,19 @@ impl Material for CityMaterial {
         layout: &MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        use crate::city::{ATTRIBUTE_CORNER_LIGHT, ATTRIBUTE_CORNER_POS, ATTRIBUTE_QUAD_ST};
         let vertex_layout = layout.0.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
-            Mesh::ATTRIBUTE_COLOR.at_shader_location(2),
+            ATTRIBUTE_QUAD_ST.at_shader_location(2),
+            ATTRIBUTE_CORNER_POS[0].at_shader_location(3),
+            ATTRIBUTE_CORNER_POS[1].at_shader_location(4),
+            ATTRIBUTE_CORNER_POS[2].at_shader_location(5),
+            ATTRIBUTE_CORNER_POS[3].at_shader_location(6),
+            ATTRIBUTE_CORNER_LIGHT[0].at_shader_location(7),
+            ATTRIBUTE_CORNER_LIGHT[1].at_shader_location(8),
+            ATTRIBUTE_CORNER_LIGHT[2].at_shader_location(9),
+            ATTRIBUTE_CORNER_LIGHT[3].at_shader_location(10),
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
         // Both sides are in the mesh already.
@@ -718,11 +729,15 @@ fn collect_lights(
     }
 }
 
-/// Send the nearest [`MAX_LIGHTS`] lights to the city materials.
+/// Send the lights that can reach a view (every split-screen view; their
+/// square boxes against the squares each view draws), at most
+/// [`MAX_LIGHTS`], nearest a view first, to the city materials.
 fn upload_lights(
     lights: Res<DynamicLights>,
     render: Option<Res<CityRender>>,
     cam: Res<crate::camera::GameCam>,
+    views: Res<crate::camera::ViewCams>,
+    rotating: Res<crate::camera::RotatingView>,
     mut materials: ResMut<Assets<CityMaterial>>,
     mut last: Local<usize>,
 ) {
@@ -730,14 +745,31 @@ fn upload_lights(
     if lights.0.is_empty() && *last == 0 {
         return;
     }
-    let centre = Vec2::new(cam.x as f32 / 32.0, cam.y as f32 / 32.0);
-    let mut sorted: Vec<&PointLight> = lights.0.iter().collect();
-    sorted.sort_by(|a, b| {
-        let da = a.pos.truncate().distance_squared(centre);
-        let db = b.pos.truncate().distance_squared(centre);
-        da.total_cmp(&db)
-    });
+    let cams = views.all(&cam);
+    let boxes: Vec<(Vec2, IVec2, (i32, i32))> = cams
+        .iter()
+        .map(|c| {
+            let centre = Vec2::new(c.x as f32 / 32.0, c.y as f32 / 32.0);
+            (centre, c.square(), c.visible_squares(cams.len(), rotating.0))
+        })
+        .collect();
+    let mut sorted: Vec<(f32, &PointLight)> = lights
+        .0
+        .iter()
+        .filter_map(|l| {
+            let r = l.radius(13);
+            let s = IVec2::new(l.pos.x as i32 >> 11, l.pos.y as i32 >> 11);
+            boxes
+                .iter()
+                .filter(|(_, sq, (hw, hh))| (s.x - sq.x).abs() <= hw + r && (s.y - sq.y).abs() <= hh + r)
+                .map(|(centre, ..)| l.pos.truncate().distance_squared(*centre))
+                .min_by(f32::total_cmp)
+                .map(|d| (d, l))
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
     sorted.truncate(MAX_LIGHTS);
+    let sorted: Vec<&PointLight> = sorted.into_iter().map(|(_, l)| l).collect();
     let mut block = LightBlock::default();
     block.params.x = sorted.len() as f32;
     for (i, l) in sorted.iter().enumerate() {

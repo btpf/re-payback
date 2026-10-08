@@ -4,11 +4,16 @@
 //     BG[sy * 320 + sx + t]
 // where BG is the background picture rescaled to 320x266. Scrolling ('#')
 // textures read their texels `scroll` bytes further along.
+// In the rotating view (`FUN_01081ba4` / `FUN_0108a2a0`, software) the row
+// read is sy / 2 + tilt rows instead of sy, where
+// tilt rows = (pitch - 0x157c) * 127 / 259 (127 = the view's centre row):
+// rows 127..255 of the background looking straight down, 0..127 at the
+// full tilt. The reflection does not turn with the view.
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::view
 
-// x = scroll (bytes, 0..63)
+// x = scroll (bytes, 0..63), y = 1 in the rotating view
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var index_atlas: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var sky: texture_2d<f32>;
@@ -33,7 +38,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let vp = view.viewport;
     let sx = i32(floor((in.position.x - vp.x) / vp.z * 320.0));
-    let sy = i32(floor((in.position.y - vp.y) / vp.w * 256.0));
+    var sy = i32(floor((in.position.y - vp.y) / vp.w * 256.0));
+    if (params.y > 0.5) {
+        // Pitch from the view's tilt (0x1680 per turn, 0x167f straight
+        // down); camera forward = -Z of world_from_view.
+        let forward = -view.world_from_view[2].xyz;
+        let tilt = acos(clamp(-forward.y, -1.0, 1.0));
+        let pitch = 5760.0 - tilt * 5760.0 / 6.2831853;
+        let rows = i32(floor(clamp(pitch - 5500.0, 0.0, 259.0) * 127.0 / 259.0));
+        sy = sy / 2 + rows;
+    }
     let idx = sy * BG_W + sx + t;
     let p = vec2<i32>(idx % BG_W, clamp(idx / BG_W, 0, BG_H - 1));
     return textureLoad(sky, p, 0);

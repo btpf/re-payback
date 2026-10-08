@@ -10,8 +10,9 @@
 //!   sound, and random lightning that flashes the palette with `Lightning`
 //!   thunder.
 //!
-//! All of it is single-player only (`DAT_0114c7c8 == 0`), which is the only
-//! mode here. Sources: OS4 main loop `FUN_010692bc` (level start ~0x1069390
+//! All of it is single-player only: the level start (and the rain sound)
+//! and the lightning are skipped when `DAT_0114c7c8 != 0`, so split-screen
+//! games have no weather in any view. Sources: OS4 main loop `FUN_010692bc` (level start ~0x1069390
 //! and the per-frame lightning after `FUN_010542b8`), effect updater
 //! `FUN_010386e8`. `--weather <n>` overrides the header (and the level
 //! restriction of rain); `--lightning` strikes 40 times as often, for checks.
@@ -19,7 +20,7 @@
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::GameCam;
 use crate::effects::{Blend, Effects, ScreenFlash, Tex};
-use crate::level::{AppState, LevelEntity, LevelLoaded, LevelSpec};
+use crate::level::{AppState, GameMode, LevelEntity, LevelLoaded, LevelSpec};
 use crate::sim::Rng;
 use crate::world::City;
 use bevy::prelude::*;
@@ -56,10 +57,16 @@ impl Plugin for WeatherPlugin {
 
 /// Pick the weather from the map header: snow on any level, rain only on
 /// level 0 (`DAT_0114c558 == 0`).
-fn start(mut weather: ResMut<Weather>, city: Option<Res<City>>, spec: Res<LevelSpec>) {
+fn start(
+    mut weather: ResMut<Weather>,
+    city: Option<Res<City>>,
+    spec: Res<LevelSpec>,
+    mode: Res<GameMode>,
+) {
     let forced = crate::arg("--weather").and_then(|v| v.parse::<u32>().ok());
     let header = city.map_or(0, |c| c.map.variant);
     let kind = match (forced, header) {
+        _ if mode.is_multiplayer() => 0,
         (Some(k), _) => k,
         (None, 2) if spec.level != 0 => 0,
         (None, k) => k,

@@ -218,6 +218,37 @@ best wins, result 0 replaced by 8). Fitted against the palette (≥ 99 % match):
 | 9 | | d+s−32 | |
 | 10 | | pal[s] + d − 128 (d = intensity) | |
 
+Night remap check: `General/Alpha.256` ships with the game; recomputing tables 0, 1,
+4 and 9 from the palette with the metric above matches 99.2–99.5 % of random
+entries. The port reads table 1 directly for the night remap (§4).
+
+### Palette output and motion blur (port: `crates/payback/src/postfx.rs`)
+
+Every pixel of the original is a palette index. The port renders true colour and runs
+one final pass per game view (after the HUD, before the window blit): each pixel is
+snapped to the nearest palette colour with the metric above (a 256³ table computed
+exactly by a separable weighted-L1 distance transform, ties to the lower index, 0 →
+8), then the palette flash is added (§4). Gouraud results (`Gouraud.256` = nearest of
+`pal[c] + light − 128`) and the shine overlay (table 9) therefore come out exactly as
+the tables, up to blending order. Still approximate: blends with the framebuffer
+(effects, Alpha tops, additive faces) run in linear light on the sRGB target and are
+snapped once at the end, where the original snaps after each blend and adds the
+gamma-encoded palette RGB (additive effects look weaker than the original's).
+`--no-palette-snap` turns the snap off for comparison.
+
+**Motion blur** (CONFIRMED; option "Motion blur", live flag `DAT_0114c6c8`, toggled by
+`FUN_01042308`, saved as config field 2 `DAT_0114c72c`; software renderer only — the
+pause menu refuses it under Warp3D): at the end of each frame `FUN_01042f00` calls
+`FUN_01034438` → `FUN_0112cdb8(DAT_0114c7a8, DAT_0114c7ac, DAT_0114c7b0)`, which for
+every pixel writes `T[a·256 + b]` with the table pointer `DAT_0114c440 + 0x40000`
+(table 4, the average) from the two render buffers into the display buffer
+`DAT_0114c7b0` (`lhz`/`rlwimi`/`lbzx`, 32 pixels per iteration, `(W·H >> 5) − 1`
+iterations); then `DAT_0114c6bc` flips and the next frame renders into the other
+buffer. So the visible frame is `T4[previous][current]`, the nearest palette colour to
+the average of the last two rendered frames (no feedback). The port does the same in
+the final pass (it keeps each pixel's palette index of the previous frame); it renders
+the software look regardless of the renderer.
+
 Cube Alpha tops: `FUN_01036044(tex, x0,y0,x1,y1, 0x40000)` temporarily adds 0x40000
 to the current table pointer `DAT_0114c440` and draws with `FUN_0112bfdc`
 (`out = T4[dst][texel]`; texel 0 is **not** skipped). Shipped uses: `Ice2.chunky`
@@ -371,14 +402,26 @@ after LoadMap:
    128)) — an *additive* offset per channel, so 0x30 (shadow) is −80 and 0x60 (night)
    −32 on top of the night-darkened textures.
 
+**Shadow ray start** (CONFIRMED for the NW top corner, `FUN_010766c8` at the
+first test after the per-cube setup): the square loop runs x, y = 1…126 (grid offset
+`local_74 = −0xa3c + 0x1400·(x−1)`, `+0x14` per y); the first cell read is
+`local_74 + 0x1446 + z` = cell `(2x − 1, 2y − 1, z0 + 1)` for the corner at half-grid
+`(2x, 2y)`, the next `(2x − 2, 2y − 2, z0 + 2)` (offset −0xa09 per step), unrolled
+while z ≤ 9; `z0 = clamp((base + h) >> 7, 0, 9)`. The other corners use further
+unrolled copies whose offsets were not all decoded (INFERRED: the same diagonal).
+
 Port (`crates/payback/src/lighting.rs`, `shaders/city.wgsl`): static light per cube
 corner computed at load or on toggle (items 1–5; the lamp intensities come from a
-local generator), dynamic lights (item 6) collected per frame and summed per vertex in
-the vertex shader (the 64 nearest the camera), light clamped to 255, interpolated,
-quantised `& 0xF8` and added to the texel in sRGB (no palette quantisation). The
-pause-menu option (`Settings::gouraud`, default on) drives it; `--gouraud 0|1`
-overrides. Approximate: the ray's first cell is reconstructed from the index
-arithmetic (the cell diagonally north-west of the corner).
+local generator), dynamic lights (item 6) collected per frame: those whose square box
+reaches the squares a view draws (every split-screen view), nearest a view first, at
+most 510 (the original's limit is 1000; 510 fit a 16 KB uniform block). Every city
+vertex carries its quad's four corners and static lights; the vertex shader adds the
+dynamic lights at each corner, clamps to 255, and the fragment shader interpolates the
+four corners bilinearly (the software rasteriser interpolates along the edges and the
+spans; splitting the quad into two triangles left a diagonal seam), quantises
+`& 0xF8` and adds the light to the texel in gamma-encoded RGB; the palette snap of
+`Gouraud.256` is the view's final pass ("Palette output", §3). The pause-menu option
+(`Settings::gouraud`, default on) drives it; `--gouraud 0|1` overrides.
 
 ### Header `variant` = weather (`DAT_0114c854`, read via `FUN_0106e478`) — CONFIRMED
 
@@ -457,10 +500,18 @@ channel (from the unflashed copy at `DAT_012a510c/550c/590c`) and is loaded with
 additively. Nothing is darkened or recoloured per weather apart from this (the night
 remap is the header's night flag, not the weather).
 
-Port: `crates/payback/src/weather.rs` (spawn, lightning), `effects.rs` (wrap, respawn,
-drawing, `ScreenFlash`; the flash is an additive full-screen quad, i.e. added in linear
-light rather than to palette entries). The snow marks are put on the top of cube 0
-under the flake instead of at z 22500 (the port depth-tests list 0).
+**Split screen** (CONFIRMED, level start in `FUN_010692bc`: the weather spawn and the
+`Rain` sound sit inside `if (DAT_0114c7c8 == 0)`, the lightning likewise): no weather at
+all in multiplayer, in any view.
+
+Rotating view: the wrap rectangle is a fixed `±0xf00000 >> 9` = ±0x7800 object units
+(15 squares) around the camera (`FUN_010386e8`, `DAT_0114c7dc != 0`).
+
+Port: `crates/payback/src/weather.rs` (spawn, lightning; off in multiplayer),
+`effects.rs` (wrap, respawn, drawing), `ScreenFlash` (applied by the view's final pass
+after the palette snap, as the original changes the palette; see §3). The snow marks
+are put on the top of cube 0 under the flake instead of at z 22500 (the port
+depth-tests list 0).
 
 ---
 
@@ -558,8 +609,48 @@ dep = cos[p]*(Z>>1) + sin[p]*fwd ;  den = dep>>4  (cubes: den = 200 if dep < 0xc
 sx = cx + lat*fx/den ;  sy = cy + ((cos[p]*fwd − sin[p]*(Z>>1))>>1)*fy/den
 ```
 
-Focal length 128 px → HFOV 102.7°, VFOV 90° (camera also half as far, so the ground
-under the player has the same scale as top-down). Visible range `D·cx/(fx<<10)+1`.
+With the trig tables at ±256 and x, y in 16.16, Z in h-units, this is a pinhole camera
+at the camera position, tilted forward by `0x1680 − pitch`, with focal length `8·fx`
+px (128 on 320×256): HFOV 102.7°, VFOV 90° — half the top-down focal length, at the
+same depth Z (the earlier note "camera also half as far" was wrong: Z is not halved
+overall, `Z >> 1` only pairs with the `>> 4` of the depth). Together with the lower
+camera (B − R: 700 h-units above a standing player instead of 1000) the rotating view
+shows about 1.4× the width of the top-down view. Heading `h` points up the screen
+(yaw = 0xb40 − h: `fwd ∝ −(sin h·x + cos h·y)`, negative = ahead = up). Visible range
+`D·cx/(fx<<10)+1` both ways (two side-by-side views: `3·D·cx/(fx<<11)+1`).
+
+Yaw and pitch are per player (`DAT_012f5bd8[p]`, `DAT_0114b5dc[p]`) and updated by
+the render loop `FUN_0105bd98` once per frame, before that player's view: the yaw moves
+half-way to `(0xb40 − heading) mod 0x1680` the short way round, the pitch half-way to
+`clamp(0x167f − speed, 0x157c, 0x167f)` (heading `+0x14` and speed `+0x3b0` of the
+driven vehicle, else the player). While the player is dead (`DAT_012a65e0[p] > 0`) the
+yaw turns `+0x20·ticks` and the pitch drops `4·ticks` to 0x157c. After the views both
+globals are reset to 0.
+
+Follow parameters in the rotating view (`FUN_010556e0`): on foot (human models,
+`+0x4909` set) K 150, B 1500, c 2, R 800; other on-foot player objects K 300, B 1500,
+R 600; driving (vehicle `+0x4909` clear) K 225, V 200, B 1000, R 600; other vehicles
+K 150, V 0x140, B 1000, R 800; `t = min(t, 3000)` without the lower clamp. The camera
+state is simulation state (people spawn window, traffic), so a replay must be played
+with the setting it was recorded with.
+
+**Water in the rotating view** (software, `FUN_01081ba4` / `FUN_0108a2a0`): the
+background is still read in screen space and does not turn with the view, but row
+`sy / 2 + (pitch − 0x157c)·cy / 0x103` of the background is read instead of row `sy`
+(cy = `DAT_0114c334`, 127): the lower half of the picture looking straight down, the
+upper half at full tilt. (The Warp3D path rotates the reflection UVs with the yaw; the
+port follows the software renderer.)
+
+**Split-screen screen constants** (`FUN_0105bd98` at `0105c4a0`): two players (side
+by side, 159×256): cx 80, cy 128, fx = (W/2+7)·16/240 = 11, fy = (H+8)·16/384 = 11;
+three or four (159×127): cx 80, cy 64, fx = fy = 8. Vertical FOV `2·atan(cy/(16·fy))`:
+72.1° for two players, 53.1° for three or four (rotating: 111.0° / 90°).
+
+**Per view** (`FUN_0105bd98` loop): `FUN_010556e0(p)` (camera), `FUN_01036574` and
+`FUN_010753e8` (dynamic lights), `FUN_01049374` (city, objects, effects, with this
+view's camera; its 8 chimney random numbers and the alarm-box pulse
+`DAT_012e5adc += ticks` run once per view), `FUN_01034804` (this view's lens flares,
+collected during its city pass; the list is cleared afterwards), then the HUD.
 
 ---
 
@@ -698,13 +789,18 @@ one active slot are single-sided, faces with none are invisible. Low nibble of `
 |---|---|
 | 1 | flat colour: `param` mapped through `General/64->256.dat` (64 palette indices, file name `64-_256.dat` on disk) at load |
 | 2 | textured |
-| 3 | textured, `FUN_0111e410` (INFERRED: texel 0 transparent — trees, radar dish, police light bars) |
+| 3 | textured, `FUN_0111e410` (CONFIRMED: texel 0 transparent — trees, radar dish, police light bars) |
 | 4 | textured through the Alpha.256 table at `+0xff4` with `FUN_011113e0`: `DAT_0114c908` = **table 0, additive** for the world objects (`FUN_010c101c(obj, x, y, z, 0)`), table 4 (average) when the 5th argument is 100. Shine faces (`& 0x10`) with mode 4 use table 4, mode 0x28 table 9. Users: `Lights` (lamppost_dark light cones, the night headlight polygon), helicopter `Blades`, rocket-car `Flames`, `Phone`/`Red shade` arrows |
 | 5 | a line between the first two vertices, colour `param` mapped through 64→256 like mode 1 (the loader maps `param` for every mode except 6, `FUN_010bf8bc`); bullets, pistol |
 | 6 | **lens flare**: `AddFlare(vertex 0, DAT_0114c8dc, param << 16)`; tested on slot 0's mode even when slot 0 is inactive (most flare faces have no active slot, so only the flare shows) |
 
 `mode & 0x10` selects the environment-mapped (`Shine`) path; `& 0x20` its variant.
 `param` is the raw Alpha.256 table for mode 6, otherwise the 64→256 colour.
+Without `& 0x10`, `& 0x20` sends the face down the mode-4 branch (CONFIRMED,
+`FUN_010c101c`): mode 0x22, the four "White sand" leg faces of
+PedMale1–4, is drawn additively (port: the additive overlay). Mode 0x14 (`CD.obj`) is
+environment-mapped through table 4 (50 %); the port still draws it opaque (remaining
+gap). Mode 3: texel 0 transparent is CONFIRMED (`FUN_0111e410`).
 
 Mode-6 faces in the shipped models: `TrafficLight1` (table 5 = red), `TrafficLight2`
 (5 red + 6 red+green = amber), `TrafficLight3` (7 green), `TrafficLight4` (6 amber),

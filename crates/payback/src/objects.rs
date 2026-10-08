@@ -19,7 +19,7 @@
 //! with the light phase, spinning pickups, chimney smoke, lens-flare sources
 //! and the burnt / dented variants of vehicles.
 
-use crate::camera::{GameCam, GameCamera};
+use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, ViewCams};
 use crate::data::GameData;
 use crate::effects::{Blend, Effects, EffectsDraw, FlareSource, Flares, FxMode, Tex};
 use crate::level::{AppState, LevelEntity};
@@ -256,6 +256,7 @@ impl ObjectLibrary {
             })
             .unwrap_or_default();
         entries.sort_by_key(|e| e.file_name());
+        let mut night_remap: Option<[u8; 256]> = None;
         for entry in entries {
             let slot = slots.len() as u32;
             if slot >= PALETTE_SLOT {
@@ -282,18 +283,18 @@ impl ObjectLibrary {
                     .map_err(|e| e.to_string())
                     .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
             };
-            let Ok(img) = read(&path).or_else(|_| read(&entry.path())) else {
+            let Ok(mut img) = read(&path).or_else(|_| read(&entry.path())) else {
                 continue;
             };
-            let mut pixels = img.to_rgba(&data.palette, Some(0));
+            // Everything else through T1[c][0x67] (colour 0 unchanged).
             let keep = ["joystick", "red shade", "lights", "tankbits"];
             if night && !swap && !name.ends_with(".dark") && !keep.contains(&name.as_str()) {
-                for px in pixels.chunks_mut(4) {
-                    for c in &mut px[..3] {
-                        *c = c.saturating_sub(crate::city::NIGHT_DARKEN);
-                    }
+                let remap = night_remap.get_or_insert_with(|| crate::camera::postfx::night_remap(data));
+                for c in &mut img.pixels {
+                    *c = remap[*c as usize];
                 }
             }
+            let pixels = img.to_rgba(&data.palette, Some(0));
             let (sx, sy) = (slot % ATLAS_COLS * TEX_W, slot / ATLAS_COLS * TEX_H);
             for row in 0..TEX_H {
                 let src = (row * TEX_W * 4) as usize;
@@ -605,8 +606,11 @@ impl ObjectLibrary {
                 continue;
             }
             // Plain mode 4 goes to the additive overlay; the main mesh keeps
-            // a degenerate triangle in its place.
-            let out = if mode == 4 && slot.mode & 0x10 == 0 {
+            // a degenerate triangle in its place. Without the 0x10 bit, 0x20
+            // also takes the software renderer's mode-4 branch (`FUN_010c101c`:
+            // mode 0x22, the "White sand" leg faces of PedMale1-4).
+            let additive = mode == 4 || slot.mode & 0x20 != 0;
+            let out = if additive && slot.mode & 0x10 == 0 && skin == Skin::Normal {
                 main.degenerate(p0());
                 &mut add
             } else {
@@ -946,20 +950,34 @@ const TRAFFIC_LIGHTS: [&str; 4] = [
 
 /// Global scenery animation counters, advanced per game tick (68k
 /// `FUN_000e3a58` tail, OS4 equivalents in brackets).
-#[derive(Resource, Default, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Copy, Debug)]
 pub struct SceneryClock {
     /// Pickup spin (`DAT_0034c09c` / `DAT_0114c770`), +60 per tick.
     pub spin: i32,
-    /// Info sign tumble (`DAT_0034c0a4`, +30; `DAT_0034c0a0`, −45).
+    /// Info sign tumble: the X–Z-plane angle (`DAT_0034c0a4` / OS4
+    /// `DAT_0114c76c`, +30 per tick, initially 20) and the Y–Z-plane angle
+    /// (`DAT_0034c0a0` / `DAT_0114c768`, −45, initially 5).
     pub tumble: [i32; 2],
     /// Alarm-box pulse 0..19 (`DAT_012e5adc`, +1 per tick).
     pub pulse: i32,
 }
 
-fn advance_clock(mut c: ResMut<SceneryClock>) {
+impl Default for SceneryClock {
+    fn default() -> Self {
+        SceneryClock {
+            spin: 0,
+            tumble: [20, 5],
+            pulse: 0,
+        }
+    }
+}
+
+/// The alarm pulse advances in every view's city pass (`FUN_01049374`
+/// adds the frame's ticks to `DAT_012e5adc`), so once per view per tick.
+fn advance_clock(mut c: ResMut<SceneryClock>, views: Res<ViewCams>) {
     c.spin = (c.spin + 60) % 5760;
     c.tumble = [(c.tumble[0] + 30) % 5760, (c.tumble[1] + 5760 - 45) % 5760];
-    c.pulse = (c.pulse + 1) % 20;
+    c.pulse = (c.pulse + views.0.len().max(1) as i32) % 20;
 }
 
 /// Model of a traffic light (scenery 1) with phase offset `special`: the
@@ -1002,10 +1020,13 @@ fn animate_scenery(
                 let yaw = sc.rotation as i32 * 0x1680 / 256 + clock.spin;
                 let mut rot = heading_to_render(yaw as f32);
                 if id == sid::INFO {
-                    let [a, b] = clock
+                    // `FUN_010c7218`: the X–Z plane (about the model's y =
+                    // render z) by `c76c` first, then the Y–Z plane (about
+                    // x) by `c768`, then the yaw.
+                    let [xz, yz] = clock
                         .tumble
                         .map(|t| t as f32 / 5760.0 * std::f32::consts::TAU);
-                    rot = rot * Quat::from_rotation_z(b) * Quat::from_rotation_x(a);
+                    rot = rot * Quat::from_rotation_x(yz) * Quat::from_rotation_z(xz);
                 }
                 tf.rotation = rot;
                 continue;
@@ -1022,11 +1043,15 @@ fn animate_scenery(
     }
 }
 
-/// Chimneys in view smoke (`FUN_01049374`, scenery 0x11): once per frame
-/// one set of random numbers; if `rand(3) == 1`, every visible chimney adds
-/// a type 6 Dust2 puff 2500 z-units above its base.
+/// Chimneys in view smoke (`FUN_01049374`, scenery 0x11): every view's
+/// city pass (once per view in split screen) draws one set of random
+/// numbers; if `rand(3) == 1`, every chimney in that view's square range
+/// (`GameCam::visible_squares`) adds a type 6 Dust2 puff 2500 z-units above
+/// its base.
 fn chimney_smoke(
     cam: Res<GameCam>,
+    views: Res<ViewCams>,
+    rotating: Res<RotatingView>,
     rng: Option<ResMut<Rng>>,
     mut effects: ResMut<Effects>,
     city: Option<Res<City>>,
@@ -1035,34 +1060,36 @@ fn chimney_smoke(
     let (Some(mut rng), Some(city)) = (rng, city) else {
         return;
     };
-    let r = [3, 100, 100, 300, 30, 30, 30, 200].map(|n| rng.rand(n));
-    if r[0] != 1 {
-        return;
-    }
-    // Visible squares either side (rendering.md §6).
-    let d = (cam.h + 1500) as f32;
-    let (hw, hh) = (d * 160.0 / 65536.0 + 1.0, d * 128.0 / 65536.0 + 1.0);
-    let (cx, cy) = (cam.x as f32 / 65536.0, cam.y as f32 / 65536.0);
-    for (sc, tf) in &q {
-        if sc.id != sid::CHIMNEY {
+    let cams = views.all(&cam);
+    for view in cams {
+        let r = [3, 100, 100, 300, 30, 30, 30, 200].map(|n| rng.rand(n));
+        if r[0] != 1 {
             continue;
         }
-        let (x, y) = (tf.translation.x, tf.translation.z);
-        if (x - cx).abs() > hw || (y - cy).abs() > hh {
-            continue;
+        let (hw, hh) = view.visible_squares(cams.len(), rotating.0);
+        let centre = view.square();
+        for (sc, tf) in &q {
+            if sc.id != sid::CHIMNEY {
+                continue;
+            }
+            let (x, y) = (tf.translation.x, tf.translation.z);
+            let (sx, sy) = (x.floor() as i32, y.floor() as i32);
+            if (sx - centre.x).abs() > hw || (sy - centre.y).abs() > hh {
+                continue;
+            }
+            let level = city
+                .floor(x * 2048.0, y * 2048.0, tf.translation.y * H_PER_SQUARE, 1.0)
+                .map_or(0, |(_, l, _)| l);
+            let base = z_of_h(tf.translation.y * H_PER_SQUARE);
+            let pos = Vec3::new(
+                x.floor() * 2048.0 + 0x400 as f32 + (r[1] - 50) as f32,
+                y.floor() * 2048.0 + 0x400 as f32 + (r[2] - 50) as f32,
+                base + (r[3] - 2500) as f32,
+            );
+            let vel = Vec3::new((r[4] + 150) as f32, (r[5] - 15) as f32, (r[6] - 250) as f32);
+            let size = (r[7] + 300) as f32;
+            effects.add(6, Tex::Dust2, pos, vel, size, level as u8, Blend::Subtract);
         }
-        let level = city
-            .floor(x * 2048.0, y * 2048.0, tf.translation.y * H_PER_SQUARE, 1.0)
-            .map_or(0, |(_, l, _)| l);
-        let base = z_of_h(tf.translation.y * H_PER_SQUARE);
-        let pos = Vec3::new(
-            x.floor() * 2048.0 + 0x400 as f32 + (r[1] - 50) as f32,
-            y.floor() * 2048.0 + 0x400 as f32 + (r[2] - 50) as f32,
-            base + (r[3] - 2500) as f32,
-        );
-        let vel = Vec3::new((r[4] + 150) as f32, (r[5] - 15) as f32, (r[6] - 250) as f32);
-        let size = (r[7] + 300) as f32;
-        effects.add(6, Tex::Dust2, pos, vel, size, level as u8, Blend::Subtract);
     }
 }
 
@@ -1101,28 +1128,34 @@ fn vehicle_skins(
 /// flashes, missiles), at the face's first vertex, size 300 (alarm boxes
 /// pulse 200..700). Burning objects have none. A flare is dropped when the
 /// city is between it and the camera (the original tests whether its
-/// centre pixel was overdrawn).
+/// centre pixel was overdrawn). The occlusion and screen tests are made per
+/// view when the flares are drawn (`crate::effects`): every split-screen
+/// view draws its own (`FUN_0105bd98` calls `FUN_01034804` after each view).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn collect_flares(
     mode: Res<FxMode>,
     library: Option<Res<ObjectLibrary>>,
-    city: Option<Res<City>>,
     clock: Res<SceneryClock>,
     meshes: Res<Assets<Mesh>>,
-    camera: Query<&GlobalTransform, With<GameCamera>>,
+    cameras: Query<&GlobalTransform, Or<(With<GameCamera>, With<ExtraView>)>>,
     scenery: Query<(&Scenery, &GlobalTransform, &Mesh3d)>,
     objects: Query<(&SimObj, &GlobalTransform, &Mesh3d, Option<&Person>)>,
     mut flares: ResMut<Flares>,
 ) {
-    let (Some(library), Ok(cam)) = (library, camera.single()) else {
+    let Some(library) = library else {
         return;
     };
     if mode.0 == 0 {
         return;
     }
-    let eye = cam.translation();
-    // Roughly the visible area around the camera.
-    let near = |p: Vec3| (p.x - eye.x).abs() < eye.y + 2.0 && (p.z - eye.z).abs() < eye.y + 2.0;
+    let eyes: Vec<Vec3> = cameras.iter().map(|c| c.translation()).collect();
+    // Roughly the area some view can see (the rotating view sees further).
+    let near = |p: Vec3| {
+        eyes.iter().any(|eye| {
+            let r = 2.0 * eye.y + 2.0;
+            (p.x - eye.x).abs() < r && (p.z - eye.z).abs() < r
+        })
+    };
     let mut add = |model: usize, tf: &GlobalTransform, mesh: &Mesh3d, size: i32| {
         let m = library.model(model);
         if m.flares.is_empty() {
@@ -1137,13 +1170,11 @@ fn collect_flares(
                 .and_then(|p| p.get(3 * f.face).copied())
                 .unwrap_or_else(|| static_vertex(&m.obj.vertices[f.vertex]));
             let pos = tf.transform_point(Vec3::from_array(local));
-            if city.as_ref().is_some_and(|c| occluded(c, pos, eye)) {
-                continue;
-            }
             flares.add(FlareSource {
                 pos,
                 size,
                 table: f.table,
+                occlude: true,
             });
         }
     };
@@ -1175,7 +1206,7 @@ fn collect_flares(
 
 /// Whether a solid cube lies on the segment from `from` to the camera
 /// `eye` (render space), sampled every 1/8 square.
-fn occluded(city: &City, from: Vec3, eye: Vec3) -> bool {
+pub fn occluded(city: &City, from: Vec3, eye: Vec3) -> bool {
     let d = eye - from;
     let n = (d.length() * 8.0).ceil().min(400.0) as usize;
     (1..n).any(|i| {
