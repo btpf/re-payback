@@ -189,12 +189,14 @@ impl<'w> Script<'w> {
     /// `Dialog_Say1`: the player (Travis) speaks.
     pub fn say1(&mut self, n: u32) {
         let text = self.phrase(n);
+        crate::autoplay::log(format_args!("player says {n}: {text}"));
         self.world.resource_mut::<Dialog>().say(text, Voice::You);
     }
 
     /// `Dialog_Say2`: the other party speaks.
     pub fn say2(&mut self, n: u32) {
         let text = self.phrase(n);
+        crate::autoplay::log(format_args!("says {n}: {text}"));
         self.world.resource_mut::<Dialog>().say(text, Voice::Them);
     }
 
@@ -228,6 +230,8 @@ impl<'w> Script<'w> {
         } else {
             self.phrase(n)
         };
+        let money = self.money();
+        crate::autoplay::log(format_args!("message {n}: {text} (money {money})"));
         self.world.resource_mut::<BigTitle>().show(text);
         match n {
             MISSION_COMPLETE => {
@@ -900,8 +904,13 @@ impl<'w> Script<'w> {
     }
 
     /// Pedestrian `model` (negative = person) with script id `new_id` steps
-    /// out of vehicle `veh_id` (-1: the vehicle the player drives); `side`
-    /// picks the door (`0xb43d4`, `0xb4414`, `0xb448e`).
+    /// out of vehicle `veh_id` (-1: the vehicle the player drives).
+    /// `side` 0 = the driver's door (model -X), 1 = the other side, -1 =
+    /// alternating, starting with the other side (`0xb43d4`/`0xb4414` call
+    /// `0xdb03e`, which flips `0x34c1b0` each time; `0xb448e` passes the
+    /// side to `0xdb196`). The ped stands (car half-width + 192)·6/5 out at
+    /// the door's longitudinal position, facing 90° left of the car; its
+    /// previous position is the car's centre, so walls between push it back.
     pub fn ped_exits_vehicle(&mut self, new_id: i32, veh_id: i32, model: i32, side: i32) {
         let veh = if veh_id == -1 {
             self.player()
@@ -909,22 +918,36 @@ impl<'w> Script<'w> {
             self.actors(veh_id).first().copied()
         };
         let Some(veh) = veh else { return };
-        let Some((pos, heading, level)) = self
-            .world
-            .get::<Obj>(veh)
-            .map(|o| (o.pos, o.heading, o.level))
-        else {
+        let Some(v) = self.world.get::<Obj>(veh).cloned() else {
             return;
         };
-        let (s, c) = {
-            let trig = self.world.resource::<crate::sim::Trig>();
-            (trig.sin(heading), trig.cos(heading))
+        let kind = self.world.get::<vehicles::Vehicle>(veh).map_or(0, |k| k.kind);
+        let info = self.world.resource::<ObjectLibrary>().model(v.model).info.clone();
+        let right = match side {
+            -1 => {
+                let mut st = self.state();
+                st.exit_toggle = !st.exit_toggle;
+                !st.exit_toggle
+            }
+            0 => true,
+            _ => false,
         };
-        let lat = if side == 0 { 700 } else { -700 };
-        let at = pos + IVec3::new(c * lat / 256, -s * lat / 256, 0);
-        if let Some(e) = self.create_actor(new_id, model, at.x, at.y, level as i32, heading, 0) {
+        let lat = (info.radius + people::PERSON_RADIUS) * 6 / 5;
+        let fwd = crate::sim::boarding::door_y(kind, info.max_y);
+        let at = {
+            let trig = self.world.resource::<crate::sim::Trig>();
+            crate::sim::boarding::car_point(trig, &v, if right { -lat } else { lat }, fwd)
+        };
+        let heading = crate::sim::wrap(v.heading - 0x5a0);
+        crate::autoplay::log(format_args!(
+            "ped {new_id:#x} gets out of {veh_id:#x} at {at:?} (car at {:?} heading {:#x} speed {}, half-width {})",
+            v.pos, v.heading, v.speed, info.radius
+        ));
+        if let Some(e) = self.create_actor(new_id, model, at.x, at.y, v.level as i32, heading, 0) {
             if let Some(mut o) = self.world.get_mut::<Obj>(e) {
-                o.pos.z = pos.z;
+                o.pos.z = v.pos.z;
+                o.prev_pos = IVec3::new(v.pos.x, v.pos.y, v.pos.z);
+                o.level = v.level;
             }
         }
     }

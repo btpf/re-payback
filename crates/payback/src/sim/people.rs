@@ -618,7 +618,7 @@ fn move_people(
         next.y += obj.vel.y;
 
         // Walls, then the floor at the new position.
-        let (resolved, hit) = collide::resolve_walls(&city, next, obj.prev_pos, PERSON_RADIUS);
+        let (resolved, hit) = collide::resolve_person(&city, next, obj.prev_pos, PERSON_RADIUS);
         if hit.x {
             obj.vel.x = -obj.vel.x;
         }
@@ -755,6 +755,7 @@ fn regen_and_respawn(
     mut outcome: MessageWriter<crate::mission::LevelOutcome>,
     mut players: Query<(Entity, &mut Obj, Has<Person>), With<CameraTarget>>,
     mode: Res<GameMode>,
+    mut triggers: ResMut<crate::mission::Triggers>,
 ) {
     // Multiplayer deaths and respawns: `multiplayer::deaths_and_respawns`.
     if mode.is_multiplayer() {
@@ -774,6 +775,11 @@ fn regen_and_respawn(
                     // The corpse stays; the camera moves to the new player.
                     commands.entity(e).remove::<CameraTarget>();
                     obj.player = None;
+                } else {
+                    // Blown apart (state 6): removed at once (people.md
+                    // §7.2). Kept, it would stay the camera target and
+                    // re-arm the respawn timer forever after the respawn.
+                    commands.entity(e).despawn();
                 }
             }
             _ => {
@@ -847,6 +853,9 @@ fn regen_and_respawn(
         State::Player,
     ) {
         make_player(&mut commands, e, 0);
+        // Trigger type 0x3e (`Trigger_PlayerRespawned` 0xa69c2, called
+        // right after the respawn placement).
+        triggers.report(crate::mission::kind::RESPAWNED, 0, 0, 0);
     }
 }
 
@@ -959,17 +968,33 @@ fn spawn_peds(
 #[derive(Component)]
 pub struct Ambient;
 
-/// Remove ambient objects that leave every camera's window.
+/// Remove untagged objects that leave every camera's window (OS4
+/// `FUN_010542b8`, 68k `FUN_000dc5ac`): not only the spawner's, but also
+/// released mission actors, thrown-out drivers, abandoned cars and bodies;
+/// otherwise they fill the 20-object budget and traffic stops for good.
 fn despawn_far(
     mut commands: Commands,
     cam: Res<GameCam>,
     views: Res<ViewCams>,
-    q: Query<(Entity, &Obj), With<Ambient>>,
+    q: Query<(Entity, &Obj), Without<CameraTarget>>,
 ) {
     let cams: &[GameCam] = if views.0.is_empty() { std::slice::from_ref(&*cam) } else { &views.0 };
     for (e, obj) in &q {
         let sq = IVec2::new(obj.pos.x >> 11, obj.pos.y >> 11);
+        if obj.player.is_some() {
+            continue;
+        }
+        // State 6 is removed at once (blown apart, wrecked to nothing).
+        if obj.state == State::Removed && obj.class != super::Class::Projectile {
+            commands.entity(e).despawn();
+            continue;
+        }
         if obj.script_id != -1 {
+            continue;
+        }
+        // Projectiles (and placed bombs) have their own lifetime; special
+        // objects (barriers, cones) are state 0xc.
+        if obj.class == super::Class::Projectile && obj.state != State::Barrier {
             continue;
         }
         let outside = |cam: &GameCam| {
@@ -978,7 +1003,14 @@ fn despawn_far(
         };
         let gone = matches!(
             obj.state,
-            State::Wander | State::Parked | State::Dead | State::Flee | State::Removed
+            State::Wander
+                | State::Parked
+                | State::Dead
+                | State::Flee
+                | State::Removed
+                | State::PursuitRoute
+                | State::Pursuit
+                | State::Barrier
         ) && cams.iter().all(outside);
         if gone {
             commands.entity(e).despawn();

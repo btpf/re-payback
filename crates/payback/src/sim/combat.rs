@@ -639,6 +639,11 @@ fn detonate_bomb(world: &mut World, owner: Entity) {
         .map(|(e, o, _)| (e, o.pos, o.level));
     if let Some((e, pos, level)) = bomb {
         let player = world.get::<Obj>(owner).and_then(|o| o.player).unwrap_or(0);
+        // `Destroy` (0xa653a): "actor destroyed" triggers on the bomb
+        // (its script id from `SetProjectileId`) fire.
+        let mut triggers = world.resource_mut::<Triggers>();
+        triggers.report_actor(kind::ACTOR_KILLED, e);
+        triggers.report_actor(kind::ACTOR_GONE, e);
         world.entity_mut(e).despawn();
         world.write_message(Explode {
             pos,
@@ -1179,8 +1184,10 @@ fn deaths(
             }
             triggers.report_actor(kind::ACTOR_KILLED, e);
             triggers.report_actor(kind::ACTOR_GONE, e);
+            // Removed (state 6) by `despawn_far` at the start of the next
+            // tick, so the crime and the kill are still counted this tick.
             if o.player.is_none() {
-                commands.entity(e).despawn();
+                commands.entity(e).insert(Visibility::Hidden);
             }
         } else if o.health <= 0 && !matches!(o.state, State::Dead | State::Removed) {
             o.state = State::Dead;

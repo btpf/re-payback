@@ -40,15 +40,22 @@ impl Plugin for BoardingPlugin {
 
 /// Driver's door point of a vehicle: its right side (model -X) at the
 /// door's longitudinal position, `extra` units further out.
-fn door_point(trig: &Trig, v: &Obj, radius: i32, door_y: i32, extra: i32) -> IVec3 {
+pub(crate) fn door_point(trig: &Trig, v: &Obj, radius: i32, door_y: i32, extra: i32) -> IVec3 {
     let (s, c) = (trig.sin(v.heading), trig.cos(v.heading));
     let lat = -(radius + extra);
     // Model +X = (cos h, -sin h); model +Y = (sin h, cos h).
     v.pos + IVec3::new((c * lat + s * door_y) >> 8, (-s * lat + c * door_y) >> 8, 0)
 }
 
+/// A point on a vehicle in model coordinates: `lat` along model +X (the
+/// car's left), `fwd` along +Y.
+pub(crate) fn car_point(trig: &Trig, v: &Obj, lat: i32, fwd: i32) -> IVec3 {
+    let (s, c) = (trig.sin(v.heading), trig.cos(v.heading));
+    v.pos + IVec3::new((c * lat + s * fwd) >> 8, (-s * lat + c * fwd) >> 8, 0)
+}
+
 /// Longitudinal door position (`0x48f8`): maxY/2, overridden per type.
-fn door_y(kind: usize, max_y: i32) -> i32 {
+pub(crate) fn door_y(kind: usize, max_y: i32) -> i32 {
     match kind {
         vk::BUS | 19 => max_y * 15 / 16,
         vk::BOMB_TRUCK => max_y * 7 / 8,

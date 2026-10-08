@@ -57,6 +57,8 @@ struct Body {
     /// Player number (kill credit in multiplayer).
     player_no: Option<u8>,
     speed: i32,
+    /// Velocity before this tick's contacts (impact damage).
+    vel: IVec3,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -91,6 +93,7 @@ fn contacts(
                 player,
                 player_no: if player { Some(o.player.unwrap_or(0)) } else { None },
                 speed: o.speed,
+                vel: o.vel,
             }
         })
         .collect();
@@ -131,9 +134,16 @@ fn contacts(
                 oa.vel -= p * m / a.mass;
                 oa.pos -= p * m / a.mass;
             }
-            // Damage from the push (relative impact).
-            let base = (((p.x as i64).pow(2) + (p.y as i64).pow(2)) >> 7) as i32;
+            // Damage from the push (relative impact). People take it from
+            // the relative velocity (people.md §4.5:
+            // `((dvx²+dvy²+(dvz/2)²) >> 7)·min(m)/m_self`), not from how
+            // deep the bodies overlap: someone stepping out right next to
+            // a car (a cop leaving his car) is pushed clear, not crushed.
+            let push_base = (((p.x as i64).pow(2) + (p.y as i64).pow(2)) >> 7) as i32;
+            let dv = (a.vel - b.vel).as_i64vec3();
+            let vel_base = ((dv.x * dv.x + dv.y * dv.y + (dv.z / 2) * (dv.z / 2)) >> 7).min(i32::MAX as i64) as i32;
             for (victim, other, o, other_speed, drive) in [(b, a, &mut ob, a.speed, db), (a, b, &mut oa, b.speed, da)] {
+                let base = if victim.person { vel_base } else { push_base };
                 let shift = if victim.vehicle { 5 } else if victim.player { 3 } else { 1 };
                 let mut dmg = (base as i64 * m as i64 / victim.mass as i64) as i32 >> shift;
                 if victim.person {
@@ -228,7 +238,9 @@ fn vehicle_damage(
             triggers.report_actor(kind::ACTOR_KILLED, e);
             o.state = if is_player { State::Dead } else { State::Removed };
             if !is_player {
-                commands.entity(e).despawn();
+                // Removed by `despawn_far` next tick (after the crime and
+                // the kill are counted).
+                commands.entity(e).insert(Visibility::Hidden);
             }
             continue;
         }

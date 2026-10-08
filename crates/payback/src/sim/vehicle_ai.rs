@@ -550,7 +550,8 @@ fn tank_cannon(
             continue;
         };
         let mut m = Obj::new(Class::Projectile, model, pos, obj.heading);
-        m.vel = obj.vel + dir * 2;
+        // Horizontal only: a car's vz holds the terrain slope (+0x80).
+        m.vel = IVec3::new(obj.vel.x, obj.vel.y, 0) + dir * 2;
         m.state = State::Parked;
         m.level = obj.level;
         m.owner = Some(e);

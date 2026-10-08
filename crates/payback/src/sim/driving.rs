@@ -352,35 +352,49 @@ fn drive(
         }
         next = resolved;
 
-        // Follow the ground; fall when it drops away.
+        // Follow the ground; fall when it drops away (vehicles.md §2.6).
+        // On the ground vz follows the terrain (`ground + 0x80 - z`), so a
+        // car leaving a ramp keeps its climb and jumps; in the air only
+        // gravity acts.
         if let Some((fz, level, water)) = collide::floor(&city, next.x, next.y, prev.z) {
             obj.level = level;
             obj.floor_z = fz;
+            if next.z >= fz {
+                if !obj.on_ground {
+                    // Landing.
+                    if obj.vel.z > 160 {
+                        let at = SoundPos::At(obj.posf());
+                        commands.spawn(Sound::once(
+                            id::HIT_SCENERY,
+                            obj.vel.z as f32 * 20000.0,
+                            15000.0,
+                            at,
+                        ));
+                        obj.vel.z = 0x80 - obj.vel.z.abs() / 4;
+                    } else {
+                        obj.vel.z = 0x80;
+                    }
+                    obj.on_ground = true;
+                } else {
+                    obj.vel.z = (fz + 0x80 - next.z).clamp(-1000, 1000);
+                }
+                next.z = fz;
+            } else {
+                obj.on_ground = false;
+                obj.vel.z += 32;
+                next.z = (next.z + obj.vel.z).min(fz);
+            }
+            // Water counts once the car is down on it (§2.8), not while
+            // it flies over.
             let was_water = obj.in_water;
-            obj.in_water = water;
-            if water && !was_water && veh.kind != vk::BOAT {
+            obj.in_water = water && next.z >= fz;
+            if obj.in_water && !was_water && veh.kind != vk::BOAT {
                 let at = SoundPos::At(obj.posf());
                 commands.spawn(Sound::once(id::SPLASH, t.mass as f32 * 10000.0, 8350.0, at));
                 triggers.report_actor(kind::ACTOR_IN_WATER, e);
                 if veh.kind == vk::RC_CAR {
                     obj.health = -71;
                 }
-            }
-            if next.z < fz {
-                obj.vel.z += 32;
-                next.z = (next.z + obj.vel.z).min(fz);
-            } else {
-                if obj.vel.z > 160 {
-                    let at = SoundPos::At(obj.posf());
-                    commands.spawn(Sound::once(
-                        id::HIT_SCENERY,
-                        obj.vel.z as f32 * 20000.0,
-                        15000.0,
-                        at,
-                    ));
-                }
-                obj.vel.z = 0;
-                next.z = fz;
             }
             // Non-boats sink in water.
             if obj.in_water && veh.kind != vk::BOAT {

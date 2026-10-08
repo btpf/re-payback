@@ -591,7 +591,7 @@ impl Level01 {
             }
             0x21c => {
                 s.kill_all_mt();
-                s.ped_exits_vehicle(M5_DRIVER, M5_PICKUP, -12, 0);
+                s.ped_exits_vehicle(M5_DRIVER, M5_PICKUP, -12, -1);
                 s.actor_release(M5_PICKUP);
                 s.actor_attack(M5_DRIVER, 0x50, -1);
                 s.t(0x21d, ACTOR_GONE, M5_DRIVER, 0, 0, 0);
@@ -973,7 +973,7 @@ fn m8_spawn_prisoner(s: &mut Script) {
 
 /// A prisoner gets out of the player's vehicle and walks into the house.
 fn m8_unload_prisoner(s: &mut Script) {
-    s.ped_exits_vehicle(M8_PRISONER, -1, -10, 0);
+    s.ped_exits_vehicle(M8_PRISONER, -1, -10, -1);
     m8_prisoner_triggers(s);
 }
 

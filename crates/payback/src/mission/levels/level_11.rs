@@ -866,9 +866,7 @@ impl Level11 {
                 s.say(2, 42);
                 s.set_scenery(0x45, 0x79, 0, 0, 0x59, 0);
                 s.actor_follow(0x1f9, -2);
-                // TODO(api): type 0x3d (ACTOR_BOARDS_ACTOR) has no AI order
-                // in `Script::add_trigger_ex`, so the three never walk to
-                // their car and 0x1fd..0x1ff never fire.
+                // All three run for their car (0x3d: walk to its door).
                 s.t(0x1fd, ACTOR_BOARDS_ACTOR, 0x1f7, 0x1f6, 0, 0);
                 s.t(0x1fe, ACTOR_BOARDS_ACTOR, 0x1f8, 0x1f6, 0, 0);
                 s.t(0x1ff, ACTOR_BOARDS_ACTOR, 0x1f9, 0x1f6, 0, 0);

@@ -3,9 +3,12 @@
 //! Usage: `payback [--data <dir>] [--map <n>] [--level <0|1>] [--free]
 //!                 [--rampage <police 0..5>] [--multiplayer <2..4> [--kills <n>]]
 //!                 [--screenshot <out.png>]
-//!                 [--record <file> | --play <file>] [--ticks <n>]`
+//!                 [--record <file> | --play <file>] [--ticks <n>]
+//!                 [--autoplay [--autoplay-ticks <n>]] [--fast <n>]`
 //!
 //! `--record`/`--play` are the replay determinism check (see `replay.rs`).
+//! `--autoplay` plays the story level's missions (see `autoplay.rs`);
+//! `--fast n` runs the game n times faster.
 //! `--multiplayer` starts a split-screen match on `--map` (key bindings in
 //! `multiplayer.rs`).
 //!
@@ -13,6 +16,7 @@
 //! (WASD pan, Q/E rotate, R/F tilt, wheel or Z/X zoom).
 
 mod audio;
+mod autoplay;
 mod camera;
 mod city;
 mod data;
@@ -86,6 +90,7 @@ fn main() -> AppExit {
             mission::MissionPlugin,
             intro::IntroPlugin,
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
+            autoplay::AutoplayPlugin,
         ))
                 .add_systems(Update, screenshot_and_exit)
         // `--map` starts a level directly; otherwise the menus come first.

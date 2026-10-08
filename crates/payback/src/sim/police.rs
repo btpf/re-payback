@@ -113,10 +113,7 @@ fn crimes(
     mut hurt: MessageReader<Hurt>,
     mut timer: ResMut<WantedTimer>,
     mut record: ResMut<Crimes>,
-    session: Res<PlayerSession>,
     library: Option<Res<ObjectLibrary>>,
-    texts: Option<Res<Texts>>,
-    mut title: ResMut<BigTitle>,
     mut triggers: ResMut<Triggers>,
     mut player: Query<&mut Obj, With<CameraTarget>>,
     victims: Query<
@@ -132,7 +129,6 @@ fn crimes(
         hurt.clear();
         return;
     };
-    let mult = session.multiplier;
     for h in hurt.read() {
         if !h.by_player {
             continue;
@@ -151,20 +147,14 @@ fn crimes(
         if is_person {
             if dead && !counted.1 {
                 record.murder += 1;
+                // The kill itself is paid by `score::score_kills` (with the
+                // copkiller bonus); paying it here too counted it twice.
                 if police {
                     p.wanted = raise(w, [3, 3, 4, 5, 6, 6, 6]);
-                    p.score += 2500 * mult;
                     record.cops_killed += 1;
                     triggers.report(kind::COP_KILLED, 0, 0, 0);
-                    if record.cops_killed % 11 == 0 {
-                        p.score += 100_000 * mult;
-                        if let Some(t) = &texts {
-                            title.show(t.global(2037));
-                        }
-                    }
                 } else {
                     p.wanted = raise(w, [3, 3, 3, 4, 5, 6, 6]);
-                    p.score += 1500 * mult;
                 }
                 commands.entity(h.victim).insert(CrimeCounted {
                     injured: true,
@@ -195,7 +185,6 @@ fn crimes(
                 };
                 if driven {
                     record.murder += 1;
-                    p.score += if police { 2500 } else { 1500 } * mult;
                 }
                 commands.entity(h.victim).insert(CrimeCounted {
                     injured: true,

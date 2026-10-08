@@ -3,10 +3,10 @@
 
 mod level_00;
 mod level_01;
-mod level_10;
+pub(crate) mod level_10;
 mod level_11;
 mod level_20;
-mod level_21;
+pub(crate) mod level_21;
 
 use super::LevelScript;
 

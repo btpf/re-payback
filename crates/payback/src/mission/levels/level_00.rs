@@ -197,8 +197,6 @@ impl LevelScript for Level00 {
         s.add_trigger(SECRET_INFO, SCENERY_GONE_QUIET, 0x25, 0, 1, -1);
         s.add_lives(2);
         // Four cones, never referenced again.
-        // TODO(api): `create_actor` does not spawn special objects (models
-        // >= 1000), so the cones are missing.
         for (id, x, y) in [
             (100_000, 0xb400, 0x2e000),
             (100_001, 0xb400, 0x2f800),
@@ -424,8 +422,6 @@ impl Level00 {
             0x66 => {
                 s.say(2, 113);
                 for (i, y) in (0..).zip([0x1dc00, 0x1e400, 0x1ec00]) {
-                    // TODO(api): special objects (1002 dummy) are not spawned
-                    // by `create_actor_fx`, so this stage cannot be played.
                     s.create_actor_fx(SHOTGUN_DUMMY + i, DUMMY, 0x4400, y, 0, 0x5a0, 0, SHOTGUN);
                 }
                 self.behind = true;
@@ -496,7 +492,6 @@ impl Level00 {
             0x73 => {
                 s.say(2, 119);
                 for (i, x) in (0..).zip([0x5400, 0x5c00, 0x6400]) {
-                    // TODO(api): special objects (1002 dummy) are not spawned.
                     s.create_actor_fx(GRENADE_DUMMY + i, DUMMY, x, 0x1fc00, 0, 0xb40, 0, GRENADE);
                 }
                 self.behind = true;
@@ -810,7 +805,7 @@ impl Level00 {
             }
             // Limo arrived: the boss gets out and walks in.
             0x3f2 => {
-                s.ped_exits_vehicle(BOSS, BOSS_LIMO, PEDMALE3, 0);
+                s.ped_exits_vehicle(BOSS, BOSS_LIMO, PEDMALE3, -1);
                 for ev in [0x41b, 0x413, 0x414, 0x415] {
                     s.kill_mt(ev);
                 }
@@ -1104,8 +1099,8 @@ impl Level00 {
             0x3a => {
                 s.kill_all_mt();
                 s.say(1, 12);
-                s.ped_exits_vehicle(RON, -1, PEDMALE3, 0);
-                s.ped_exits_vehicle(TREY, -1, PEDMALE4, 0);
+                s.ped_exits_vehicle(RON, -1, PEDMALE3, -1);
+                s.ped_exits_vehicle(TREY, -1, PEDMALE4, -1);
                 mt(s, 0x4e, PLAYER_DOWN, &[]);
                 mt(s, 0x4e, ACTOR_GONE, &[RON]);
                 mt(s, 0x4e, ACTOR_GONE, &[TREY]);

@@ -50,6 +50,9 @@ pub struct Ai {
     /// steers straight at the goal, ignores the corner speeds and honks
     /// at nothing (vehicles.md §6.3).
     pub direct: bool,
+    /// `+0x30e`: door waypoint of a boarding passenger (people.md §6.1):
+    /// 0 door, 1..4 corners, 5 "door, re-plan on contact".
+    pub waypoint: u8,
 }
 
 impl Default for Ai {
@@ -60,6 +63,7 @@ impl Default for Ai {
             max_speed: i32::MAX,
             follow: None,
             direct: false,
+            waypoint: 5,
         }
     }
 }
@@ -88,6 +92,7 @@ pub fn give_order(world: &mut World, e: Entity, order: Order) {
     let vehicle = world.get::<Vehicle>(e).is_some();
     if let Some(mut ai) = ai_mut(world, e) {
         ai.order = order;
+        ai.waypoint = 5;
     }
     let state = match order {
         Order::Park => State::Parked,
@@ -180,6 +185,9 @@ pub fn people_orders(
     player: Query<(Entity, &Obj), (With<CameraTarget>, Without<Person>)>,
     player_foot: Query<(Entity, &Obj), (With<CameraTarget>, With<Person>)>,
     others: Query<&Obj, Without<Ai>>,
+    vehicles: Query<(&Obj, &Vehicle), Without<Person>>,
+    trig: Res<super::Trig>,
+    library: Option<Res<crate::objects::ObjectLibrary>>,
     mut q: Query<
         (Entity, &mut Obj, &mut Ai, &mut Stick, Option<&mut Arsenal>),
         (With<Person>, Without<CameraTarget>),
@@ -232,28 +240,69 @@ pub fn people_orders(
                     *stick = steer_to(&obj, goal, cap);
                 }
             }
-            Order::BoardPlayer => {
-                // Walk to the player's vehicle; boarding needs the player
-                // to be driving.
-                if let Ok((_, v)) = player.single() {
-                    if (v.pos - obj.pos).truncate().abs().max_element() < 512 {
-                        triggers.report_actor(kind::ACTOR_BOARDS_PLAYER, e);
-                        obj.state = State::Removed;
-                        commands.entity(e).despawn();
-                    } else {
-                        *stick = steer_to(&obj, v.pos.truncate(), cap);
+            Order::BoardPlayer | Order::BoardActor(_) => {
+                // State 0x0d / 0x13: walk the door waypoints of the
+                // player's (or actor b's) vehicle and get in at the door
+                // (people.md §6.1, progression D.5). Nothing while the
+                // player is on foot.
+                let target = match ai.order {
+                    Order::BoardActor(t) => Some(t),
+                    _ => player.single().ok().map(|(pe, _)| pe),
+                };
+                let (Some((v, veh)), Some(lib)) = (target.and_then(|t| vehicles.get(t).ok()), &library) else {
+                    *stick = Stick::default();
+                    continue;
+                };
+                let info = &lib.model(v.model).info;
+                let door_y = super::boarding::door_y(veh.kind, info.max_y);
+                let point = |wp: u8| {
+                    let (lat, fwd) = match wp {
+                        1 => (info.radius, info.max_y),
+                        2 => (-info.radius, info.max_y),
+                        3 => (info.radius, -info.min_y),
+                        4 => (-info.radius, -info.min_y),
+                        _ => (-(info.radius + 192), door_y),
+                    };
+                    super::boarding::car_point(&trig, v, lat, fwd)
+                };
+                if ai.waypoint == 5 {
+                    // First contact with the car: head for the nearest
+                    // waypoint instead (walk round to the door).
+                    let rel = obj.pos - v.pos;
+                    let (s, c) = (trig.sin(v.heading), trig.cos(v.heading));
+                    let fwd = (rel.x * s + rel.y * c) >> 8;
+                    let lat = (rel.x * c - rel.y * s) >> 8;
+                    let touching = lat.abs() < info.radius + 256 && fwd > -info.min_y - 256 && fwd < info.max_y + 256;
+                    if touching {
+                        ai.waypoint = (0..5u8)
+                            .min_by_key(|&w| {
+                                let d = (point(w) - obj.pos).truncate().as_i64vec2();
+                                d.x * d.x + d.y * d.y
+                            })
+                            .unwrap_or(0);
                     }
                 }
-            }
-            Order::BoardActor(target) => {
-                if let Ok(v) = others.get(target) {
-                    if (v.pos - obj.pos).truncate().abs().max_element() < 512 {
-                        triggers.report_actor(kind::ACTOR_BOARDS_ACTOR, e);
-                        obj.state = State::Removed;
-                        commands.entity(e).despawn();
-                    } else {
-                        *stick = steer_to(&obj, v.pos.truncate(), cap);
-                    }
+                let goal = point(ai.waypoint);
+                let d = goal - obj.pos;
+                if d.x.abs() < 512 && d.y.abs() < 512 && (v.pos.z - obj.pos.z).abs() <= 0x7ff {
+                    ai.waypoint = match ai.waypoint {
+                        1 => 2,
+                        3 => 4,
+                        2 | 4 => 0,
+                        _ => {
+                            let k = if matches!(ai.order, Order::BoardActor(_)) {
+                                kind::ACTOR_BOARDS_ACTOR
+                            } else {
+                                kind::ACTOR_BOARDS_PLAYER
+                            };
+                            triggers.report_actor(k, e);
+                            obj.state = State::Removed;
+                            commands.entity(e).despawn();
+                            continue;
+                        }
+                    };
+                } else {
+                    *stick = steer_to(&obj, goal.truncate(), cap);
                 }
             }
             Order::Attack { aggro, target } => {

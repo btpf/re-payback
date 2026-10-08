@@ -161,6 +161,52 @@ pub fn resolve_walls(city: &City, pos: IVec3, prev: IVec3, r: i32) -> (IVec3, Hi
     (p, hit)
 }
 
+/// People's version (68k `FUN_00044f82`, people.md §5.1): a blocked axis
+/// goes back to the previous position **pushed 0x80 away from the wall**,
+/// so a person overlapping a wall (created next to it by a script, or
+/// shoved into it) steps out instead of being stuck there.
+pub fn resolve_person(city: &City, pos: IVec3, prev: IVec3, r: i32) -> (IVec3, Hit) {
+    let zh = (pos.z - 0x400) >> 4;
+    let mut p = pos;
+    let mut hit = Hit::default();
+    // Which side the wall is on: the +x probe enters a wall to the east.
+    let east = seg_blocked_x(city, p.x - r, p.x + r, p.y, zh);
+    let west = seg_blocked_x(city, p.x + r, p.x - r, p.y, zh);
+    if east || west {
+        hit.x = true;
+        p.x = prev.x
+            + match (east, west) {
+                (true, false) => -0x80,
+                (false, true) => 0x80,
+                _ => 0,
+            };
+    }
+    let south = seg_blocked_y(city, p.x, p.y - r, p.y + r, zh);
+    let north = seg_blocked_y(city, p.x, p.y + r, p.y - r, zh);
+    if south || north {
+        hit.y = true;
+        p.y = prev.y
+            + match (south, north) {
+                (true, false) => -0x80,
+                (false, true) => 0x80,
+                _ => 0,
+            };
+    }
+    // The path from the previous position must also be clear.
+    let pzh = (prev.z - 0x400) >> 4;
+    if seg_blocked_x(city, prev.x, p.x, prev.y, pzh.min(zh)) {
+        hit.x = true;
+        p.x = prev.x;
+    }
+    if seg_blocked_y(city, p.x, prev.y, p.y, pzh.min(zh)) {
+        hit.y = true;
+        p.y = prev.y;
+    }
+    p.x = p.x.clamp(0, WORLD_MAX);
+    p.y = p.y.clamp(0, WORLD_MAX);
+    (p, hit)
+}
+
 /// Line of sight between two points at head height (68k `FUN_0009217e`):
 /// no wall face is crossed on the way, probing 0x400 above the lower point.
 pub fn line_of_sight(city: &City, a: IVec3, b: IVec3) -> bool {
@@ -255,5 +301,30 @@ mod tests {
         let prev2 = IVec3::new(7 * 2048 - 300, 5 * 2048 + 1024, GROUND_Z);
         let into2 = IVec3::new(7 * 2048 - 100, 5 * 2048 + 1024, GROUND_Z);
         assert!(!resolve_walls(&c, into2, prev2, 192).1.x);
+    }
+
+    #[test]
+    fn person_steps_out_of_a_wall() {
+        // A wall on (4,5)'s east face; a person 20 units inside (5,5)
+        // overlaps it and is pushed 0x80 east per step until clear.
+        let c = city(|x, y| {
+            let mut sq = Square::default();
+            sq.cubes[0] = cube(256, FaceType::Normal);
+            if (x, y) == (4, 5) {
+                sq.cubes[1] = cube(512, FaceType::Normal);
+            }
+            sq
+        });
+        let mut p = IVec3::new(5 * 2048 + 20, 5 * 2048 + 1024, GROUND_Z);
+        for _ in 0..2 {
+            let (q, hit) = resolve_person(&c, p, p, 192);
+            assert!(hit.x);
+            assert_eq!(q.x, p.x + 0x80);
+            p = q;
+        }
+        assert!(!resolve_person(&c, p, p, 192).1.x);
+        // Walking into the wall is still blocked.
+        let into = IVec3::new(p.x - 200, p.y, p.z);
+        assert!(resolve_person(&c, into, p, 192).0.x >= p.x);
     }
 }

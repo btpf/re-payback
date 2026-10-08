@@ -18,10 +18,10 @@ const R1: [i32; 4] = [0x1000, 0x34000, 0x9800, 0x3d800];
 const R2: [i32; 4] = [0x1a800, 0x36800, 0x1e000, 0x38800];
 
 /// Race opponents' AI waypoints (squares) and arrival radii.
-const AI_X: [i32; 14] = [
+pub(crate) const AI_X: [i32; 14] = [
     106, 106, 116, 123, 123, 121, 105, 106, 110, 115, 117, 120, 120, 112,
 ];
-const AI_Y: [i32; 14] = [5, 22, 23, 24, 35, 39, 39, 31, 29, 28, 17, 15, 5, 4];
+pub(crate) const AI_Y: [i32; 14] = [5, 22, 23, 24, 35, 39, 39, 31, 29, 28, 17, 15, 5, 4];
 const AI_SP: [i32; 14] = [
     2500, 3000, 1500, 3000, 4000, 2500, 3000, 3500, 2500, 3000, 3500, 3500, 2500, 3000,
 ];
@@ -912,9 +912,6 @@ impl Level10 {
         s.create_actor(0x2be, !11, 0x8400, 0x36800, 1, 0, 0);
         s.create_actor(0x2bf, !11, 0x8400, 0x35400, 1, 0x10e0, 0);
         // Door target: special object 3 (bullet.obj).
-        // TODO(api): `Script::create_actor` cannot spawn special objects
-        // (model >= 1000), so this actor is missing and the 0x2c6 "door
-        // blown" trigger never exists.
         s.create_actor(0x2c0, 1003, 0x8c00, 0x38000, 1, 0, 0);
         s.t(0x2bd, AT_POINT, 0x8800, 0x38c00, 0, -1);
         s.t(0x2ee, PLAYER_DOWN, -1, -1, -1, -1);

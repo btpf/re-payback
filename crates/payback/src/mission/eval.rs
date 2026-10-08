@@ -49,6 +49,11 @@ fn within(a: IVec3, b: IVec2, r: i32) -> bool {
 /// Run the evaluator and dispatch fired events to the level handler.
 pub fn run_triggers(world: &mut World) {
     if world.resource::<ActiveLevel>().0.is_none() {
+        // No script (rampage, multiplayer): drop the game's reports so
+        // they don't pile up.
+        let mut t = world.resource_mut::<Triggers>();
+        t.reports.clear();
+        t.actor_reports.clear();
         return;
     }
     if world.resource::<MissionState>().finished {
@@ -88,6 +93,8 @@ fn dispatch(world: &mut World, ev: i32) {
     let Some(mut level) = world.resource_mut::<ActiveLevel>().0.take() else {
         return;
     };
+    let slot = world.resource::<MissionState>().cur_slot;
+    crate::autoplay::log(format_args!("event {ev} ({ev:#x}), slot {slot}"));
     level.event(&mut Script::new(world), ev);
     world.resource_mut::<ActiveLevel>().0 = Some(level);
 }
@@ -159,14 +166,22 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
                     .iter()
                     .any(|r| r.0 == kind::ACTOR_KILLED && r.1 == e)
             });
-            if killed
-                && matches!(
-                    t.kind,
-                    kind::ACTOR_GONE
-                        | kind::ACTOR_KILLED
-                        | kind::ACTOR_ATTACKED
-                        | kind::ACTOR_ATTACKED_QUIET
-                )
+            // Orders that end with the actor removed (0x12 arrived and
+            // vanished, 0x0c / 0x3d got into the vehicle) report their
+            // completion as they remove it.
+            let completed = matches!(
+                t.kind,
+                kind::ACTOR_GOTO_VANISH | kind::ACTOR_BOARDS_PLAYER | kind::ACTOR_BOARDS_ACTOR
+            ) && t.actor.is_some_and(|e| actor_reports.iter().any(|r| r.0 == t.kind && r.1 == e));
+            if completed
+                || killed
+                    && matches!(
+                        t.kind,
+                        kind::ACTOR_GONE
+                            | kind::ACTOR_KILLED
+                            | kind::ACTOR_ATTACKED
+                            | kind::ACTOR_ATTACKED_QUIET
+                    )
             {
                 fired.push((t.event, t.kind));
             }
@@ -183,6 +198,12 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
             &city_scenery,
         );
         if fire {
+            if let Some(a) = &actor {
+                crate::autoplay::log(format_args!(
+                    "trigger {:#x} type {:#x} fired on actor at {:?} alive {}",
+                    t.event, t.kind, a.pos, a.alive
+                ));
+            }
             fired.push((t.event, t.kind));
             stopped.extend(t.sound);
         } else {
@@ -240,7 +261,9 @@ fn condition(
         }
         PLAYER_DOWN => p.down,
         ENTER_ACTOR | ENTER_ACTOR_QUIET => t.actor == Some(p.entity),
-        ACTOR_GONE => actor_reported(ACTOR_GONE),
+        // 0x09 and 0x28 are fired by the same routine (`0xa653a`): a
+        // wrecked vehicle (reported as killed) is "gone" too.
+        ACTOR_GONE => actor_reported(ACTOR_GONE) || actor_reported(ACTOR_KILLED),
         MONEY_GAIN => p.money as i64 >= t.counter,
         IN_ANY_VEHICLE => !p.on_foot,
         NEAR_ACTOR => actor.is_some_and(|a| p.controlled && within(p.pos, a.pos.truncate(), 6000)),

@@ -62,6 +62,10 @@ pub struct MissionState {
     pub forced_traffic: i32,
     /// Script id for dropped bombs (`0x11a77e`), -1 = none.
     pub projectile_id: i32,
+    /// Door side toggle of `Ped_ExitVehicle` (`0x34c1b0`). The original
+    /// never resets it; here it restarts with each level so a level plays
+    /// (and replays) the same however it was reached.
+    pub exit_toggle: bool,
 }
 
 impl Default for MissionState {
@@ -79,6 +83,7 @@ impl Default for MissionState {
             finished: false,
             forced_traffic: -1,
             projectile_id: -1,
+            exit_toggle: false,
         }
     }
 }
@@ -131,7 +136,11 @@ impl Plugin for MissionPlugin {
             .add_message::<LevelOutcome>()
             .add_systems(
                 OnEnter(crate::level::AppState::Playing),
-                start_level.after(crate::sim::people::PlayerSpawned),
+                // After the level phrases are loaded (`LevelLoaded`), or
+                // the intro line and first message come out empty.
+                start_level
+                    .after(crate::sim::people::PlayerSpawned)
+                    .after(crate::level::LevelLoaded),
             )
             .add_systems(OnExit(crate::level::AppState::Playing), reset_missions)
             .add_systems(

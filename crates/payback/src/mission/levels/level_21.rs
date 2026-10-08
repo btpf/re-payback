@@ -15,7 +15,7 @@ const KILL_FRENZY: u32 = 2029;
 
 /// Race AI waypoints (`0xb6e48` tables): x, y, arrival radius of the type
 /// 0x32 trigger, and the `+0x386` speed cap (minus 30 per grid slot).
-const RACE_WAYPOINTS: [(i32, i32, i32, i32); 13] = [
+pub(crate) const RACE_WAYPOINTS: [(i32, i32, i32, i32); 13] = [
     (0x2000, 0x30c00, 3000, 550), // (4,97)
     (0x2400, 0x34400, 2500, 300), // (4,104)
     (0x6800, 0x33800, 2500, 300), // (13,103)
