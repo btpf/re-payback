@@ -20,4 +20,4 @@ Reverse engineering and Bevy reimplementation of Payback (Apex Designs, Amiga, 2
 
 ## Progress page
 
-`progress.html` in the repository root is a self-contained page (no external assets) that shows the project's progress and what's left to do. **Keep it up to date:** whenever a feature lands, a gap is found or fixed, or priorities change, update `progress.html` in the same commit.
+`progress.html` in the repository root is a self-contained page (no external assets) that shows the project's progress and what's left to do. It is git-ignored (local only). **Keep it up to date:** whenever a feature lands, a gap is found or fixed, or priorities change, update its `DATA` object.
