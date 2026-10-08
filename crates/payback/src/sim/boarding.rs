@@ -64,8 +64,70 @@ impl Plugin for BoardingPlugin {
                 .chain()
                 .after(super::people::PeopleThink)
                 .before(super::people::PeopleSet),
+        )
+        .add_systems(
+            FixedUpdate,
+            board_test
+                .run_if(|| std::env::args().any(|a| a == "--board-test"))
+                .after(crate::replay::ReplayInput)
+                .before(super::people::PeopleThink),
         );
     }
+}
+
+/// `--board-test`: scripted controls checking what stops the walk to a car
+/// (docs/re/people.md §6.1). Logs `board test:` lines; each check reads
+/// the state the previous tick left.
+fn board_test(
+    mut tick: Local<u32>,
+    mut inputs: ResMut<super::people::PlayerInputs>,
+    q: Query<(&Obj, Option<&Boarding>), (With<CameraTarget>, With<Person>)>,
+) {
+    let Some((o, b)) = q.iter().find(|(o, _)| o.player == Some(0)) else {
+        return;
+    };
+    *tick += 1;
+    let t = *tick;
+    let walking = b.is_some_and(|b| !b.entering);
+    let mut input = super::people::PlayerInput::default();
+    let (label, expect) = match t {
+        80 | 150 | 170 | 190 => {
+            input.use_pressed = true;
+            ("in/out pressed", None)
+        }
+        82 => ("after in/out", Some(true)),
+        100 => ("still walking, no input", Some(true)),
+        110..130 => {
+            input.left = t < 115;
+            input.accel = true;
+            if t == 111 {
+                ("left+accelerate held", Some(false))
+            } else {
+                ("", None)
+            }
+        }
+        152 => ("in/out again", Some(true)),
+        172 => ("in/out while walking", Some(false)),
+        192 => ("in/out", Some(true)),
+        210 => {
+            input.fire = true;
+            ("fire pressed", None)
+        }
+        212 => ("after fire", Some(false)),
+        _ => ("", None),
+    };
+    if !label.is_empty() || t == 110 || t == 130 {
+        let verdict = match expect {
+            Some(e) if e == walking => " OK",
+            Some(_) => " FAIL",
+            None => "",
+        };
+        info!(
+            "board test: tick {t} {label}: walking to car {walking}{verdict} (pos {:?} heading {})",
+            o.pos, o.heading
+        );
+    }
+    inputs.0[0] = input;
 }
 
 /// Driver's door point of a vehicle: its right side (model -X) at the
@@ -131,6 +193,14 @@ pub(crate) fn door_y(kind: usize, max_y: i32) -> i32 {
     }
 }
 
+/// The player's controls ask for something besides in/out (Mac
+/// `ReadInput` @ 10064bf0, OS4 `FUN_01051a10`): a direction, fire or
+/// brake held. `player_stick` has just copied the tick's input into the
+/// stick, so a stopped brake (throttle 0) still counts through `brake`.
+fn wants_control(stick: &Stick) -> bool {
+    stick.steer != 0 || stick.throttle != 0 || stick.fire || stick.brake
+}
+
 /// In/out pressed: pick a vehicle and walk to it (a boat is boarded on the
 /// spot), or get out (Mac `GetInOutVehicles` @ 10066140, OS4
 /// `FUN_01052a4c`).
@@ -170,7 +240,22 @@ fn use_pressed(
     // On foot: choose a vehicle (nearest door point, no range limit).
     for e__ in crate::sim::table_order(on_foot.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((pe, p, stick, boarding)) = on_foot.get(e__) else { continue };
-        if !stick.use_vehicle || p.state != State::Player {
+        if p.state != State::Player {
+            continue;
+        }
+        // Any held control but in/out (accelerate, reverse, left, right,
+        // fire, brake) drops the walk to the car, or the climb in while the
+        // door opens, before the in/out press is looked at (Mac `ReadInput`
+        // @ 10064bf0: state 2 and any of input[0..4], input[8] -> +0x90c =
+        // 0; OS4 `FUN_01051a10` +0x424 = 0). The person then moves under
+        // the controls this same tick.
+        let boarding = if boarding.is_some() && wants_control(stick) {
+            commands.entity(pe).remove::<Boarding>();
+            None
+        } else {
+            boarding
+        };
+        if !stick.use_vehicle {
             continue;
         }
         if boarding.is_some() {

@@ -729,7 +729,20 @@ state 2:
     is below `(veh.0x48c4 >> 3)²` (about 4·r) and |dz| < 0xc00; otherwise nothing happens (no walk). The
     person's burn timer is not checked on this path. CONFIRMED (Mac `GetInOutVehicles`).
   - **Any other vehicle**: set +0x420 = vehicle, +0x424 = 1 (walking to car), waypoint +0x310 = 5.
-- **If already heading for a car** (+0x424 == 1): pressing again cancels (+0x424 = 0).
+- **If already heading for a car** (+0x424 ≠ 0, walking or climbing in): pressing again cancels (+0x424 = 0)
+  and nothing else happens that tick. CONFIRMED (Mac `GetInOutVehicles` @ 10066140: `+0x90c != 0` → `+0x90c = 0`).
+
+**Any other control cancels too.** Each tick, before the in/out press is handled, the input reader clears the
+walk (OS4 +0x424 / Mac +0x90c = 0) if the player object is in state 2 and any of accelerate, reverse, left,
+right, fire or brake is held (input words 0–4 and 8; in/out is word 6, weapon keys don't count). This also stops
+a climb in while the door is opening (the door is left as it is). The person then moves under the controls the
+same tick: the auto-steer only runs while +0x424 == 1, and it writes the stick, not the input words. There is no
+timeout and no range check; a target that drives off is simply followed. If a control and in/out are pressed on
+the same tick, the walk is cleared first, so the press starts a new walk (and a held control drops it again the
+next tick). CONFIRMED: Mac `ReadInput` @ 10064bf0 (after the weapon keys: `obj+0x910 == 2` and any of
+`DAT_1017c398/394/390/38c/388/380[p]` → `+0x90c = 0`), OS4 `FUN_01051a10` (`+0x428 == 2` and any of
+`DAT_0114c66c/664/65c/654/64c/62c` → `+0x424 = 0`). Port: `boarding.rs` `use_pressed` (checks the tick's stick
+from `player_stick`, so it is recorded in replays); `--board-test` runs a scripted check.
 
 **Walking to the car** (+0x424 == 1). The person steers automatically like the AI (§7.1). It turns toward the
 waypoint and walks forward when the angle error is under 200 units (12.5°). The waypoint positions, relative to
