@@ -23,10 +23,9 @@
 //! Not reproduced:
 //! - deletion of records outside the view rectangle (the simulation has no
 //!   view; records still expire through size and z);
-//! - type 15's looping 13 Flames sound and the per-type dynamic lights
-//!   (OS4 `FUN_01036574`);
+//! - type 15's looping 13 Flames sound (the per-type dynamic lights of OS4
+//!   `FUN_01036574` are in `crate::lighting`);
 //! - debris fragments (`FUN_01035438`), a separate list;
-//! - Blood.dark (gore option / night).
 //!
 //! Rendering: every (layer, blend) pair, plus one lens-flare pass per layer,
 //! is one mesh rebuilt each frame from horizontal quads ("screen-aligned"
@@ -401,6 +400,17 @@ impl Effects {
         self.lists.iter().all(Vec::is_empty)
     }
 
+    /// Records that light the city under Gouraud shading (`FUN_01036574`):
+    /// (type, position, size) of fireballs (2), explosions (7), explosion
+    /// flares (11) and fires (15).
+    pub fn light_sources(&self) -> impl Iterator<Item = (u8, Vec3, i32)> + '_ {
+        self.lists
+            .iter()
+            .flatten()
+            .filter(|e| matches!(e.kind, 2 | 7 | 0xb | 0xf))
+            .map(|e| (e.kind, e.pos.as_vec3(), e.size))
+    }
+
     /// Advance every effect one game tick. Lists run from last to first;
     /// spawned records are appended, and a removed record is replaced by the
     /// last one (`RemoveEffect`, OS4 `FUN_01035f48`), so neither is updated
@@ -565,7 +575,7 @@ const ATLAS_H: usize = TILE * ATLAS_ROWS;
 /// Atlas tiles, in order. Quartered sprites (`<set>AB`: A = 0 left / 1
 /// right, B = 0 top / 1 bottom) occupy 4 tiles at `first + 2A + B`. The
 /// empty name is a solid white tile.
-const FILES: [&str; 47] = [
+const FILES: [&str; 48] = [
     "Dust",
     "Flare",
     "Flame.1",
@@ -613,6 +623,7 @@ const FILES: [&str; 47] = [
     "LensFlare.8",
     "LensFlare.9",
     "LensFlare.10",
+    "Blood.dark",
 ];
 const FLAME_TILE: usize = 2;
 const SHOCKWAVE_TILE: usize = 11;
@@ -624,6 +635,9 @@ const LENS_RING_TILE: usize = 32;
 const LENS_HALO_TILE: usize = 36;
 /// LensFlare.1, .3_4, .5, .6_7, .8, .9, .10.
 const GHOST_TILE: usize = 40;
+/// `Blood` and its night replacement (`FUN_01035250`).
+const BLOOD_TILE: usize = 6;
+const BLOOD_DARK_TILE: usize = 47;
 
 /// Full-mode flare elements (`FUN_01034804`): tile, position factor f (the
 /// element sits at `c + f·(p − c)`, c = screen centre, p = flare) and
@@ -705,7 +719,7 @@ impl Effect {
             (_, Tex::Dust | Tex::Dust2) => Sprite::Single(0),
             (_, Tex::Flare) => Sprite::Single(1),
             (_, Tex::Flame) => Sprite::Single(FLAME_TILE + self.frame as usize),
-            (_, Tex::Blood) => Sprite::Single(6),
+            (_, Tex::Blood) => Sprite::Single(BLOOD_TILE),
             (_, Tex::Gas) => Sprite::Single(7),
             (_, Tex::Dirt) => Sprite::Single(8),
             (_, Tex::DirtSkidmark) => Sprite::Single(9),
@@ -1114,7 +1128,10 @@ fn build_meshes(
     camera: Query<(&Camera, &GlobalTransform, &Projection), With<GameCamera>>,
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
+    city: Option<Res<City>>,
 ) {
+    // Night maps draw `Blood.dark` instead of `Blood` (`FUN_01035250`).
+    let night = city.is_some_and(|c| c.map.night);
     let mut sources = std::mem::take(&mut flares.0);
     let Ok((cam, cam_tf, projection)) = camera.single() else {
         return;
@@ -1136,7 +1153,10 @@ fn build_meshes(
     let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();
     for (layer, list) in effects.lists.iter().enumerate() {
         for e in list {
-            let (sprite, half, pass) = e.sprite();
+            let (mut sprite, half, pass) = e.sprite();
+            if night && sprite == Sprite::Single(BLOOD_TILE) {
+                sprite = Sprite::Single(BLOOD_DARK_TILE);
+            }
             if sprite == Sprite::Flare {
                 // AddFlare with −size: never occluded.
                 let pos = to_render(e.pos.as_vec3()) + Vec3::Y * NEARER;

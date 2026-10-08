@@ -270,39 +270,115 @@ over ice (map 1, on a zero-height cube 1 above the Reflect ice), `RoofWindow.chu
 * Object textures (`FUN_010bf310(1)`): `Shine.*` (not `Shine.cup*`) and
   `CloudsReflect` are swapped for their `.dark` files; `Joystick`, `Red Shade`,
   `Lights` untouched; everything else (except `TankBits`) darkened through T1[c][0x67].
-* Vehicles get an extra 4-vertex polygon textured `Lights` (INFERRED headlight beam;
-  `FUN_0104e00c` → `FUN_010bf070`).
+* Vehicles get an extra polygon textured `Lights` — the **headlight beam**
+  (CONFIRMED, `FUN_0104e00c` → `FUN_010bf070` on night load; `FUN_0104e0a4` →
+  `FUN_010bf254` removes it again for a day map). It is added to the model itself (4
+  vertices, 2 faces) for every model of the vehicle table `DAT_012a6364…63d0` and the
+  four police siren variants (`DAT_0114c710…720`), except models with `+0x4928` set
+  (tank, helicopter, boat). With r = `+0x48c4` (max |x|, ×16 units) and L = `+0x48c8`
+  (max y of the near-ground vertices), in model ×16 units: vertices `(±2r, L − r/2, 0)`
+  and `(±2r, L + 10r, 0)` — a rectangle on the model's ground plane, twice the car's
+  width, from just behind the front bumper to ~10 half-widths ahead. Faces `(v0 v1 v2)`
+  and `(v1 v3 v2)`, slot 0 only (one-sided), texture `Lights` (`DAT_0114c90c`), UVs
+  (77,3) (17,3) (77,82) and (17,3) (17,82) (77,82) (texel, row — the beam picture in
+  the top-left of `Lights`), **mode 4** (additive, §10) param 2.
 
 ### Gouraud lighting (option; `DAT_0114c2fc`, "Gouraud shading" menu) — CONFIRMED
 
-Off by default on the Amiga software renderer; when on, `FUN_010766c8` runs after
-LoadMap:
+**Default on** in the OS4 build: the initialised data holds `DAT_0114c2fc = 1` and
+`DAT_0114c2f8 = 1` (the "Gouraud available" flag; LoadConfig forces the option off
+when it is 0, the menu entry is disabled then, and `Gouraud.256` is only built/loaded
+when it is set, `FUN_0103c080`). `S:Payback.config` field 17 overrides it. Toggling it
+in the pause menu relights the loaded map (`FUN_010792dc` → `FUN_010766c8`; off:
+`FUN_01074cbc` + `FUN_01079c54` reload the plain map). When on, `FUN_010766c8` runs
+after LoadMap:
 
 1. **`.CubeTextureRemapList`** (one name per line, aligned with `.CubeTextureList`):
    every face's texture index i is replaced by the index of the texture named on line
    i. 295 lines differ and they map *baked-lighting variants back to plain textures*
    (DarkPavement→Pavement, RoadShadow1→Road, AltRoofShad2→NewRoof …): dynamic light
    replaces the painted-in shading.
-2. Per cube 24 shorts at cube+0x24: three channel groups (R,G,B INFERRED) × 8:
-   `[0..3]` top corners, `[4..7]` bottom corners (shared with the cube above).
+2. Per cube 24 shorts at cube+0x24: three channel groups R, G, B × 8:
+   `[0..3]` top corners, `[4..7]` bottom corners (the bottom of the cube's walls).
    Corner order: **0 = NW (x0,y0), 1 = NE (x1,y0), 2 = SW (x0,y1), 3 = SE (x1,y1)**
    (CONFIRMED from the per-vertex assignments in the lit rotating paths of
-   `FUN_010920d8`: vertex (x0,y0) takes `[0],[8],[0x10]`, (x1,y0) `[1],[9],[0x11]`, …).
-3. Base light: lit 0x80 (night 0x60), shadow 0x30; sloped tops ± 0x40 (night 0x20)
-   depending on h1 vs h2. Shadows: ray from each vertex through a 256×256×10 voxel
-   grid (half-square XY resolution, z = H>>7) stepping (−x, −y, +z) — a fixed sun
-   toward the north-west, ~55° elevation (INFERRED). Edge squares never shadowed.
-4. Static lamps: scenery 33/36 (`lamppost_dark*`, I ≈ 800M/600M/400M R/G/B + random),
-   35 (`lamp`, 500M/500M/400M); position = square centre, z = top of stack − 2000
-   object units; each vertex adds `min(255, I/d²)` per channel, d in object units,
-   radius `(isqrt(maxI)>>12)+1` squares (7 for lampposts). No occlusion test.
-   Scenery 2 (`lamppost`, day) emits nothing.
-5. Dynamic lights each frame (`FUN_010753e8`/`FUN_0106ba08`, removed again by
-   `FUN_010729ec`): traffic lights (red/amber/green by phase), pedestrian-crossing
-   beacons, fire/explosions (`FUN_01036574`).
-6. Software shading: `out = Gouraud[(R&0xF8)<<15 | (G&0xF8)<<10 | (B&0xF8)<<5 | texel]`
-   (`FUN_0112c6ec`); 128 = unchanged. `Gouraud.256` (not shipped, generated):
-   32×32×32×256, value = nearest(clamp(pal[c] + (r,g,b) − 128)).
+   `FUN_010920d8`: vertex (x0,y0) takes `[0],[8],[0x10]`, (x1,y0) `[1],[9],[0x11]`, …;
+   the walls use top/bottom pairs, e.g. the N wall `[0] [1]` over `[4] [5]`,
+   `FUN_010a4004`; values are clamped to 255 when drawn).
+3. **Voxel grid** `DAT_0114c80c` (`FUN_010759e0`): 256×256×10 bytes, index
+   `(hx·256 + hy)·10 + z`, hx/hy = half squares, z = `H >> 7` clamped 0…9. It marks
+   *faces*, not solids: a visible top marks the sub-cell under each corner at that
+   corner's height (Reflect tops at h2, slopes per §1); a visible side face marks the
+   column `base>>7 … (base+h1)>>7` of the two sub-cells along its edge.
+4. **Base light** per corner (`FUN_010766c8`):
+
+   | | lit R,G / B | shadow | slope step |
+   |---|---|---|---|
+   | day, software | 0x80 / 0x80 | 0x30 | 0x40 |
+   | night, software | 0x60 / 0x60 | 0x30 | 0x20 |
+   | day, Warp3D | 0xbe / 0xbe | 0x80 | 0x30 (+ random ±8 jitter per vertex) |
+   | night, Warp3D | 0x20 / 0x30 | 0x0c / 0x10 | 0x20 |
+
+   **Shadow test**: from the corner's grid point the ray checks the cells
+   `(gx − k, gy − k, z0 + k)`, k = 1, 2, … while z ≤ 9 (z0 = the corner's `H >> 7`);
+   any marked cell puts the corner in shadow. One half square west, one north and 128
+   h-units up per step: a sun in the north-west at atan(128 / (128·√2)) ≈ **35°**
+   elevation, consistent with object shadows falling to the south-east (§7). Squares
+   on the map edge (x or y = 0 or 127) are not tested (lit). Reflect tops are lit with
+   0x80 even at night.
+   **Slopes**: lit top corners (value = lit) get `+step` on slopes facing the sun —
+   RVert/RHoriz with h1 > h2, Vert/Horiz with h1 < h2 — and `−step` on slopes facing
+   away (Vert/Horiz with h1 > h2, RVert/RHoriz with h1 < h2); flat tops and shadowed
+   corners are unchanged.
+5. **Static lamps** (`FUN_0106c904`, never removed): scenery 33 (`lamppost_dark`; the
+   loop renumbers it to 36 afterwards) and 36 (`lamppost_dark2`):
+   `(800M + rand(100M), 600M + rand(80M), 400M + rand(60M))`; 35 (`lamp`):
+   `(500M + rand(50M), 500M + rand(50M), 400M + rand(50M))`. Position: square centre,
+   `z = (1500 − top)·16 − 2000` with top = the stack below plus the cube's own top
+   (h2 on Reflect tops, the higher end of slopes, else h1). Square box
+   `centre ± ((isqrt(max I) >> 12) + 1)` clamped to 1…126 (±8 for a lamppost); every
+   corner in the box except those on its outer edge adds `min(255, I / d²)` per channel
+   (integer division; d in object units, z 16 per h-unit). No occlusion. Scenery 2
+   (`lamppost`, day) emits nothing. Map 2 has 257 lampposts and 113 lamps (the jail
+   interior is lit by lamps).
+6. **Dynamic lights**, added each frame with `FUN_0106ba08` (via `FUN_010729c8`, only
+   while the option is on and fewer than 1000 are active) and subtracted again after
+   drawing (`FUN_010729ec`). Same falloff as the lamps but box radius
+   `(isqrt(max I) >> 13) + 1`, and **all intensities halved on day maps**
+   (`DAT_0114c84c == 0`, software). Sources (at the object's position unless noted):
+
+   | source | R, G, B | code |
+   |---|---|---|
+   | traffic light (scenery 1), k = special + phase − 1 (mod 6) | k < 2 (300M, 50M, 50M); k = 2 (600M, 300M, 50M); k 3–4 (50M, 300M, 50M); k = 5 (300M, 300M, 50M) | `FUN_010753e8`; list built at load by `FUN_01074cd8` |
+   | crossing beacon (15), by sub-counter `DAT_0114c754` | 24: (150M, 150M, 25M); ≥ 25: (300M, 300M, 50M); 0: (200M, 200M, 33.3M); 1: (100M, 100M, 16.7M); else none | ditto |
+   | effect type 0xB (explosion flare), size r | (900k·r, 900k·r, 700k·r) | `FUN_01036574` |
+   | type 2 (fireball) | (140k·r + rnd 5M, 120k·r + rnd 4M, 100k·r + rnd 3M) | ditto |
+   | type 7 (explosion) | (50k·r + rnd 2M, 40k·r + rnd 1.5M, 30k·r + rnd 1M) | ditto |
+   | type 0xF (fire) | (100k·r + rnd 5M, 70k·r + rnd 3M, 50k·r + rnd 2M) | ditto |
+   | burning object, timer 2…15, I = (radius + rnd 150)·200k | (I + rnd 5M, I + rnd 5M − 2.5M, I − rnd 5M) at pos ± rnd 150 | object update (decompiled.c ~43990) |
+   | burning object, timer ≥ 16, I = (1.5·radius + rnd 300)·200k | (I + rnd 10M, I + rnd 10M − 5M, I − rnd 10M) | ditto |
+   | missile (`DAT_012a6750`) | (100M, 90M, 80M), z − 500 | `AddCollideObj` (decompiled.c ~36294) |
+   | petrol bomb (`DAT_012a6754`) | (30M + rnd 10M, 15M + rnd 5M, 5M + rnd 2M), z − 500 | decompiled.c ~47200 |
+   | police car / van siren | red model (200M, 20M, 20M), blue model (20M, 20M, 200M), z − 500 | decompiled.c ~48831 |
+
+   Traffic lights and beacons sit at the square centre plus the model's `+0x4910 /
+   +0x4914` (mean x / y of the ground vertices) rotated by the cube rotation
+   (`x' = (cos·mx + sin·my) >> 8`, `y' = (cos·my − sin·mx) >> 8`), 500 z-units above the
+   cube top. There is no headlight *light*: headlights are only the polygon above.
+7. Software shading: `out = Gouraud[(R&0xF8)<<15 | (G&0xF8)<<10 | (B&0xF8)<<5 | texel]`
+   (`FUN_0112c6ec`); 128 = unchanged. `Gouraud.256` (not shipped, generated by
+   `FUN_0103c080` and saved): 32×32×32×256, value = nearest(clamp(pal[c] + (r,g,b) −
+   128)) — an *additive* offset per channel, so 0x30 (shadow) is −80 and 0x60 (night)
+   −32 on top of the night-darkened textures.
+
+Port (`crates/payback/src/lighting.rs`, `shaders/city.wgsl`): static light per cube
+corner computed at load or on toggle (items 1–5; the lamp intensities come from a
+local generator), dynamic lights (item 6) collected per frame and summed per vertex in
+the vertex shader (the 64 nearest the camera), light clamped to 255, interpolated,
+quantised `& 0xF8` and added to the texel in sRGB (no palette quantisation). The
+pause-menu option (`Settings::gouraud`, default on) drives it; `--gouraud 0|1`
+overrides. Approximate: the ray's first cell is reconstructed from the index
+arithmetic (the cell diagonally north-west of the corner).
 
 ### Header `variant` = weather (`DAT_0114c854`, read via `FUN_0106e478`) — CONFIRMED
 
@@ -551,7 +627,7 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   (11xx quarters, s/2), −1 (12xx quarters, s); singles are not mirrored. Every element
   goes through the flare's table: 5–8 add only R / R+G / G / B, so traffic-light
   flares are red, amber and green. No sun flare.
-* **Blood** → `Blood.dark` at night. `Bubble` is loaded but unused. FadeDarken*,
+* **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47). `Bubble` is loaded but unused. FadeDarken*,
   HealthBar are HUD textures.
 
 Lifetimes are in game ticks (`DAT_0114c6a0` = ticks elapsed this frame; tick length
@@ -600,13 +676,11 @@ value **is the footstep sound index** (`FUN_0100815c(flag, …)`; sound table
    followed object, 1/5 positional and 1/3 height smoothing per tick.
 
 Status (port): 1–7 are implemented (`world.rs`, `city.rs`, `water.rs`, `camera.rs`).
-Also done: weather and the palette flash (§4), lens flares with ghosts (§7), and the
-object details of §10. Still missing: Gouraud lighting and the dynamic lights (§4,
-option, off by default on the Amiga), the night headlight polygon (`Lights`,
-`FUN_010bf070`), Blood.dark, the rotating view, mode 3/4/5 object faces (drawn as
-plain textured faces), object textures substituted per vehicle colour (`Cardef.*`), and
-the explosion contribution to the flash (`ScreenFlash += power/250000` belongs in the
-port's Explosion, `sim/combat.rs`).
+Also done: weather and the palette flash including explosions (§4), lens flares with
+ghosts (§7), Gouraud lighting with the static lamps and the dynamic lights
+(`lighting.rs`, §4), the night headlight polygon, Blood.dark, mode 3/4/5 object faces,
+vehicle colour textures and the object details of §10. Still missing: the rotating
+view.
 
 ---
 
@@ -624,9 +698,9 @@ one active slot are single-sided, faces with none are invisible. Low nibble of `
 |---|---|
 | 1 | flat colour: `param` mapped through `General/64->256.dat` (64 palette indices, file name `64-_256.dat` on disk) at load |
 | 2 | textured |
-| 3 | textured, `FUN_0111e410` (INFERRED: texel 0 transparent — trees, radar dish) |
-| 4 | textured, `FUN_011113e0` (INFERRED: translucent/additive — `Lights`, blades, flames) |
-| 5 | a line between the first two vertices, colour `param` |
+| 3 | textured, `FUN_0111e410` (INFERRED: texel 0 transparent — trees, radar dish, police light bars) |
+| 4 | textured through the Alpha.256 table at `+0xff4` with `FUN_011113e0`: `DAT_0114c908` = **table 0, additive** for the world objects (`FUN_010c101c(obj, x, y, z, 0)`), table 4 (average) when the 5th argument is 100. Shine faces (`& 0x10`) with mode 4 use table 4, mode 0x28 table 9. Users: `Lights` (lamppost_dark light cones, the night headlight polygon), helicopter `Blades`, rocket-car `Flames`, `Phone`/`Red shade` arrows |
+| 5 | a line between the first two vertices, colour `param` mapped through 64→256 like mode 1 (the loader maps `param` for every mode except 6, `FUN_010bf8bc`); bullets, pistol |
 | 6 | **lens flare**: `AddFlare(vertex 0, DAT_0114c8dc, param << 16)`; tested on slot 0's mode even when slot 0 is inactive (most flare faces have no active slot, so only the flare shows) |
 
 `mode & 0x10` selects the environment-mapped (`Shine`) path; `& 0x20` its variant.
@@ -682,4 +756,8 @@ Flares are only added for objects that are not burning (`obj+0x33c < 1`).
 
 Port: `crates/payback/src/objects.rs` (slots/modes 1, 6 and inactive faces, burnt and
 dented mesh variants, scenery animation, chimneys, flare sources); flares are drawn by
-`effects.rs` (§7).
+`effects.rs` (§7). Mode 3 uses the colour-0-transparent atlas half (alpha mask);
+plain mode 4 faces, and the night headlight polygon, go into an additive overlay mesh
+and mode 5 faces into a line-list overlay (1-pixel lines), drawn as child entities of
+the object (`sync_overlays`); the main mesh keeps a degenerate triangle in their place.
+Additive blending happens in linear colour rather than palette space.

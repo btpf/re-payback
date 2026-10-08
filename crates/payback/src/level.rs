@@ -97,6 +97,7 @@ impl Plugin for LevelPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
             .init_resource::<GameMode>()
+            .add_plugins(crate::lighting::LightingPlugin)
             .add_systems(OnEnter(AppState::Playing), load_level.before(LevelLoaded))
             .add_systems(OnExit(AppState::Playing), unload_level);
     }
@@ -122,7 +123,8 @@ pub fn load_level(
     spec: Res<LevelSpec>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<crate::lighting::CityMaterial>>,
+    gouraud: Res<crate::lighting::Gouraud>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
     mut object_materials: ResMut<Assets<objects::ObjectMaterial>>,
     mut scenery: ResMut<SceneryIndex>,
@@ -160,24 +162,14 @@ pub fn load_level(
         .collect();
     let mut pass_materials = HashMap::new();
     for pass in [Pass::Opaque, Pass::Masked, Pass::Alpha] {
-        let material = StandardMaterial {
-            base_color_texture: Some(if pass == Pass::Masked {
+        let material = crate::lighting::CityMaterial {
+            atlas: if pass == Pass::Masked {
                 keyed.clone()
             } else {
                 opaque.clone()
-            }),
-            unlit: true,
-            alpha_mode: match pass {
-                Pass::Masked => AlphaMode::Mask(0.5),
-                Pass::Alpha => AlphaMode::Blend,
-                _ => AlphaMode::Opaque,
             },
-            base_color: if pass == Pass::Alpha {
-                Color::srgba(1.0, 1.0, 1.0, 0.5)
-            } else {
-                Color::WHITE
-            },
-            ..default()
+            lights: default(),
+            pass,
         };
         pass_materials.insert(pass, materials.add(material));
     }
@@ -187,10 +179,13 @@ pub fn load_level(
         water: water.clone(),
         chunks: HashMap::new(),
         visible_layers: 3,
+        lighting: None,
+        remap: None,
     };
     commands.insert_resource(Water(water));
 
     let city = City::new(map);
+    crate::lighting::set_lighting(&mut render, &data, &city, gouraud.0);
     mapedit::spawn_all_chunks(&mut commands, &mut render, &mut meshes, &city);
     commands.insert_resource(render);
     let mut library = ObjectLibrary::new(&data, &mut images, &mut object_materials, city.map.night);

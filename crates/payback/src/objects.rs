@@ -175,8 +175,68 @@ pub struct ObjectLibrary {
     /// `General/64->256.dat`: flat-colour `param` -> palette index.
     flat_colours: [u8; 64],
     pub material: Handle<ObjectMaterial>,
+    /// Mode 4 faces: drawn through Alpha.256 table 0 (`FUN_011113e0` with
+    /// the table pointer `DAT_0114c908`), i.e. additive.
+    additive: Handle<ObjectMaterial>,
+    /// Night map: vehicles get the `Lights` headlight polygon.
+    night: bool,
+    /// Additive faces and mode-5 lines of each built mesh, drawn as child
+    /// entities by [`sync_overlays`].
+    overlays: HashMap<AssetId<Mesh>, Overlay>,
     by_path: HashMap<String, Option<usize>>,
     models: Vec<LoadedModel>,
+}
+
+/// The parts of a model mesh drawn with other pipelines.
+#[derive(Clone, Default)]
+struct Overlay {
+    additive: Option<Handle<Mesh>>,
+    lines: Option<Handle<Mesh>>,
+}
+
+/// Triangles (or line segments) under construction.
+#[derive(Default)]
+struct Tris {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    env: Vec<[f32; 2]>,
+    normals: Vec<[f32; 3]>,
+}
+
+impl Tris {
+    fn degenerate(&mut self, p: [f32; 3]) {
+        self.positions.extend([p; 3]);
+        self.uvs.extend([[0.0; 2]; 3]);
+        self.env.extend([[-1.0; 2]; 3]);
+        self.normals.extend([[0.0, 1.0, 0.0]; 3]);
+    }
+
+    fn mesh(self, topology: PrimitiveTopology) -> Mesh {
+        Mesh::new(
+            topology,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.env)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+    }
+}
+
+/// A model mesh and its overlay parts.
+struct Parts {
+    main: Mesh,
+    additive: Option<Mesh>,
+    lines: Option<Mesh>,
+}
+
+/// Vehicles that get the night headlight polygon (`FUN_0104e00c` runs
+/// `FUN_010bf070` over the vehicle table `DAT_012a6364…63d0` and the police
+/// variants; models with `+0x4928` set — tank, helicopter, boat — are
+/// skipped).
+fn has_headlights(path: &str) -> bool {
+    path.starts_with("vehicles/")
+        && !matches!(path, "vehicles/tank.obj" | "vehicles/helicopter.obj" | "vehicles/boat.obj")
 }
 
 impl ObjectLibrary {
@@ -283,15 +343,23 @@ impl ObjectLibrary {
             RenderAssetUsages::RENDER_WORLD,
         );
         atlas.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
-        let material = materials.add(ExtendedMaterial {
-            base: StandardMaterial {
+        let base = StandardMaterial {
             base_color_texture: Some(images.add(atlas)),
             unlit: true,
             alpha_mode: AlphaMode::Mask(0.5),
             // Faces are one-sided; see `face_sides`.
             double_sided: false,
             cull_mode: Some(bevy::render::render_resource::Face::Back),
-                ..default()
+            ..default()
+        };
+        let material = materials.add(ExtendedMaterial {
+            base: base.clone(),
+            extension: EnvMapped::default(),
+        });
+        let additive = materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                alpha_mode: AlphaMode::Add,
+                ..base
             },
             extension: EnvMapped::default(),
         });
@@ -299,6 +367,9 @@ impl ObjectLibrary {
             slots,
             flat_colours,
             material,
+            additive,
+            night,
+            overlays: HashMap::new(),
             by_path: HashMap::new(),
             models: Vec::new(),
         }
@@ -326,8 +397,9 @@ impl ObjectLibrary {
                 }
             });
         let index = parsed.map(|obj| {
-            let mesh = meshes.add(self.build_mesh(&obj, |p| static_vertex(p)));
             let info = ModelInfo::from_obj(&key, &obj);
+            let parts = self.build_parts(&obj, Skin::Normal, None, &info, |p, _| static_vertex(p));
+            let mesh = self.add_parts(meshes, parts);
             let flares = flare_faces(&obj);
             self.models.push(LoadedModel {
                 obj,
@@ -390,6 +462,7 @@ impl ObjectLibrary {
             return h.clone();
         }
         let obj = &self.models[i].obj;
+        let info = &self.models[i].info;
         let offsets: Vec<[f32; 3]> = (0..obj.vertices.len())
             .map(|n| match dent {
                 Some(rng) => {
@@ -399,7 +472,7 @@ impl ObjectLibrary {
                 None => [0.0; 3],
             })
             .collect();
-        let mesh = self.build_mesh_skin(obj, skin, paint, |v, n| {
+        let parts = self.build_parts(obj, skin, paint, info, |v, n| {
             let [dx, dy, dz] = offsets[n];
             let (sh, sv) = (2.0 / H_PER_SQUARE, 1.0 / H_PER_SQUARE);
             [
@@ -408,7 +481,7 @@ impl ObjectLibrary {
                 (v.y as f32 + dy) * sh,
             ]
         });
-        let h = meshes.add(mesh);
+        let h = self.add_parts(meshes, parts);
         self.models[i].variants.insert(key, h.clone());
         h
     }
@@ -432,7 +505,8 @@ impl ObjectLibrary {
     }
 
     /// [`ObjectLibrary::build_mesh`] with a skin; `place` also gets the
-    /// vertex index.
+    /// vertex index. Additive (mode 4) faces and lines (mode 5) are left out
+    /// (degenerate); see [`ObjectLibrary::build_parts`].
     fn build_mesh_skin(
         &self,
         obj: &Obj,
@@ -440,10 +514,50 @@ impl ObjectLibrary {
         paint: Option<usize>,
         place: impl Fn(&Vertex, usize) -> [f32; 3],
     ) -> Mesh {
-        let mut positions = Vec::new();
-        let mut uvs = Vec::new();
-        let mut env = Vec::new();
-        let mut face_normals = Vec::new();
+        self.build_parts_with(obj, skin, paint, None, place).main
+    }
+
+    /// Add a mesh and remember its overlay parts.
+    fn add_parts(&mut self, meshes: &mut Assets<Mesh>, parts: Parts) -> Handle<Mesh> {
+        let h = meshes.add(parts.main);
+        let overlay = Overlay {
+            additive: parts.additive.map(|m| meshes.add(m)),
+            lines: parts.lines.map(|m| meshes.add(m)),
+        };
+        if overlay.additive.is_some() || overlay.lines.is_some() {
+            self.overlays.insert(h.id(), overlay);
+        }
+        h
+    }
+
+    /// The model's parts, with the night headlight polygon for vehicles.
+    fn build_parts(
+        &self,
+        obj: &Obj,
+        skin: Skin,
+        paint: Option<usize>,
+        info: &ModelInfo,
+        place: impl Fn(&Vertex, usize) -> [f32; 3],
+    ) -> Parts {
+        let lights = if self.night && skin == Skin::Normal && has_headlights(&info.path) {
+            self.slots.get("lights").map(|&t| (info, t))
+        } else {
+            None
+        };
+        self.build_parts_with(obj, skin, paint, lights, place)
+    }
+
+    fn build_parts_with(
+        &self,
+        obj: &Obj,
+        skin: Skin,
+        paint: Option<usize>,
+        headlights: Option<(&ModelInfo, u32)>,
+        place: impl Fn(&Vertex, usize) -> [f32; 3],
+    ) -> Parts {
+        let mut main = Tris::default();
+        let mut add = Tris::default();
+        let mut lines = Tris::default();
         let burnt = self.slots.get("burnt").copied();
         let reflect = self.slots.get("cloudsreflect").copied();
         // Smooth vertex normals: sum of the unit normals of the drawn faces
@@ -461,25 +575,43 @@ impl ObjectLibrary {
             }
         }
         for (face, side) in face_sides(obj) {
+            let p0 = || place(&obj.vertices[face.indices[0]], face.indices[0]);
             let Some(side) = side else {
                 // Not drawn: a degenerate triangle keeps the layout.
-                let p = place(&obj.vertices[face.indices[0]], face.indices[0]);
-                positions.extend([p; 3]);
-                uvs.extend([[0.0; 2]; 3]);
-                env.extend([[-1.0; 2]; 3]);
-                face_normals.extend([[0.0, 1.0, 0.0]; 3]);
+                main.degenerate(p0());
                 continue;
             };
             let slot = &face.slots[side];
             let mode = slot.mode & 0xf;
             if skin == Skin::Burnt && !matches!(mode, 1 | 2) {
-                let p = place(&obj.vertices[face.indices[0]], face.indices[0]);
-                positions.extend([p; 3]);
-                uvs.extend([[0.0; 2]; 3]);
-                env.extend([[-1.0; 2]; 3]);
-                face_normals.extend([[0.0, 1.0, 0.0]; 3]);
+                main.degenerate(p0());
                 continue;
             }
+            if mode == 5 {
+                // A line between the first two vertices, colour `param`
+                // through 64->256 like mode 1 (the loader maps every mode
+                // but 6).
+                main.degenerate(p0());
+                let c = self.flat_colours[(slot.param & 63) as usize] as u32;
+                let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
+                let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
+                for k in [0, 1] {
+                    let vi = face.indices[k];
+                    lines.positions.push(place(&obj.vertices[vi], vi));
+                    lines.uvs.push([ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]);
+                    lines.env.push([-1.0; 2]);
+                    lines.normals.push([0.0, 1.0, 0.0]);
+                }
+                continue;
+            }
+            // Plain mode 4 goes to the additive overlay; the main mesh keeps
+            // a degenerate triangle in its place.
+            let out = if mode == 4 && slot.mode & 0x10 == 0 {
+                main.degenerate(p0());
+                &mut add
+            } else {
+                &mut main
+            };
             let order = side_order(side);
             let [a, b, c] = order.map(|k| face.indices[k]);
             let flat = (placed[b] - placed[a]).cross(placed[c] - placed[a]).normalize_or_zero();
@@ -497,19 +629,20 @@ impl ObjectLibrary {
                     self.slots.get(name).copied()
                 }
             };
-            let keyed = skin == Skin::Normal && matches!(mode, 3 | 4);
+            // Mode 3 keys colour 0 out; additive faces add nothing there.
+            let keyed = skin == Skin::Normal && mode == 3;
             for k in order {
                 let (vi, (u, v)) = (face.indices[k], slot.uv[k]);
-                positions.push(place(&obj.vertices[vi], vi));
+                out.positions.push(place(&obj.vertices[vi], vi));
                 let n = if shine.is_some() && smooth_env { smooth[vi].normalize_or_zero() } else { flat };
-                face_normals.push(n.to_array());
+                out.normals.push(n.to_array());
                 // Replacement kinds map the slot texture; overlays CloudsReflect.
                 let source = match shine {
                     Some(1 | 2) => tex,
                     Some(_) => reflect,
                     None => None,
                 };
-                env.push(match (shine, source) {
+                out.env.push(match (shine, source) {
                     (Some(kind), Some(t)) => {
                         let (cu, cv) = if smooth_env { ENV_CENTRE_SMOOTH } else { ENV_CENTRE_SCREEN };
                         let ox = (t % ATLAS_COLS * TEX_W) as f32 + cu + 0.5;
@@ -518,7 +651,7 @@ impl ObjectLibrary {
                     }
                     _ => [-1.0, -1.0],
                 });
-                uvs.push(match (skin, slot.mode, tex) {
+                out.uvs.push(match (skin, slot.mode, tex) {
                     (Skin::Burnt, _, Some(t)) if mode == 1 => {
                         let (u, v) = BURNT_FIXED_UV[k];
                         Self::atlas_uv(t, u, v, false)
@@ -536,15 +669,15 @@ impl ObjectLibrary {
                 });
             }
         }
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, env)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, face_normals);
-        mesh
+        if let Some((info, tex)) = headlights {
+            headlight_polygon(&mut add, info, tex);
+        }
+        let nonempty = |t: Tris, topology| (!t.positions.is_empty()).then(|| t.mesh(topology));
+        Parts {
+            main: main.mesh(PrimitiveTopology::TriangleList),
+            additive: nonempty(add, PrimitiveTopology::TriangleList),
+            lines: nonempty(lines, PrimitiveTopology::LineList),
+        }
     }
 }
 
@@ -554,6 +687,85 @@ impl ObjectLibrary {
 pub fn static_vertex(p: &Vertex) -> [f32; 3] {
     let (sh, sv) = (2.0 / H_PER_SQUARE, 1.0 / H_PER_SQUARE);
     [p.x as f32 * sh, -p.z as f32 * sv, p.y as f32 * sh]
+}
+
+/// The night headlight polygon (`FUN_010bf070`): a rectangle on the
+/// model's ground plane (z = 0) from `y0 = max_y − r/2` to `y1 = max_y +
+/// 10r`, `x = ±2r` (r = `+0x48c4`, max |x|; `max_y` = `+0x48c8`), as two
+/// one-sided triangles textured `Lights` at (77,3) (17,3) (77,82) and
+/// (17,3) (17,82) (77,82) (texel, row), mode 4 (additive), param 2.
+fn headlight_polygon(out: &mut Tris, info: &ModelInfo, tex: u32) {
+    let r = info.radius as f32 / 16.0;
+    let my = info.max_y as f32 / 16.0;
+    let (y0, y1) = (my - r / 2.0, my + 10.0 * r);
+    let sh = 2.0 / H_PER_SQUARE;
+    let corner = |x: f32, y: f32| [x * sh, 0.0, y * sh];
+    // (position, u texel, v row).
+    let v0 = (corner(2.0 * r, y0), 77, 3);
+    let v1 = (corner(-2.0 * r, y0), 17, 3);
+    let v2 = (corner(2.0 * r, y1), 77, 82);
+    let v3 = (corner(-2.0 * r, y1), 17, 82);
+    for tri in [[v0, v1, v2], [v1, v3, v2]] {
+        // Facing up: counter-clockwise seen from above.
+        let [a, b, c] = tri.map(|t| Vec3::from(t.0));
+        let tri = if (b - a).cross(c - a).y < 0.0 { [tri[0], tri[2], tri[1]] } else { tri };
+        for (p, u, v) in tri {
+            out.positions.push(p);
+            // Rows are file units / 2.
+            out.uvs.push(ObjectLibrary::atlas_uv(tex, u, v * 2, false));
+            out.env.push([-1.0; 2]);
+            out.normals.push([0.0, 1.0, 0.0]);
+        }
+    }
+}
+
+/// Overlay children of an object entity (see [`Overlay`]).
+#[derive(Component)]
+struct OverlayChildren(Vec<Entity>);
+
+/// Keep each object's overlay children (additive faces, lines) in step
+/// with its mesh.
+#[allow(clippy::type_complexity)]
+fn sync_overlays(
+    mut commands: Commands,
+    library: Option<Res<ObjectLibrary>>,
+    q: Query<
+        (Entity, &Mesh3d, Option<&OverlayChildren>),
+        (With<MeshMaterial3d<ObjectMaterial>>, Changed<Mesh3d>),
+    >,
+) {
+    let Some(library) = library else { return };
+    for (entity, mesh, old) in &q {
+        if let Some(old) = old {
+            for &e in &old.0 {
+                commands.entity(e).try_despawn();
+            }
+        }
+        let Some(overlay) = library.overlays.get(&mesh.0.id()) else {
+            if old.is_some() {
+                commands.entity(entity).remove::<OverlayChildren>();
+            }
+            continue;
+        };
+        let mut children = Vec::new();
+        for (part, material) in [
+            (&overlay.additive, &library.additive),
+            (&overlay.lines, &library.material),
+        ] {
+            if let Some(part) = part {
+                let child = commands
+                    .spawn((
+                        Mesh3d(part.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::IDENTITY,
+                        ChildOf(entity),
+                    ))
+                    .id();
+                children.push(child);
+            }
+        }
+        commands.entity(entity).insert(OverlayChildren(children));
+    }
 }
 
 /// Positions in the order `build_mesh` emits them, for re-posing a mesh.
@@ -685,6 +897,7 @@ impl Plugin for SceneryPlugin {
                 *c = SceneryClock::default();
             })
             .add_systems(Update, (animate_scenery, vehicle_skins))
+            .add_systems(PostUpdate, sync_overlays.before(TransformSystems::Propagate))
             .add_systems(
                 FixedUpdate,
                 spawn_damage_check.run_if(in_state(AppState::Playing)),

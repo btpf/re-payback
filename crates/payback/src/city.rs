@@ -4,6 +4,7 @@
 //! (256 h-units); square (x, y) covers X in [x, x+1], Z in [y, y+1].
 
 use crate::data::GameData;
+use crate::lighting::{CityLighting, NE, NEUTRAL, NW, SE, SW};
 use crate::world::{H_PER_SQUARE, stack_height, top_corners};
 use bevy::{
     asset::RenderAssetUsages,
@@ -127,13 +128,22 @@ struct MeshBuilder {
     uvs: Vec<[f32; 2]>,
     /// Tile origin in atlas texels (+ SCROLL_FLAG for scrolling water).
     uvs_b: Vec<[f32; 2]>,
+    /// Gouraud light / 255 per corner (128 = unchanged; `lighting.rs`).
+    light: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
 impl MeshBuilder {
     /// Quad with corners in winding order and per-corner texture coordinates
     /// in texels of the 64x64 tile (u = column, v = row, edges at 0 and 64).
-    fn quad(&mut self, corners: [Vec3; 4], tex_uv: [Vec2; 4], texture: u16, scrolls: bool) {
+    fn quad(
+        &mut self,
+        corners: [Vec3; 4],
+        tex_uv: [Vec2; 4],
+        texture: u16,
+        scrolls: bool,
+        light: [[f32; 3]; 4],
+    ) {
         let tile = Vec2::new(
             (texture as u32 % ATLAS_TILES * TILE) as f32,
             (texture as u32 / ATLAS_TILES * TILE) as f32,
@@ -142,7 +152,8 @@ impl MeshBuilder {
             .cross(corners[3] - corners[0])
             .normalize_or_zero();
         let base = self.positions.len() as u32;
-        for (c, t) in corners.iter().zip(tex_uv) {
+        for ((c, t), l) in corners.iter().zip(tex_uv).zip(light) {
+            self.light.push([l[0] / 255.0, l[1] / 255.0, l[2] / 255.0, 1.0]);
             // Keep a quarter-texel inside the tile so nearest sampling never
             // bleeds into the neighbour.
             let t = t.clamp(Vec2::splat(0.25), Vec2::splat(63.75));
@@ -169,6 +180,7 @@ impl MeshBuilder {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.uvs_b)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.light)
         .with_inserted_indices(Indices::U32(self.indices))
     }
 }
@@ -217,13 +229,18 @@ fn top_uv(slope: Slope) -> [Vec2; 4] {
 pub const CHUNK: usize = 16;
 pub const CHUNKS: usize = MAP_SIZE / CHUNK;
 
-/// Meshes for one chunk (cx, cy), per cube layer and pass.
+/// Meshes for one chunk (cx, cy), per cube layer and pass. With Gouraud
+/// lighting (`lighting.rs`), `light` gives the corner light of every cube and
+/// `remap` the `.CubeTextureRemapList` substitution.
 pub fn build_chunk_meshes(
     map: &Map,
     cube_texture_names: &[String],
     cx: usize,
     cy: usize,
+    light: Option<&CityLighting>,
+    remap: Option<&[u16]>,
 ) -> Vec<(usize, Pass, Mesh)> {
+    let tex = |t: u16| remap.and_then(|r| r.get(t as usize).copied()).unwrap_or(t);
     // Indexed by [layer][Pass as usize].
     let mut builders: [[MeshBuilder; 4]; 3] = Default::default();
     let s = 1.0 / H_PER_SQUARE;
@@ -233,6 +250,9 @@ pub fn build_chunk_meshes(
             let mut base = 0.0f32;
             for (layer, cube) in map.square(x, y).cubes.iter().enumerate() {
                 let builders = &mut builders[layer];
+                let lit = light.map_or([NEUTRAL; 8], |l| *l.cube(x, y, layer));
+                // Corner light in quad order.
+                let pick = |k: [usize; 4]| k.map(|i| lit[i]);
                 if cube.slope != Slope::Off {
                     let corners = top_corners(cube);
                     let [nw, ne, se, sw] = corners.map(|h| (base + h) * s);
@@ -255,7 +275,13 @@ pub fn build_chunk_meshes(
                         let scrolls = cube_texture_names
                             .get(top.texture as usize)
                             .is_some_and(|n| n.starts_with('#'));
-                        builders[pass as usize].quad(quad, uv, top.texture, scrolls);
+                        builders[pass as usize].quad(
+                            quad,
+                            uv,
+                            tex(top.texture),
+                            scrolls,
+                            pick([NW, NE, SE, SW]),
+                        );
                     }
 
                     // Walls: rectangles base..base+h1 clipped to the slope;
@@ -272,24 +298,28 @@ pub fn build_chunk_meshes(
                                 map::NORTH,
                                 [(x0, wnw, z0, vnw), (x1, wne, z0, vne)],
                                 [(x1, z0), (x0, z0)],
+                                [NW, NE, NE + 4, NW + 4],
                             ),
                             (
                                 map::EAST,
                                 [(x1, wne, z0, vne), (x1, wse, z1, vse)],
                                 [(x1, z1), (x1, z0)],
+                                [NE, SE, SE + 4, NE + 4],
                             ),
                             (
                                 map::SOUTH,
                                 [(x0, wsw, z1, vsw), (x1, wse, z1, vse)],
                                 [(x1, z1), (x0, z1)],
+                                [SW, SE, SE + 4, SW + 4],
                             ),
                             (
                                 map::WEST,
                                 [(x0, wnw, z0, vnw), (x0, wsw, z1, vsw)],
                                 [(x0, z1), (x0, z0)],
+                                [NW, SW, SW + 4, NW + 4],
                             ),
                         ];
-                        for (fi, [(ax, ay, az, av), (bx, by, bz, bv)], [(cx, cz), (dx, dz)]) in
+                        for (fi, [(ax, ay, az, av), (bx, by, bz, bv)], [(cx, cz), (dx, dz)], k) in
                             sides
                         {
                             let face = cube.faces[fi];
@@ -311,7 +341,7 @@ pub fn build_chunk_meshes(
                                 ],
                                 &face,
                             );
-                            builders[pass as usize].quad(quad, uv, face.texture, false);
+                            builders[pass as usize].quad(quad, uv, tex(face.texture), false, pick(k));
                         }
                     }
                 }

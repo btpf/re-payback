@@ -5,11 +5,13 @@
 
 use crate::city::{self, CHUNK, CHUNKS, Pass};
 use crate::level::LevelEntity;
+use crate::lighting::{CityLighting, CityMaterial};
 use crate::water::WaterMaterial;
 use crate::world::City;
 use bevy::prelude::*;
 use payback_formats::map::{Face, FaceType, MAP_SIZE, Slope};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 pub enum EditOp {
@@ -52,8 +54,12 @@ pub struct ChunkMesh {
 #[derive(Resource)]
 pub struct CityRender {
     pub names: Vec<String>,
-    pub materials: HashMap<Pass, Handle<StandardMaterial>>,
+    pub materials: HashMap<Pass, Handle<CityMaterial>>,
     pub water: Handle<WaterMaterial>,
+    /// Gouraud light and texture remap, while the option is on
+    /// (`lighting.rs`).
+    pub lighting: Option<Arc<CityLighting>>,
+    pub remap: Option<Vec<u16>>,
     pub chunks: HashMap<(usize, usize), Vec<Entity>>,
     /// Cube layers drawn (`0x34c078`): 3 = all.
     pub visible_layers: usize,
@@ -96,7 +102,15 @@ pub fn spawn_chunk(
         }
     }
     let mut spawned = Vec::new();
-    for (layer, pass, mesh) in city::build_chunk_meshes(&city.map, &render.names, cx, cy) {
+    let meshes_of = city::build_chunk_meshes(
+        &city.map,
+        &render.names,
+        cx,
+        cy,
+        render.lighting.as_deref(),
+        render.remap.as_deref(),
+    );
+    for (layer, pass, mesh) in meshes_of {
         let mesh = Mesh3d(meshes.add(mesh));
         let tag = ChunkMesh { cx, cy, layer };
         let e = if pass == Pass::Reflect {

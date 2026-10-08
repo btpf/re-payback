@@ -21,6 +21,7 @@ mod frontend;
 mod hud;
 mod intro;
 mod level;
+mod lighting;
 mod mapedit;
 mod mission;
 mod multiplayer;
