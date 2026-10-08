@@ -37,6 +37,7 @@ mod sim;
 mod vehicles;
 mod water;
 mod weather;
+mod window_icon;
 mod world;
 
 use bevy::{
@@ -90,7 +91,7 @@ fn main() -> AppExit {
             frontend::FrontendPlugin,
             mission::MissionPlugin,
             intro::IntroPlugin,
-            parked::ParkedPlugin,
+            (parked::ParkedPlugin, window_icon::WindowIconPlugin),
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
             autoplay::AutoplayPlugin,
         ))

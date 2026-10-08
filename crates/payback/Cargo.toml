@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 payback-formats = { path = "../payback-formats" }
 bevy = { version = "0.19.1", features = ["wav"] }
+# Same winit as Bevy, for the window icon.
+winit = { version = "0.30", default-features = false }
+
+[build-dependencies]
+payback-formats = { path = "../payback-formats" }
+ico = "0.5"
+embed-resource = "3"

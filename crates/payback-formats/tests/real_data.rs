@@ -189,3 +189,16 @@ fn map_vehicles_parse() {
         assert!(!v.parked.is_empty() && v.parked.iter().all(|p| (0..28).contains(&p.model)));
     }
 }
+
+#[test]
+fn launcher_icon_decodes() {
+    let Some(dir) = data_dir() else { return };
+    let Ok(b) = std::fs::read(dir.join("Payback.info")) else { return };
+    let colour = payback_formats::icon::colour_images(&b).unwrap();
+    assert_eq!(colour.len(), 2);
+    assert_eq!((colour[0].width, colour[0].height), (66, 30));
+    let classic = payback_formats::icon::classic_images(&b).unwrap();
+    assert_eq!((classic[0].width, classic[0].height), (62, 27));
+    // Workbench shows the colour image.
+    assert_eq!(payback_formats::icon::workbench_image(&b).unwrap(), colour[0]);
+}
