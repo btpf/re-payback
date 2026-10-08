@@ -421,8 +421,9 @@ pub struct MixerDecoder {
     at: usize,
 }
 
-/// Frames rendered per lock of the voice table (about 12 ms).
-const BLOCK: usize = 256;
+/// Frames rendered per lock of the voice table (about 3 ms): the grain at
+/// which new voices, gains and pitch changes reach the output.
+const BLOCK: usize = 64;
 
 impl Iterator for MixerDecoder {
     type Item = f32;
@@ -477,7 +478,13 @@ impl Source for MixerDecoder {
 
 fn start_mixer(mut commands: Commands, mixer: Res<Mixer>, mut streams: ResMut<Assets<MixerStream>>) {
     let stream = streams.add(MixerStream(mixer.clone()));
-    commands.spawn((AudioPlayer(stream), PlaybackSettings::LOOP));
+    // ONCE, not LOOP: the stream never ends, and bevy_audio loops a source
+    // with rodio's `repeat_infinite`, which reads it through `buffered()` in
+    // 32,768-sample spans (743 ms here). The mixer then ran only once per
+    // span, so a new voice was heard 0–743 ms late and every sound
+    // triggered within one span started in the same block, as one sound
+    // (and the buffer kept every span ever rendered).
+    commands.spawn((AudioPlayer(stream), PlaybackSettings::ONCE));
 }
 
 #[derive(Component)]
@@ -556,17 +563,21 @@ fn start_sounds(
             commands.entity(e).despawn();
             continue;
         };
+        // A menu sound starts at its fixed level; a game voice is held at
+        // its first sample until `mix` gives it its level and pitch, so the
+        // audio thread cannot play its start silently in between.
+        let gain = if s.menu { menu_gain(fx.0) } else { 0.0 };
         voices.insert(
             e,
             Voice {
                 pcm,
                 pos: 0.0,
                 step: s.hz as f64 / MIX_RATE as f64,
-                left: 0.0,
-                right: 0.0,
+                left: gain,
+                right: gain,
                 looping: s.looping,
                 done: false,
-                paused: false,
+                paused: !s.menu,
             },
         );
         commands.entity(e).insert(Started);
@@ -587,6 +598,12 @@ fn doppler(hz: f32, approach_per_frame: f32) -> f32 {
 /// Mac leaves uncompensated (+6 dB) is not reproduced (decision 3).
 fn voice_gain(fx: u8, level: f32) -> f32 {
     fx as f32 * level.min(255.0) * 65536.0 / 1e7 / 256.0
+}
+
+/// A menu sound's level on both sides (`PlaySound` @ 100f1960:
+/// `(FX << 8) / 100`, 0x100 = unity).
+fn menu_gain(fx: u8) -> f32 {
+    fx as f32 / 100.0
 }
 
 /// Apply the original mixer's voice selection, attenuation, pan and pitch.
@@ -618,7 +635,7 @@ fn mix(
         if s.menu {
             // Centred at `FX·256/100`, outside the voice selection.
             if let Some(v) = voices.get_mut(&e) {
-                let gain = fx.0 as f32 / 100.0;
+                let gain = menu_gain(fx.0);
                 v.left = gain;
                 v.right = gain;
                 v.step = s.hz as f64 / MIX_RATE as f64;
@@ -755,6 +772,64 @@ mod tests {
         assert!((voice_gain(100, 255.0) - 0.65280).abs() < 1e-4);
         assert!((voice_gain(50, 255.0) - 0.3264).abs() < 1e-4);
         assert_eq!(voice_gain(0, 255.0), 0.0);
+    }
+
+    fn voice(pcm: &Arc<[i8]>) -> Voice {
+        Voice { pcm: pcm.clone(), pos: 0.0, step: 1.0, left: 1.0, right: 1.0, looping: false, done: false, paused: false }
+    }
+
+    /// A voice added while the stream runs is heard within one block, and
+    /// each of several rapid triggers starts on its own (none merge or drop).
+    #[test]
+    fn new_voices_start_within_a_block() {
+        let mixer = Mixer::default();
+        let pcm: Arc<[i8]> = Arc::from(vec![16i8; 4000]);
+        let mut d = MixerStream(mixer.clone()).decoder();
+        // The stream is running (half-way through a block).
+        let _: Vec<f32> = (0..BLOCK + 7).map(|_| d.next().unwrap()).collect();
+        let mut onsets = Vec::new();
+        let mut at = 0usize;
+        let mut last = 0.0;
+        for i in 1..=4 {
+            mixer.0.lock().unwrap().insert(Entity::from_raw_u32(i).unwrap(), voice(&pcm));
+            let inserted = at;
+            // Every trigger raises the level within one block.
+            for _ in 0..BLOCK * 2 * 2 {
+                let s = d.next().unwrap();
+                at += 1;
+                if s > last + 0.1 {
+                    onsets.push(at - inserted);
+                    last = s;
+                    break;
+                }
+            }
+            let _: Vec<f32> = (0..BLOCK * 2 * 3).map(|_| d.next().unwrap()).collect();
+            at += BLOCK * 2 * 3;
+        }
+        assert_eq!(onsets.len(), 4, "{onsets:?}");
+        assert!(onsets.iter().all(|&n| n <= BLOCK * 2), "{onsets:?}");
+        let v = mixer.0.lock().unwrap();
+        let mut pos: Vec<f64> = v.values().map(|v| v.pos).collect();
+        pos.sort_by(f64::total_cmp);
+        pos.dedup();
+        assert_eq!(pos.len(), 4);
+    }
+
+    /// Menu sounds start at their level; game voices wait for `mix`.
+    #[test]
+    fn start_levels() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let pcm: Arc<[i8]> = Arc::from(vec![64i8; 100]);
+        world.insert_resource(Sounds { by_id: vec![Some(pcm)] });
+        world.insert_resource(Mixer::default());
+        world.insert_resource(FxVolume(50));
+        let menu = world.spawn(Sound::menu(0, 15232.0)).id();
+        let game = world.spawn(Sound::once(0, 255.0, 15000.0, SoundPos::Global)).id();
+        world.run_system_once(start_sounds).unwrap();
+        let mixer = world.resource::<Mixer>().0.lock().unwrap();
+        assert_eq!((mixer[&menu].left, mixer[&menu].right, mixer[&menu].paused), (0.5, 0.5, false));
+        assert!(mixer[&game].paused);
     }
 
     #[test]

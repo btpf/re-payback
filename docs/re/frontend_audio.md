@@ -731,6 +731,16 @@ Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_ver
 * **Pause menu**: `ShowOptions` @ 10093240 calls `PauseAllSounds` @ 100f1810 and on leaving
   `ResumeAllSounds` @ 100f1880; game voices hold their place, the menu sound plays (C). The
   port holds every game voice while virtual time is paused.
+* **Port output latency** (port only, not the original): the mixer stream is played with
+  `PlaybackSettings::ONCE` (it never ends). With `LOOP`, bevy_audio wrapped it in rodio's
+  `repeat_infinite` → `buffered()`, which pulls 32,768-sample spans (743 ms at 22,050 Hz
+  stereo): new voices were heard 0–743 ms late (measured 22–720 ms) and every sound triggered
+  within one span started in the same block, so rapid menu moves merged into one hit. Now the
+  voice table is read every 64 frames (2.9 ms); measured trigger → first mixed sample 0.6–10 ms
+  (the device callback period), plus rodio's ~50 ms device buffer and up to one 30 Hz menu
+  tick. Menu voices start at their level; game voices are held at their first sample until
+  `mix` sets their level, so no start is played silently. Rapid menu sounds each get their own
+  voice and overlap (Mac `PlaySound`: any free channel), not restart on one channel (Amiga).
 * **Music volume**: one slider; `SetSoundVolume` @ 100f24f0 sets the CD volume to 200 for
   FX ≤ 50, else `200 − 4·(FX − 50)` (of 256): music fades out as the effects get louder (C).
   `CD_SetVolume` @ 100fb100 is an empty stub, so there is no "under cover" duck (C).
