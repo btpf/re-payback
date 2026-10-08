@@ -92,6 +92,14 @@ pub struct Trigger {
     pub e: i32,
     /// The actor this trigger watches (one trigger per matching actor).
     pub actor: Option<Entity>,
+    /// Order triggers (0x0c, 0x12, 0x17, 0x3d, 0x44): every actor given
+    /// the order; one trigger fires on the first completion.
+    pub group: Vec<Entity>,
+    /// Resolved through the script id `a` (Mac `GetObject` in
+    /// `CheckForTriggers`): with no actor carrying the id yet, or the
+    /// bound one gone or re-tagged, the trigger waits dormant and binds to
+    /// the first actor that has the id.
+    pub by_id: bool,
     /// Ticks left (timers) or a value captured at add time (money, vehicle).
     pub counter: i64,
     /// Looping ring sound for phones; stopped when the trigger goes.
@@ -109,6 +117,8 @@ impl Trigger {
             d: args[3],
             e: args[4],
             actor: None,
+            group: Vec::new(),
+            by_id: false,
             counter: 0,
             sound: None,
         }

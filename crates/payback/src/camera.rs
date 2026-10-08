@@ -11,6 +11,10 @@
 //! with its speed ([`ViewAngles`], updated once per frame by the render loop
 //! `FUN_0105bd98`), follows with its own parameters (`FUN_010556e0`) and
 //! projects with half the focal length (`FUN_01091f84`); rendering.md §6.
+//! It is render-only here: the views are drawn from [`ViewEyes`] while the
+//! simulation keeps the top-down [`GameCam`]. During single-player replay
+//! playback the rotating view becomes the Mac's roaming "TV camera"
+//! ([`TvCamera`], `DrawMap` @ 1005a260).
 //!
 //! The game views render in palette space (`postfx.rs`): HDR targets that
 //! hold palette-encoded RGB, snapped to the palette, motion-blurred and
@@ -96,18 +100,6 @@ impl GameCam {
 /// outside multiplayer; [`GameCam`] then holds player 1's copy).
 #[derive(Resource, Default, Clone)]
 pub struct ViewCams(pub Vec<GameCam>);
-
-impl ViewCams {
-    /// The camera state of every view: the players' in split screen, else
-    /// the one [`GameCam`].
-    pub fn all<'a>(&'a self, single: &'a GameCam) -> &'a [GameCam] {
-        if self.0.is_empty() {
-            std::slice::from_ref(single)
-        } else {
-            &self.0
-        }
-    }
-}
 
 /// Render layer of view `p`'s own effect sprites and flares (the views
 /// also see layer 0, the world).
@@ -225,11 +217,40 @@ const DRIVING_ROTATING: Follow = Follow {
 
 /// The "Rotating view" option (`DAT_0114c7dc`, pause menu → Graphics
 /// options; needs `DAT_0114c2f4`, initialised to 1). Follows
-/// `Settings::rotating_view`; `--rotating-view [0|1]` wins. It changes the
-/// camera state the simulation sees (as in the original), so a replay must
-/// be played with the setting it was recorded with.
+/// `Settings::rotating_view`; `--rotating-view [0|1]` wins.
+///
+/// Departure: in the original the rotating view's follow parameters move
+/// the camera state the simulation sees (people spawn window, traffic). The
+/// port keeps it render-only (it is not recorded in replays): the
+/// simulation's [`GameCam`] / [`ViewCams`] always follow with the top-down
+/// parameters, and the views are drawn from [`ViewEyes`].
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RotatingView(pub bool);
+
+/// Render-only camera state of every view, the position each view is drawn
+/// from (`FUN_010556e0` with the rotating-view parameters when the option
+/// is on, else the same as the simulation's cameras; the replay TV camera
+/// replaces view 0's, [`TvCamera`]). Always at least one entry.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct ViewEyes {
+    /// The followed camera of each view, one game tick at a time.
+    follow: Vec<GameCam>,
+    /// The camera each view is drawn from this frame.
+    pub cams: Vec<GameCam>,
+    /// View 0 is the replay TV camera (its visible range is 3 squares
+    /// larger, `DrawMap` @ 1005a260).
+    pub tv: bool,
+}
+
+impl ViewEyes {
+    /// Squares drawn either side of view `i`'s camera
+    /// ([`GameCam::visible_squares`], +3 for the TV camera).
+    pub fn visible_squares(&self, i: usize, rotating: bool) -> (i32, i32) {
+        let (x, y) = self.cams[i].visible_squares(self.cams.len(), rotating);
+        let extra = if self.tv && i == 0 { 3 } else { 0 };
+        (x + extra, y + extra)
+    }
+}
 
 impl Default for RotatingView {
     fn default() -> Self {
@@ -280,6 +301,44 @@ pub const PITCH_DOWN: i32 = 0x167f;
 pub const PITCH_TILTED: i32 = 0x157c;
 const LEAD_CAP: i64 = 0x2af80;
 
+/// Replay "TV camera" (Mac only, `DrawMap` @ 1005a260 prologue; Mac
+/// rendering notes §2.3): with the rotating view on, while a replay plays
+/// back in single player, the city is drawn from a roaming camera that
+/// drifts on its own and turns to look at the followed object, re-spawning
+/// when it strays. Render-only state; the yaw and pitch it draws with are
+/// not stored in [`ViewAngles`] (the original restores them after the
+/// frame).
+#[derive(Resource, Clone, Debug)]
+pub struct TvCamera {
+    /// Position, 16.16 squares (`_DAT_1017d2cc`, `_DAT_1017d2c8`).
+    x: f64,
+    y: f64,
+    /// Velocity per game tick, 16.16 squares (`_DAT_1017d2c4`, `_DAT_1017d2c0`).
+    vx: i32,
+    vy: i32,
+    /// Yaw, 1/0x1680 turns (`_DAT_1017d2bc`).
+    yaw: f32,
+    /// Drawing from the TV camera this frame.
+    active: bool,
+}
+
+impl Default for TvCamera {
+    fn default() -> Self {
+        TvCamera {
+            x: 0.0,
+            y: 0.0,
+            vx: 0,
+            vy: 0,
+            yaw: 0.0,
+            active: false,
+        }
+    }
+}
+
+/// Fixed pitch of the TV camera: 0x1cc units (28.75°) from straight down,
+/// beyond the normal tilt range.
+const TV_PITCH: i32 = 0x14b4;
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
@@ -288,6 +347,8 @@ impl Plugin for CameraPlugin {
             .init_resource::<ViewCams>()
             .init_resource::<RotatingView>()
             .init_resource::<ViewAngles>()
+            .init_resource::<ViewEyes>()
+            .init_resource::<TvCamera>()
             .add_plugins(postfx::PostFxPlugin)
             .add_systems(PreUpdate, follow_settings)
             .add_systems(Startup, spawn_camera)
@@ -297,11 +358,17 @@ impl Plugin for CameraPlugin {
                  mut cam: ResMut<GameCam>,
                  mut views: ResMut<ViewCams>,
                  mut angles: ResMut<ViewAngles>,
+                 mut eyes: ResMut<ViewEyes>,
+                 mut tv: ResMut<TvCamera>,
                  mode: Res<GameMode>,
                  primary: Query<Entity, With<GameCamera>>| {
                     *cam = GameCam::default();
                     views.0.clear();
                     angles.0 = vec![ViewAngle::default(); mode.players().max(1)];
+                    eyes.follow = vec![GameCam::default(); mode.players().max(1)];
+                    eyes.cams = eyes.follow.clone();
+                    eyes.tv = false;
+                    *tv = TvCamera::default();
                     if mode.is_multiplayer() {
                         views.0 = vec![GameCam::default(); mode.players()];
                         spawn_views(&mut commands, mode.players(), primary.single().ok());
@@ -318,12 +385,25 @@ impl Plugin for CameraPlugin {
                     }
                 },
             )
-            .add_systems(FixedUpdate, follow_tick)
+            // The camera moves after the game tick (the original calls
+            // `FUN_010556e0` from the render loop), so every system that reads
+            // it sees the same state: an unordered system here made the
+            // spawn windows, and with them replays, depend on thread timing.
+            .add_systems(
+                FixedUpdate,
+                follow_tick
+                    .after(crate::sim::people::PeopleSet)
+                    .after(crate::sim::traffic::TrafficSet)
+                    .after(crate::sim::driving::DrivingSet)
+                    .after(crate::sim::combat::CombatSet)
+                    .after(crate::sim::vehicle_ai::VehicleAiSet),
+            )
             .add_systems(
                 PostUpdate,
                 (
                     toggle_mode,
                     turn_views,
+                    tv_camera,
                     place_game_camera,
                     place_extra_views,
                     free_controls,
@@ -368,6 +448,29 @@ pub fn view_fov(players: usize, rotating: bool) -> f32 {
     };
     let focal: f32 = if rotating { 8.0 * fy } else { 16.0 * fy };
     2.0 * (cy / focal).atan()
+}
+
+/// [`view_fov`] for a window of `size` physical pixels. With `original`
+/// (`Settings::original_aspect`, the default) the horizontal field of view
+/// is the original's at any size: `ReadScreenParams__Fv` @ 10051fc0 (OS4
+/// `FUN_0104107c`) scales fx = (W+8)·16/320 with the width, so one view
+/// always spans 2·atan(160/256) ≈ 64° (two side by side: fx =
+/// ((W/2)+7)·16/240, 2·atan(80/176) ≈ 49°), and the vertical angle follows
+/// the view's aspect (square pixels; the Mac at 640×480 instead stretches
+/// the 10:8 picture 6.7 % wide). Without it the vertical angle is fixed
+/// and the view widens with the window.
+pub fn view_fov_for(players: usize, rotating: bool, original: bool, size: UVec2) -> f32 {
+    let v = view_fov(players, rotating);
+    if !original {
+        return v;
+    }
+    // View aspect at 320×256 and in this window.
+    let (w, h) = (size.x.max(1) as f32, size.y.max(1) as f32);
+    let (a0, a) = match players {
+        2 => (160.0 / 256.0, w / 2.0 / h),
+        _ => (320.0 / 256.0, w / h),
+    };
+    2.0 * ((v / 2.0).tan() * a0 / a).atan()
 }
 
 /// Split screen: view cameras for players 2..n and the UI overlay, which
@@ -443,25 +546,33 @@ fn toggle_mode(keys: Res<ButtonInput<KeyCode>>, mut cam: Single<&mut GameCamera>
 }
 
 /// One game tick of the original camera motion (every player's view in
-/// split screen; a dead player's view stays put until the respawn).
+/// split screen; a dead player's view stays put until the respawn): the
+/// simulation's cameras with the top-down parameters, and the views' eyes
+/// ([`ViewEyes`]) with the rotating-view ones when that is on.
 fn follow_tick(
     trig: Res<Trig>,
     rotating: Res<RotatingView>,
     mut cam: ResMut<GameCam>,
     mut views: ResMut<ViewCams>,
+    mut eyes: ResMut<ViewEyes>,
     target: Query<(&Obj, Has<Vehicle>), With<CameraTarget>>,
 ) {
+    let n = views.0.len().max(1);
+    if eyes.follow.len() != n {
+        eyes.follow = vec![GameCam::default(); n];
+    }
     if views.0.is_empty() {
         let Ok((obj, driving)) = target.single() else {
             return;
         };
-        follow(&trig, &mut cam, obj, driving, rotating.0);
+        follow(&trig, &mut cam, obj, driving, false);
+        follow(&trig, &mut eyes.follow[0], obj, driving, rotating.0);
         return;
     }
     for (obj, driving) in &target {
-        if let Some(v) = obj.player.and_then(|p| views.0.get_mut(p as usize)) {
-            follow(&trig, v, obj, driving, rotating.0);
-        }
+        let Some(p) = obj.player.map(|p| p as usize).filter(|&p| p < n) else { continue };
+        follow(&trig, &mut views.0[p], obj, driving, false);
+        follow(&trig, &mut eyes.follow[p], obj, driving, rotating.0);
     }
     *cam = views.0[0];
 }
@@ -496,7 +607,7 @@ fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool, rotating: bo
 /// followed object: the driven vehicle, else the player). While the player
 /// is dead the yaw turns `0x20` and the pitch drops `4` per tick down to
 /// 0x157c. The original halves once per rendered frame (about one tick);
-/// here the step is scaled to the 25 Hz tick so the motion doesn't depend on
+/// here the step is scaled to the 30 Hz tick so the motion doesn't depend on
 /// the frame rate.
 fn turn_views(
     time: Res<Time>,
@@ -510,7 +621,7 @@ fn turn_views(
     if !rotating.0 {
         return;
     }
-    let ticks = time.delta_secs() * 25.0;
+    let ticks = time.delta_secs() * 30.0;
     // Fraction of the remaining difference closed this frame (1/2 per tick).
     let step = 1.0 - 0.5f32.powf(ticks);
     let turn = TURN as f32;
@@ -558,29 +669,150 @@ fn eye(game: &GameCam) -> Vec3 {
     )
 }
 
+/// Game ticks per second, for the per-frame easing.
+const TICK_HZ: f32 = crate::mission::LevelClock::TICKS_PER_SECOND as f32;
+
+/// `0x167f − GetAngle(dx, dy)` (`GetAngle__Fdd` @ 10072340: 0 along −y,
+/// 0xb40 along +y, 0x10e0 along +x, i.e. heading + 0xb40; 0 for (0, 0)):
+/// the yaw that puts the direction (dx, dy) up the screen.
+fn yaw_towards(dx: f64, dy: f64) -> f32 {
+    let get_angle = if dx == 0.0 && dy == 0.0 {
+        0.0
+    } else {
+        let heading = dx.atan2(dy) / std::f64::consts::TAU * TURN as f64;
+        (heading.round() + 0xb40 as f64).rem_euclid(TURN as f64)
+    };
+    (0x167f as f64 - get_angle) as f32
+}
+
+/// The eyes of this frame ([`ViewEyes`]) and the replay TV camera
+/// (`DrawMap` @ 1005a260 prologue, active when the rotating view is on, a
+/// replay plays back and there is one player). Each frame, as the
+/// original's per-frame steps scaled to game ticks:
+/// * the camera moves by its velocity·ticks, clamped to the map
+///   (0..0x7fffff);
+/// * its yaw eases a quarter of the way towards `0x167f − GetAngle(target −
+///   camera)`, the target being the followed object (the view's own
+///   camera while the player is dead); the pitch is fixed at 0x14b4;
+/// * it is drawn at height `1000 − (z >> 4)` with the visible range 3
+///   squares larger (`+4` instead of `+1`);
+/// * when it is more than a quarter of that range (in whole squares) from
+///   the view's followed camera, it re-spawns: `random3(4)` picks the new
+///   velocity (3: random ±0x400 per axis; 2: `vel·64/3` of the followed
+///   object; else both), the position becomes the followed camera plus
+///   `vel·0x800 + random3(range << 13) − range·0x1000`, clamped to
+///   `[(−range) >> 2, range >> 2]` (16.16 units, as in the Mac code: the
+///   re-spawn is in effect at the followed camera), and the yaw snaps to the
+///   target.
+///
+/// The random numbers come from the cosmetic generator
+/// ([`crate::sim::VisualRng`], `random3__Fi`), never the simulation's.
+/// `GetAngle` works on doubles; [`yaw_towards`] rounds the angle.
+#[allow(clippy::too_many_arguments)]
+fn tv_camera(
+    time: Res<Time>,
+    rotating: Res<RotatingView>,
+    mode: Res<GameMode>,
+    replay: Option<Res<crate::replay::ReplayState>>,
+    rng: Option<ResMut<crate::sim::VisualRng>>,
+    mut tv: ResMut<TvCamera>,
+    mut eyes: ResMut<ViewEyes>,
+    target: Query<&Obj, With<CameraTarget>>,
+) {
+    let eyes = &mut *eyes;
+    eyes.cams.clone_from(&eyes.follow);
+    if eyes.cams.is_empty() {
+        eyes.cams.push(GameCam::default());
+    }
+    let playing = replay.is_some_and(|r| r.playing());
+    tv.active = rotating.0 && playing && !mode.is_multiplayer() && rng.is_some();
+    eyes.tv = tv.active;
+    let (Some(mut rng), true) = (rng, tv.active) else { return };
+    let tv = &mut *tv;
+    let base = eyes.cams[0];
+    let ticks = (time.delta_secs() * TICK_HZ) as f64;
+    const MAX: f64 = 0x7fffff as f64;
+    tv.x = (tv.x + tv.vx as f64 * ticks).clamp(0.0, MAX);
+    tv.y = (tv.y + tv.vy as f64 * ticks).clamp(0.0, MAX);
+    let obj = target.iter().next();
+    let look_at = match obj {
+        Some(o) => (o.pos.x as f64 * 32.0, o.pos.y as f64 * 32.0),
+        None => (base.x as f64, base.y as f64),
+    };
+    let turn = TURN as f32;
+    let want = yaw_towards(look_at.0 - tv.x, look_at.1 - tv.y);
+    let d = (want - tv.yaw + turn / 2.0).rem_euclid(turn) - turn / 2.0;
+    tv.yaw = (tv.yaw + d * (1.0 - 0.75f32.powf(ticks as f32))).rem_euclid(turn);
+    let h = 1000 - (obj.map_or(0, |o| o.pos.z) >> 4);
+    let probe = GameCam {
+        h,
+        ..base
+    };
+    let range = probe.visible_squares(1, true).0 + 3;
+    let quarter = range >> 2;
+    let far = |a: f64, b: i64| ((a as i64 - b).abs() >> 16) as i32 > quarter;
+    if far(tv.x, base.x) || far(tv.y, base.y) {
+        let mut rnd = |n: i32| rng.rand(n);
+        let vel = obj.map_or(IVec3::ZERO, |o| o.vel);
+        match rnd(4) {
+            3 => {
+                tv.vx = rnd(0x800) - 0x400;
+                tv.vy = rnd(0x800) - 0x400;
+            }
+            2 => {
+                tv.vx = vel.x * 64 / 3;
+                tv.vy = vel.y * 64 / 3;
+            }
+            _ => {
+                tv.vx = vel.x * 64 / 3 + rnd(0x800) - 0x400;
+                tv.vy = vel.y * 64 / 3 + rnd(0x800) - 0x400;
+            }
+        }
+        let ox = (vel.x * 0x800 + rnd(range << 13) - range * 0x1000).min(quarter).max(-range >> 2);
+        let oy = (vel.y * 0x800 + rnd(range << 13) - range * 0x1000).min(quarter).max(-range >> 2);
+        tv.x = (base.x + ox as i64).clamp(0, 0x7fffff) as f64;
+        tv.y = (base.y + oy as i64).clamp(0, 0x7fffff) as f64;
+        tv.yaw = yaw_towards(look_at.0 - tv.x, look_at.1 - tv.y).rem_euclid(turn);
+    }
+    eyes.cams[0] = GameCam {
+        x: tv.x as i64,
+        y: tv.y as i64,
+        h,
+        initialised: true,
+    };
+}
+
 fn place_game_camera(
-    game: Res<GameCam>,
+    eyes: Res<ViewEyes>,
     rotating: Res<RotatingView>,
     angles: Res<ViewAngles>,
+    tv: Res<TvCamera>,
     cam: Single<(&mut GameCamera, &mut Transform)>,
 ) {
     let (mut cam, mut transform) = cam.into_inner();
-    let pos = eye(&game);
+    let pos = eye(eyes.cams.first().unwrap_or(&GameCam::default()));
     if cam.mode == CameraMode::Follow {
-        let angle = rotating.0.then(|| angles.0.first().copied().unwrap_or_default());
+        let angle = if tv.active {
+            Some(ViewAngle {
+                yaw: tv.yaw,
+                pitch: TV_PITCH as f32,
+            })
+        } else {
+            rotating.0.then(|| angles.0.first().copied().unwrap_or_default())
+        };
         *transform = view_transform(pos, angle);
         cam.free.focus = Vec3::new(pos.x, 1.0, pos.z);
     }
 }
 
 fn place_extra_views(
-    views: Res<ViewCams>,
+    eyes: Res<ViewEyes>,
     rotating: Res<RotatingView>,
     angles: Res<ViewAngles>,
     mut q: Query<(&ExtraView, &mut Transform)>,
 ) {
     for (v, mut transform) in &mut q {
-        if let Some(game) = views.0.get(v.0 as usize) {
+        if let Some(game) = eyes.cams.get(v.0 as usize) {
             let angle = rotating
                 .0
                 .then(|| angles.0.get(v.0 as usize).copied().unwrap_or_default());
@@ -633,6 +865,7 @@ fn layout_views(
     mode: Res<GameMode>,
     state: Res<State<AppState>>,
     rotating: Res<RotatingView>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut primary: Query<(&mut Camera, &mut Projection, &GameCamera), Without<ExtraView>>,
     mut extras: Query<(&ExtraView, &mut Camera, &mut Projection), Without<GameCamera>>,
@@ -641,7 +874,9 @@ fn layout_views(
     let split = mode.is_multiplayer() && *state.get() == AppState::Playing;
     // Field of view of the original's screen constants for this layout.
     let free = game_camera.mode == CameraMode::Free;
-    let fov = view_fov(if split { mode.players() } else { 1 }, rotating.0 && !free);
+    let size = window.single().map(|w| w.physical_size()).unwrap_or(UVec2::new(1280, 800));
+    let original = settings.as_ref().is_none_or(|s| s.original_aspect);
+    let fov = view_fov_for(if split { mode.players() } else { 1 }, rotating.0 && !free, original, size);
     let set_fov = |p: &mut Projection| {
         if let Projection::Perspective(pp) = p
             && pp.fov != fov
@@ -653,7 +888,6 @@ fn layout_views(
     for (_, _, mut p) in &mut extras {
         set_fov(&mut p);
     }
-    let size = window.single().map(|w| w.physical_size()).unwrap_or(UVec2::new(1280, 800));
     let rects = view_rects(mode.players(), size.x.max(2), size.y.max(2));
     let viewport = |i: usize| {
         rects.get(i).map(|&(x, y, w, h)| Viewport {

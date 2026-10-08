@@ -40,6 +40,7 @@ struct ActorView {
     speed: i32,
     alive: bool,
     in_vehicle: bool,
+    script_id: i32,
 }
 
 fn within(a: IVec3, b: IVec2, r: i32) -> bool {
@@ -137,6 +138,7 @@ fn actor_view(world: &World, e: Entity) -> Option<ActorView> {
         speed: o.speed,
         alive: !matches!(o.state, State::Dead | State::Removed) && o.health > 0,
         in_vehicle: world.get::<Vehicle>(e).is_some(),
+        script_id: o.script_id,
     })
 }
 
@@ -157,9 +159,45 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
     let mut keep = Vec::with_capacity(triggers.len());
     let mut stopped = Vec::new();
     for mut t in triggers.drain(..) {
+        // Orders: the first completion by any actor that got the order
+        // and still carries the id (the Mac's arrival/boarding hooks
+        // `ObjectAtLocation`, `ObjectIntoBuilding`, `ObjectIntoPlVehicle`,
+        // `ObjectIntoVehicle` compare ids). Until then the trigger waits,
+        // also when every actor is gone.
+        if !t.group.is_empty() {
+            let want = match t.kind {
+                kind::ACTOR_GOTO | kind::ACTOR_GOTO_15 => kind::ACTOR_GOTO,
+                k => k,
+            };
+            let done = actor_reports.iter().any(|r| {
+                r.0 == want
+                    && t.group.contains(&r.1)
+                    && world.get::<Obj>(r.1).is_none_or(|o| o.script_id == t.a)
+            });
+            if done {
+                fired.push((t.event, t.kind));
+                stopped.extend(t.sound);
+            } else {
+                keep.push(t);
+            }
+            continue;
+        }
+        // Id triggers: keep the bound actor while it is there and carries
+        // the id, else bind to the first actor with the id, else wait.
+        if t.by_id {
+            let bound = t
+                .actor
+                .and_then(|e| world.get::<Obj>(e))
+                .is_some_and(|o| o.script_id == t.a && o.state != State::Removed);
+            if !bound {
+                t.actor = Script::new(world).actors(t.a).first().copied();
+                if t.actor.is_none() {
+                    keep.push(t);
+                    continue;
+                }
+            }
+        }
         let actor = t.actor.and_then(|e| actor_view(world, e));
-        // Actor gone: most actor triggers silently vanish; "gone/killed"
-        // ones fire.
         // Actor gone: only a reported death fires the "destroyed/killed"
         // types (0xa653a is called from damage code); removal on arrival or
         // boarding drops the trigger silently.
@@ -189,6 +227,20 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
                 fired.push((t.event, t.kind));
             }
             stopped.extend(t.sound);
+            continue;
+        }
+        // The Mac stores the script id and looks the actor up by it every
+        // frame (`SetTrigger_Long` @ 10106e50, `CheckForTriggers` @
+        // 100f4a50 via `GetObject` @ 100530e0; `ObjectDead` @ 100f6c40
+        // compares ids). An actor whose id changed (released by
+        // `Actor_Release`/`ReleaseIdle`, id -1) no longer matches: the
+        // trigger stays armed but dormant. (The Amiga kept the pointer and
+        // went on watching it, 68k `0xa4a68`.)
+        if let Some(a) = &actor
+            && t.a != -1
+            && a.script_id != t.a
+        {
+            keep.push(t);
             continue;
         }
         let fire = condition(
@@ -247,13 +299,23 @@ fn condition(
     match t.kind {
         MONEY_GOAL => p.money >= t.a,
         PHONE | SECRET_PHONE => {
-            let Some((pos, lvl)) = Script::new(world).phone_coords(t.a) else {
+            // Phone -1 (a random phone, Mac `GetPhoneCoords(-1)` @
+            // 100b4540): the square was picked when it was added.
+            let at = if t.a == -1 {
+                let s = Script::new(world);
+                Some((s.phone_square_pos(t.b as usize, t.c as usize, t.d as usize), t.d as usize))
+            } else {
+                Script::new(world).phone_coords(t.a)
+            };
+            let Some((pos, lvl)) = at else {
                 return false;
             };
             p.controlled && p.on_foot && p.level == lvl && within(p.pos, pos.truncate(), 0x400)
         }
-        AT_ACTOR_ON_FOOT => actor
-            .is_some_and(|a| p.controlled && p.on_foot && within(p.pos, a.pos.truncate(), 0x400)),
+        // The actor's point and floor taken when the trigger was added.
+        AT_ACTOR_ON_FOOT => {
+            p.controlled && p.on_foot && p.level as i32 == t.c && within(p.pos, IVec2::new(t.a, t.b), 0x400)
+        }
         IN_VEHICLE_MODEL => p.vehicle_type == t.a,
         COUNTDOWN | TIMER => {
             t.counter -= 1;
@@ -415,18 +477,19 @@ pub fn flash_phones(
         return;
     }
     *timer = 0.0;
-    let ringing: Vec<i32> = triggers
-        .list
-        .iter()
-        .filter(|t| t.kind == kind::PHONE)
-        .map(|t| t.a)
+    let phones = triggers.list.iter().filter(|t| t.kind == kind::PHONE);
+    let ringing: Vec<i32> = phones.clone().filter(|t| t.a != -1).map(|t| t.a).collect();
+    // Random phones (-1) ring by square.
+    let ringing_at: Vec<(usize, usize, usize)> = phones
+        .filter(|t| t.a == -1)
+        .map(|t| (t.b as usize, t.c as usize, t.d as usize))
         .collect();
     for x in 0..MAP_SIZE {
         for y in 0..MAP_SIZE {
             for (level, c) in city.map.square(x, y).cubes.iter().enumerate() {
                 let key = (x, y, level);
-                let is_ringing =
-                    matches!(c.scenery, 14 | 19) && ringing.contains(&(c.special as i32));
+                let is_ringing = matches!(c.scenery, 14 | 19)
+                    && (ringing.contains(&(c.special as i32)) || ringing_at.contains(&key));
                 if is_ringing {
                     flashed.entry(key).or_insert(c.scenery);
                     let next = if c.scenery == 14 { 19 } else { 14 };

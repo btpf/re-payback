@@ -5,7 +5,7 @@
 
 use super::collide;
 use super::combat::{Arsenal, Panic};
-use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of, wrap};
+use super::{Class, Obj, Rng, State, Stick, Trig, heading_of, wrap};
 use crate::audio::{Listener, Sound, SoundPos, id};
 use crate::camera::{CameraTarget, GameCam, ViewCams};
 use crate::data::GameData;
@@ -69,8 +69,15 @@ pub struct Person {
     pub stun: i32,
     /// Flee timer (state Flee).
     pub flee: i32,
-    /// Wander target heading (< 0: walking straight, counting down).
+    /// Wander target heading T (+0x7d0; < 0: walking straight). Starts as
+    /// the spawn heading (Mac `CreateObject` @ 10075630).
     pub wander: i32,
+    /// Wander re-aim timer (Mac +0x900, `do_Person` @ 1013fbd0).
+    pub wander_timer: i32,
+    /// Wander anchor (Mac +0x7d4/+0x7d8): centre of the last pavement
+    /// square walked on; (-1, -1) until then, except for spawner peds
+    /// (`AddThing` @ 10058350 sets the spawn square centre).
+    pub anchor: IVec2,
     /// Hit a wall this tick.
     pub hit_wall: bool,
     pub splashed: bool,
@@ -237,7 +244,8 @@ pub fn spawn_person(
     let m = library.model_mut(model);
     m.info.radius = PERSON_RADIUS;
     m.info.mass = person_mass(kind);
-    let mesh = meshes.add(library.build_mesh(&library.model(model).obj, |v| standing(v, 0.0, 0.0)));
+    let foot = library.model(model).foot as f32;
+    let mesh = meshes.add(library.build_mesh(&library.model(model).obj, |v| standing(v, 0.0, 0.0, foot)));
     let mut obj = Obj::new(Class::Person, model, pos, heading);
     obj.state = state;
     let person = Person {
@@ -246,7 +254,9 @@ pub fn spawn_person(
         blend: 0,
         stun: 0,
         flee: 0,
-        wander: -1,
+        wander: heading,
+        wander_timer: 0,
+        anchor: IVec2::splat(-1),
         hit_wall: false,
         splashed: false,
         target: None,
@@ -366,7 +376,7 @@ fn read_keyboard(
             &defaults
         }
     };
-    let (k, p) = (&controls.keys, &controls.pad);
+    let (k, p) = (&controls.keys, &controls.pads[0]);
     let pad = pads.iter().min_by_key(|(e, _)| *e).map(|(_, g)| g);
     let stick = pad.map_or(Vec2::ZERO, |g| g.left_stick() + g.dpad());
     let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
@@ -460,7 +470,7 @@ fn panic_peds(
     mut commands: Commands,
     mut events: MessageReader<Panic>,
     mut rng: ResMut<Rng>,
-    mut q: Query<(&mut Obj, &mut Person)>,
+    mut q: Query<(Entity, &mut Obj, &mut Person)>,
     models: Option<Res<ObjectLibrary>>,
 ) {
     let Some(models) = models else {
@@ -468,7 +478,11 @@ fn panic_peds(
         return;
     };
     for ev in events.read() {
-        for (mut o, mut p) in &mut q {
+        // A replayable order (see `ped_ai`).
+        let mut order: Vec<_> = q.iter().map(|(e, o, _)| (sim_key(o), e)).collect();
+        order.sort_unstable();
+        for (_, e) in order {
+            let Ok((_, mut o, mut p)) = q.get_mut(e) else { continue };
             if o.state != State::Wander || models.model(o.model).info.police {
                 continue;
             }
@@ -487,55 +501,35 @@ fn panic_peds(
 /// Pedestrian AI: wandering and fleeing (people.md §7.3).
 fn ped_ai(
     city: Option<Res<City>>,
+    trig: Res<Trig>,
     mut rng: ResMut<Rng>,
     targets: Query<&Obj, Without<Person>>,
-    mut q: Query<(&mut Obj, &mut Person, &mut Stick)>,
+    mut q: Query<(Entity, &mut Obj, &mut Person, &mut Stick)>,
 ) {
     let Some(city) = city else { return };
-    for (mut obj, mut p, mut stick) in &mut q {
+    // Every wandering ped draws from the generator every few ticks, so the
+    // order must not depend on the ECS tables (render code moves entities
+    // between them at frame-dependent times): go by the objects' state.
+    let mut order: Vec<_> = q.iter().map(|(e, o, ..)| (sim_key(o), e)).collect();
+    order.sort_unstable();
+    for (_, e) in order {
+        let Ok((_, mut obj, mut p, mut stick)) = q.get_mut(e) else { continue };
         // The player's stick comes from `player_stick`.
         if obj.state == State::Player {
             continue;
         }
         *stick = Stick::default();
         match obj.state {
-            State::Wander => {
-                let mut t = p.wander;
-                if t < 0 {
-                    t -= 1;
-                    let on_pavement = pavement(&city, obj.pos, obj.level);
-                    if t < -50 && (p.hit_wall || !on_pavement) {
-                        t = wrap(obj.heading + 0x5a0 + rng.rand(0xb40));
-                    }
-                }
-                if t >= 0 {
-                    // Snap the goal to the 90° grid and ease toward it.
-                    let snapped = wrap(((t + 0x168) / 0x5a0) * 0x5a0);
-                    let d = angle_diff(t, snapped);
-                    t = wrap(t + d.clamp(-16, 16));
-                    let err = angle_diff(obj.heading, t);
-                    stick.steer = if err > 0 {
-                        -1
-                    } else if err < 0 {
-                        1
-                    } else {
-                        0
-                    };
-                    if err.abs() < 200 {
-                        t = -1;
-                    }
-                }
-                if t < 0 && obj.speed < 0x30 {
-                    stick.throttle = -1;
-                }
-                p.wander = t;
-            }
+            State::Wander => wander(&city, &trig, &mut rng, &obj, &mut p, &mut stick),
             State::Flee => {
-                p.flee -= 1;
-                if p.flee <= 0 {
-                    obj.state = State::Wander;
-                    p.wander = -1;
-                    continue;
+                // Mac `do_Person` @ 1013fbd0 (l.105683-105700): the timer
+                // ends the flight, but this tick still steers.
+                if p.flee > 0 {
+                    p.flee -= 1;
+                    if p.flee < 1 {
+                        obj.state = State::Wander;
+                        p.flee = 0;
+                    }
                 }
                 let from = p
                     .target
@@ -543,15 +537,11 @@ fn ped_ai(
                     .map(|o| o.pos)
                     .unwrap_or(obj.pos);
                 let away = heading_of(obj.pos.x - from.x, obj.pos.y - from.y);
-                let err = angle_diff(obj.heading, away);
-                stick.steer = if err > 0 {
-                    -1
-                } else if err < 0 {
-                    1
-                } else {
-                    0
-                };
-                if obj.speed < 0x18 {
+                // The shared AI steering (l.105830-105876): throttle only
+                // when facing the goal, released above 0x18 while fleeing.
+                let (steer, ahead) = steer_toward(obj.heading, away, 0xc9, 200);
+                stick.steer = steer;
+                if ahead && !(obj.state == State::Flee && obj.speed > 0x18) {
                     stick.throttle = -1;
                 }
             }
@@ -560,18 +550,102 @@ fn ped_ai(
     }
 }
 
+/// A sort key for visiting objects in an order that replays reproduce.
+pub fn sim_key(o: &Obj) -> [i32; 6] {
+    [o.pos.x, o.pos.y, o.pos.z, o.heading, o.vel.x, o.vel.y]
+}
+
+/// The original's steering toward heading `t`: d1 = (t − h) and d2 =
+/// (h − t), both mod 0x1680. The shorter way is steered unless it is under
+/// `near_left` (d1) / `near_right` (d2), which counts as facing `t`
+/// (Mac `do_Person` l.105830-105876: 0xc9/200; the wander uses 0xc9/0xa0).
+/// Returns (steer, facing).
+fn steer_toward(heading: i32, t: i32, near_left: i32, near_right: i32) -> (i32, bool) {
+    let d1 = (t - heading).rem_euclid(0x1680);
+    let d2 = (heading - t).rem_euclid(0x1680);
+    // d1 + d2 = 0x1680 (or both 0), so the shorter one is below 0xb41.
+    if d1 < d2 {
+        if d1 < near_left { (0, true) } else { (-1, false) }
+    } else if d2 < near_right {
+        (0, true)
+    } else {
+        (1, false)
+    }
+}
+
+/// Wandering pedestrian, the Mac rule (Mac `do_Person` @ 1013fbd0,
+/// l.105953-106096; the Amiga's "straight for 50 ticks, then turn
+/// 90-270°" of 68k `FUN_000e3a58` ~122295 is gone). While the current
+/// square and the one 512 ahead are pavement (flag 0x20) and no wall was
+/// hit, every 3 ticks T is re-rolled to heading ± 500 (1 in 50: straight
+/// on) and the anchor follows the square's centre; otherwise every 20
+/// ticks T aims back at the anchor. T then snaps to the 90° grid.
+fn wander(city: &City, trig: &Trig, rng: &mut Rng, obj: &Obj, p: &mut Person, stick: &mut Stick) {
+    if p.wander_timer > 0 {
+        p.wander_timer -= 1;
+    }
+    let ahead = |v: i32, d: i32| ((v + d * 2) >> 11).clamp(0, MAP_SIZE as i32 - 1) as usize;
+    let (ax, ay) = (ahead(obj.pos.x, trig.sin(obj.heading)), ahead(obj.pos.y, trig.cos(obj.heading)));
+    let keep = !p.hit_wall
+        && pavement(city, obj.pos, obj.level)
+        && city.map.square(ax, ay).cubes[obj.level].flags & 0x20 != 0;
+    if keep {
+        if p.wander_timer < 1 {
+            if rng.rand(0x32) == 0 {
+                p.wander = -1;
+            } else {
+                // Not wrapped: below 0 it walks straight this tick.
+                p.wander = obj.heading + rng.rand(1000) - 500;
+                p.wander_timer = 3;
+            }
+        }
+        p.anchor = IVec2::new((obj.pos.x & !0x7ff) + 0x400, (obj.pos.y & !0x7ff) + 0x400);
+    } else if p.wander_timer < 1 {
+        p.wander = heading_of(p.anchor.x - obj.pos.x, p.anchor.y - obj.pos.y);
+        p.wander_timer = 0x14;
+    }
+    let mut t = p.wander;
+    if t >= 0 {
+        // Ease toward the nearest multiple of 90° by 16 a tick.
+        let snapped = (t + 0x168) / 0x5a0 * 0x5a0;
+        if t < snapped {
+            t += 16;
+        } else if snapped < t {
+            t -= 16;
+        }
+        if t < 0 {
+            t += 0x1680;
+        } else if t > 0x167f {
+            t -= 0x1680;
+        }
+        let (steer, facing) = steer_toward(obj.heading, t, 0xc9, 0xa0);
+        stick.steer = steer;
+        if facing {
+            t = -1;
+        }
+    }
+    // Mac: also walk on (slowly) while turning.
+    let cap = if t < 0 { 0x30 } else { 0x18 };
+    if obj.speed < cap {
+        stick.throttle = -1;
+    }
+    p.wander = t;
+}
+
 /// Whether the cube at `level` under `pos` lets pedestrians walk (0x20).
 fn pavement(city: &City, pos: IVec3, level: usize) -> bool {
     let (sx, sy) = ((pos.x >> 11) as usize, (pos.y >> 11) as usize);
     sx < MAP_SIZE && sy < MAP_SIZE && city.map.square(sx, sy).cubes[level].flags & 0x20 != 0
 }
 
-/// Movement, gravity, collision and water for every person (people.md §4).
+/// Movement, gravity, collision and water for every person (people.md §4),
+/// then the controls that set the velocity for the next tick.
 #[allow(clippy::type_complexity)]
 fn move_people(
     mut commands: Commands,
     city: Option<Res<City>>,
     trig: Res<Trig>,
+    library: Option<Res<crate::objects::ObjectLibrary>>,
     mut q: Query<(Entity, &mut Obj, &mut Person, &Stick)>,
 ) {
     let Some(city) = city else { return };
@@ -579,6 +653,101 @@ fn move_people(
         if obj.state == State::Removed {
             continue;
         }
+        // Vertical motion (one sub-step per tick).
+        let floor_z = obj.floor_z;
+        if !obj.in_water {
+            if obj.pos.z < floor_z {
+                obj.on_ground = false;
+            } else {
+                obj.vel.z = 32;
+                obj.pos.z = floor_z;
+                obj.on_ground = true;
+            }
+            obj.vel.z += 32;
+            obj.pos.z += obj.vel.z;
+        } else if !obj.on_ground {
+            if obj.pos.z >= floor_z {
+                obj.vel.z = 0;
+                obj.pos.z = floor_z;
+                obj.on_ground = true;
+                if !p.splashed {
+                    p.splashed = true;
+                    let at = SoundPos::At(obj.posf());
+                    commands.spawn(Sound::once(id::SPLASH, 90.0 * 10000.0, 8350.0, at));
+                }
+            }
+            obj.vel.z += 32;
+            obj.pos.z += obj.vel.z;
+        }
+        // Move with last tick's velocity.
+        let mut next = obj.pos;
+        next.x += obj.vel.x;
+        next.y += obj.vel.y;
+
+        // Walls, then the floor at the new position.
+        let (resolved, hit) = collide::resolve_person(&city, next, obj.prev_pos, PERSON_RADIUS);
+        if hit.x {
+            obj.vel.x = -obj.vel.x;
+        }
+        if hit.y {
+            obj.vel.y = -obj.vel.y;
+        }
+        p.hit_wall = hit.x || hit.y;
+        next = resolved;
+        if let Some((fz, level, water)) = collide::floor(&city, next.x, next.y, next.z) {
+            obj.floor_z = fz;
+            obj.level = level;
+            obj.in_water = water;
+        }
+        if obj.floor_z <= next.z {
+            obj.vel.z = 0;
+            obj.on_ground = true;
+            if !obj.in_water {
+                next.z = obj.floor_z;
+            }
+        }
+        // Scenery pushes people out and stops them, without damage
+        // (`AddCollideObj` @ 10055c70; `collide::scenery_collide`).
+        if let Some(library) = &library {
+            let body = collide::Body {
+                radius: PERSON_RADIUS,
+                front: 0,
+                rear: 0,
+                vehicle: false,
+                rc: false,
+                dz: [obj.floor_z - next.z, 0, 0, 0],
+            };
+            let mut vel = obj.vel;
+            let (heading, level) = (obj.heading, obj.level);
+            let bumps = collide::scenery_collide(&city, library, &trig, &mut next, &mut vel, heading, level, &body);
+            obj.vel = vel;
+            if !bumps.is_empty() {
+                obj.speed = 0;
+            }
+        }
+
+        // Swimming and drowning.
+        if obj.in_water && next.z >= obj.floor_z {
+            if next.z < DROWN_Z {
+                next.z += 24;
+            } else if obj.state != State::Dead {
+                if obj.player.is_some() {
+                    // A drowned player stays (hidden) as a corpse so the
+                    // respawn timer starts like any other death.
+                    obj.state = State::Dead;
+                    obj.health = obj.health.min(0);
+                    commands.entity(e).insert(Visibility::Hidden);
+                } else {
+                    obj.state = State::Removed;
+                    commands.entity(e).despawn();
+                    continue;
+                }
+            }
+        }
+
+        // Controls: stun, turning, speed and the velocity used by the next
+        // tick's move (the original moves first, `MoveObject_General` @
+        // 1006e4f0 / 68k `FUN_000e0e46`, then `do_Person` computes it).
         let (mut steer, mut throttle) = (stick.steer, stick.throttle);
         if p.stun > 0 {
             p.stun -= 1;
@@ -629,80 +798,12 @@ fn move_people(
         } else {
             obj.speed -= obj.speed.signum() * obj.speed.abs().min(8);
         }
-        obj.vel.x = trig.sin(obj.heading) * obj.speed >> 8;
-        obj.vel.y = trig.cos(obj.heading) * obj.speed >> 8;
-
-        // Vertical motion (one sub-step per tick).
-        let floor_z = obj.floor_z;
-        if !obj.in_water {
-            if obj.pos.z < floor_z {
-                obj.on_ground = false;
-            } else {
-                obj.vel.z = 32;
-                obj.pos.z = floor_z;
-                obj.on_ground = true;
-            }
-            obj.vel.z += 32;
-            obj.pos.z += obj.vel.z;
-        } else if !obj.on_ground {
-            if obj.pos.z >= floor_z {
-                obj.vel.z = 0;
-                obj.pos.z = floor_z;
-                obj.on_ground = true;
-                if !p.splashed {
-                    p.splashed = true;
-                    let at = SoundPos::At(obj.posf());
-                    commands.spawn(Sound::once(id::SPLASH, 90.0 * 10000.0, 8350.0, at));
-                }
-            }
-            obj.vel.z += 32;
-            obj.pos.z += obj.vel.z;
-        }
-        let mut next = obj.pos;
-        next.x += obj.vel.x;
-        next.y += obj.vel.y;
-
-        // Walls, then the floor at the new position.
-        let (resolved, hit) = collide::resolve_person(&city, next, obj.prev_pos, PERSON_RADIUS);
-        if hit.x {
-            obj.vel.x = -obj.vel.x;
-        }
-        if hit.y {
-            obj.vel.y = -obj.vel.y;
-        }
-        p.hit_wall = hit.x || hit.y;
-        next = resolved;
-        if let Some((fz, level, water)) = collide::floor(&city, next.x, next.y, next.z) {
-            obj.floor_z = fz;
-            obj.level = level;
-            obj.in_water = water;
-        }
-        if obj.floor_z <= next.z {
-            obj.vel.z = 0;
-            obj.on_ground = true;
-            if !obj.in_water {
-                next.z = obj.floor_z;
-            }
-        }
-
-        // Swimming and drowning.
-        if obj.in_water && next.z >= obj.floor_z {
-            if next.z < DROWN_Z {
-                next.z += 24;
-            } else if obj.state != State::Dead {
-                if obj.player.is_some() {
-                    // A drowned player stays (hidden) as a corpse so the
-                    // respawn timer starts like any other death.
-                    obj.state = State::Dead;
-                    obj.health = obj.health.min(0);
-                    commands.entity(e).insert(Visibility::Hidden);
-                } else {
-                    obj.state = State::Removed;
-                    commands.entity(e).despawn();
-                    continue;
-                }
-            }
-        }
+        // The new velocity only closes 2/3 of the gap each tick (Mac
+        // `do_Person` l.106712-106721; 68k `FUN_000e3a58` ~123026 set it to
+        // `sin·speed >> 8`), so wall bounces and contact pushes carry over.
+        let (s, c) = (trig.sin(obj.heading), trig.cos(obj.heading));
+        obj.vel.x = (obj.vel.x + (obj.speed * s >> 7)) / 3;
+        obj.vel.y = (obj.vel.y + (obj.speed * c >> 7)) / 3;
 
         obj.pos = next;
         obj.prev_pos = next;
@@ -753,6 +854,11 @@ fn animate_people(
         }
         n = 0;
         while p.blend < 0 && n < 3 {
+            // Walking backwards plants a foot too (Mac `do_Person` l.106448,
+            // 68k ~122773).
+            if p.frame_next == 0 || p.frame_next == 6 {
+                footstep(&mut commands, &city, &data, obj);
+            }
             p.blend += 256;
             p.frame_next = p.frame_prev;
             p.frame_prev = (p.frame_prev - 1).rem_euclid(12);
@@ -773,17 +879,17 @@ fn footstep(commands: &mut Commands, city: &City, data: &GameData, obj: &Obj) {
     let sound = if top.kind == FaceType::Reflect {
         id::FOOTSTEP_WATER
     } else if top.visible() && cube.slope != Slope::Off {
-        data.cube_textures
-            .entries
-            .get(top.texture as usize)
-            .map(|e| e.flags as u16)
+        data.texture_flags(top.texture)
+            .map(|f| f as u16)
             .unwrap_or(id::FOOTSTEP_STONE)
     } else {
         id::FOOTSTEP_STONE
     };
     let mut at = obj.posf();
     at.z -= 200.0;
-    commands.spawn(Sound::once(sound, 3_000_000.0, 19000.0, SoundPos::At(at)));
+    // The splash carries 15000, other steps 19000 (Mac `do_Person` l.106454).
+    let range = if sound == id::FOOTSTEP_WATER { 15000.0 } else { 19000.0 };
+    commands.spawn(Sound::once(sound, 3_000_000.0, range, SoundPos::At(at)));
 }
 
 /// Player health regeneration, death and respawn (people.md §4.5).
@@ -1002,6 +1108,14 @@ fn spawn_peds(
                 State::Wander,
             ) {
                 commands.entity(e).insert(Ambient);
+                // The wander anchor starts at the spawn square's centre
+                // (Mac `AddThing` @ 10058350, l.18726).
+                let anchor = pos.truncate();
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut p) = world.get_mut::<Person>(e) {
+                        p.anchor = anchor;
+                    }
+                });
                 occupied[sx * MAP_SIZE + sy] = true;
             }
             break;
@@ -1068,16 +1182,26 @@ fn despawn_far(
 const HS: f32 = (2.0 / 3.0) / 256.0;
 const VS: f32 = 0.5 / 256.0;
 
-/// Standing pose: model Y vertical (feet at +90 on the floor), model -Z
-/// forward, model +X the person's left. `dz`, `dy`: motion offsets.
-fn standing(v: &Vertex, dz: f32, dy: f32) -> [f32; 3] {
+/// Standing pose: model Y vertical (down), the feet at `foot` on the
+/// floor, model -Z forward, model +X the person's left. `dz`, `dy`: motion
+/// offsets. `foot` is the model's own feet height ([`LoadedModel::foot`]:
+/// 0 for the Mac people, whose origin is at the feet; 90, 92 or 100 for
+/// the Amiga files, the shifts the Mac applied in data), so either set
+/// stands on the floor as on the Mac (Mac `DrawObject` @ 10075880 draws
+/// people at their origin; `analysis/mac/scratch_gameplay/people.md` M3).
+///
+/// [`LoadedModel::foot`]: crate::objects::LoadedModel::foot
+fn standing(v: &Vertex, dz: f32, dy: f32, foot: f32) -> [f32; 3] {
     let (x, y, z) = (v.x as f32, v.y as f32 + dy, v.z as f32 + dz);
-    [x * HS, (90.0 - y) * VS, -z * HS]
+    [x * HS, (foot - y) * VS, -z * HS]
 }
 
-/// Lying pose (pitch 0): the body extends forward from the origin.
-fn lying(v: &Vertex) -> [f32; 3] {
-    let (x, y, z) = (v.x as f32, v.y as f32, v.z as f32);
+/// Lying pose (pitch 0): `DrawObject` adds 0x5dc (1500) to the model Y
+/// (now along the ground, forward) of a person with pitch 0 (Mac
+/// `DrawObject` @ 10075880, OS4 `FUN_010c101c`). Measured from the feet
+/// (Mac data), the body lies about centred on where the person stood.
+fn lying(v: &Vertex, foot: f32) -> [f32; 3] {
+    let (x, y, z) = (v.x as f32, v.y as f32 - foot, v.z as f32);
     [x * HS, -z * VS * 0.5, (y * 16.0 + 1500.0) / 3.0 / 2048.0]
 }
 
@@ -1099,34 +1223,44 @@ fn limb_offset(m: &Motion, p: &Person, l: usize, b: bool) -> f32 {
     }
 }
 
+/// Pose every person's mesh. The mesh is rebuilt when the model changes
+/// or the player number does (player n wears sand n, see
+/// `ObjectLibrary::build_person_mesh`).
 fn pose_people(
     motion: Option<Res<HumanMotion>>,
     library: Option<ResMut<ObjectLibrary>>,
     data: Res<GameData>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut q: Query<(&Obj, &mut Person, &mut Transform)>,
+    mut sands: Local<std::collections::HashMap<Entity, usize>>,
+    mut q: Query<(Entity, &Obj, &mut Person, &mut Transform)>,
 ) {
     let (Some(motion), Some(mut library)) = (motion, library) else {
         return;
     };
-    for (obj, mut p, mut tf) in &mut q {
+    sands.retain(|e, _| q.contains(*e));
+    for (e, obj, mut p, mut tf) in &mut q {
         tf.translation = object_to_render(obj.posf());
         tf.rotation = heading_to_render(obj.heading as f32);
         let path = p.pose_model.unwrap_or(PEOPLE_MODELS[p.kind]);
         let Some(shown) = library.load(&data, &mut meshes, path) else {
             continue;
         };
-        if shown != p.shown {
-            // Different vertex layout: rebuild the whole mesh.
-            let rebuilt = library.build_mesh(&library.model(shown).obj, |v| standing(v, 0.0, 0.0));
+        let sand = obj.player.map_or(0, usize::from);
+        if shown != p.shown || sands.get(&e).copied().unwrap_or(0) != sand {
+            // Different vertex layout or clothes: rebuild the whole mesh.
+            sands.insert(e, sand);
+            let foot = library.model(shown).foot as f32;
+            let rebuilt =
+                library.build_person_mesh(&library.model(shown).obj, sand, |v| standing(v, 0.0, 0.0, foot));
             if let Some(mut mesh) = meshes.get_mut(&p.mesh) {
                 *mesh = rebuilt;
             }
             p.shown = shown;
         }
+        let foot = library.model(shown).foot as f32;
         let model = &library.model(shown).obj;
         let positions = if obj.pitch == 0 {
-            corner_positions(model, lying)
+            corner_positions(model, |v| lying(v, foot))
         } else {
             corner_positions(model, |v| {
                 let l = v.limb as usize;
@@ -1134,6 +1268,7 @@ fn pose_people(
                     v,
                     limb_offset(&motion.0, &p, l, false),
                     limb_offset(&motion.0, &p, l, true),
+                    foot,
                 )
             })
         };

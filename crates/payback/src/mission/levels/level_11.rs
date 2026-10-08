@@ -364,10 +364,12 @@ impl Level11 {
                     // every later reader re-initialises them first.
                     for x in 78..=82 {
                         for y in 110..=113 {
+                            // Drawn last argument first (Mac case
+                            // 10137f88, 68k 0xc4d9c..0xc4dc4): z, y, x.
                             if s.random(2) == 0 {
-                                let ex = x * 0x800 + s.random(0x800);
-                                let ey = y * 0x800 + s.random(0x800);
                                 let ez = 17000 + s.random(1500);
+                                let ey = y * 0x800 + s.random(0x800);
+                                let ex = x * 0x800 + s.random(0x800);
                                 s.explosion(ex, ey, ez, 3000);
                             }
                             s.set_cube(x, y, 1, 0x200, 0x200, 0, 0, 0);

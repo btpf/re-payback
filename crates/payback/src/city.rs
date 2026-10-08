@@ -36,12 +36,23 @@ pub const ATTRIBUTE_CORNER_LIGHT: [MeshVertexAttribute; 4] = [
     MeshVertexAttribute::new("CornerLight2", 0x5042_0022, VertexFormat::Float32x3),
     MeshVertexAttribute::new("CornerLight3", 0x5042_0023, VertexFormat::Float32x3),
 ];
-use payback_formats::IndexedImage;
 use payback_formats::map::{self, Face, FaceType, MAP_SIZE, Map, Slope};
 
 const TILE: u32 = 64;
 const ATLAS_TILES: u32 = 32;
 pub const ATLAS_SIZE: u32 = TILE * ATLAS_TILES;
+/// Atlas tile of a user map's first custom texture (texture number 2000):
+/// the last 112 tiles (the Map Editor's slot limit), after the 844 listed
+/// textures.
+const CUSTOM_TILE0: u32 = ATLAS_TILES * ATLAS_TILES - 112;
+
+/// Atlas tile of texture number `t` (custom textures from 2000 on).
+fn atlas_tile(t: u16) -> u32 {
+    match t.checked_sub(map::CUSTOM_TEXTURE_BASE) {
+        Some(i) => CUSTOM_TILE0 + i as u32,
+        None => t as u32,
+    }
+}
 
 /// Cube textures packed into 2048x2048 atlases (64x64 tiles in
 /// `.CubeTextureList` order): RGBA with colour 0 opaque, RGBA with colour 0
@@ -62,17 +73,26 @@ pub fn build_cube_atlases(data: &GameData, night: bool) -> CubeAtlases {
     let mut opaque = vec![0u8; n * 4];
     let mut keyed = vec![0u8; n * 4];
     let mut indices = vec![0u8; n];
-    for (i, entry) in data.cube_textures.entries.iter().enumerate() {
-        let Some(img) = data
-            .read(format!("CubeTextures/{}", entry.file))
-            .ok()
-            .and_then(|raw| IndexedImage::cube_texture(&raw).ok())
-        else {
+    // The list's textures (Mac or Amiga set, `GameData::cube_texture`),
+    // then the user map's custom ones at `CUSTOM_TILE0`; at night custom
+    // textures are exempt only with a `$` name (`FUN_0106e8ec`).
+    let listed = data.cube_textures.entries.iter().enumerate().map(|(i, entry)| {
+        let img = data.cube_texture(&entry.file);
+        if img.is_none() {
             warn!("missing cube texture {}", entry.file);
-            continue;
-        };
-        let darken = night && !entry.file.starts_with(['#', '$']);
-        let (tx, ty) = (i as u32 % ATLAS_TILES * TILE, i as u32 / ATLAS_TILES * TILE);
+        }
+        (i as u32, img, !entry.file.starts_with(['#', '$']))
+    });
+    let custom = data.custom_textures.slots.iter().enumerate().filter_map(|(i, slot)| {
+        let slot = slot.as_ref()?;
+        let tile = CUSTOM_TILE0 + i as u32;
+        (tile < ATLAS_TILES * ATLAS_TILES)
+            .then(|| (tile, Some(slot.image.clone()), !slot.name.starts_with('$')))
+    });
+    for (i, img, darkens) in listed.chain(custom) {
+        let Some(img) = img else { continue };
+        let darken = night && darkens;
+        let (tx, ty) = (i % ATLAS_TILES * TILE, i / ATLAS_TILES * TILE);
         for row in 0..TILE {
             for col in 0..TILE {
                 let mut c = img.pixels[(row * TILE + col) as usize];
@@ -171,10 +191,8 @@ impl MeshBuilder {
         scrolls: bool,
         light: [[f32; 3]; 4],
     ) {
-        let tile = Vec2::new(
-            (texture as u32 % ATLAS_TILES * TILE) as f32,
-            (texture as u32 / ATLAS_TILES * TILE) as f32,
-        );
+        let tile = atlas_tile(texture);
+        let tile = Vec2::new((tile % ATLAS_TILES * TILE) as f32, (tile / ATLAS_TILES * TILE) as f32);
         let normal = (corners[1] - corners[0])
             .cross(corners[3] - corners[0])
             .normalize_or_zero();

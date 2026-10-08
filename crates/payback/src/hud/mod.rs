@@ -1,14 +1,20 @@
 //! In-game HUD (docs/re/frontend_audio.md, HUD layout from OS4
 //! `FUN_01019bd8` and friends).
 //!
-//! Like the original, it is drawn into a low-resolution palette canvas,
-//! 256 lines tall and as wide as the window's aspect ratio (the original
-//! lays everything out against the view width), then composited over the
-//! 3D view with nearest-neighbour scaling. The original's "lighten" blend
+//! Like the original, it is drawn into a palette canvas and composited
+//! over the 3D view with nearest-neighbour scaling. By default the canvas
+//! has the hi-res layout whenever the window is at least 640×400, as on
+//! the Mac, which only offers 640×480 and up and so always shows it
+//! (`analysis/mac/frontend.md` §5.1): window-sized (divided by a whole
+//! factor, see [`hud_canvas`]), with the hi-res offsets and doubled icons.
+//! `Settings::hires_hud` off, or a smaller window, gives the lo-res
+//! layout: 256 lines tall and as wide as the window's aspect ratio (the
+//! original lays everything out against the view width). The original's "lighten" blend
 //! (`src + dst·(255 − max(src))/255`) is premultiplied-alpha compositing
 //! with alpha = max(src)/255, so it is reproduced exactly by the overlay.
 
 pub mod icons;
+pub mod loading;
 pub mod paint;
 
 use crate::audio::{Sound, SoundPos, id};
@@ -19,9 +25,9 @@ use crate::sim::Obj;
 use crate::sim::combat::Arsenal;
 use crate::sim::people::PlayerSession;
 use bevy::{prelude::*, window::PrimaryWindow};
-use icons::{HudIcons, Icon};
-pub use paint::{Blend, CANVAS_H, Painter, blank, canvas_width};
-use paint::text_len;
+use icons::{Font, HudIcons, Icon};
+pub use paint::{Blend, CANVAS_H, Painter, blank, blank_sized, canvas_width};
+use paint::{for_each_glyph, text_len};
 use payback_formats::Phrases;
 use std::collections::VecDeque;
 
@@ -265,6 +271,7 @@ impl Texts {
 struct Canvas {
     image: Handle<Image>,
     w: usize,
+    h: usize,
     frame: u32,
     minimap: Option<Icon>,
 }
@@ -279,6 +286,7 @@ impl Plugin for HudPlugin {
             .init_resource::<Banner>()
             .init_resource::<Language>()
             .init_resource::<Texts>()
+            .add_plugins(loading::plugin)
             .add_systems(Startup, setup)
             .add_systems(PreUpdate, load_global_texts)
             .add_systems(OnEnter(crate::level::AppState::Playing), load_level_texts.in_set(crate::level::LevelLoaded))
@@ -289,12 +297,15 @@ impl Plugin for HudPlugin {
 }
 
 fn setup(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
-    commands.insert_resource(HudIcons::load(&data));
+    let icons = HudIcons::load(&data);
+    commands.insert_resource(HudIcons2x(icons.doubled(&icons::Average::load(&data))));
+    commands.insert_resource(icons);
     let w = 320;
     let image = images.add(blank(w));
     commands.insert_resource(Canvas {
         image: image.clone(),
         w,
+        h: CANVAS_H,
         frame: 0,
         minimap: None,
     });
@@ -329,14 +340,24 @@ impl Default for Language {
     }
 }
 
-/// `Phrases/<name>.<language>.phrases`, falling back to English.
+/// `Phrases/<name>.<language>.phrases`, falling back to English. The Mac
+/// files come first: they are the baseline for English, Deutsch and
+/// Francais (`Français`; global, level and credits texts: "Difficulty:",
+/// "Music setup", the control-neutral hints, the Mac credits;
+/// `analysis/mac/frontend.md` §6). The other 11 languages exist only in
+/// the Amiga data.
 pub fn load_phrases(data: &GameData, name: &str, language: &str) -> Phrases {
+    let prefix = format!("{name}.");
+    let files = data.list_dir("Phrases", true, true);
     [language, "English"]
         .iter()
         .find_map(|l| {
-            data.read(format!("Phrases/{name}.{l}.phrases"))
-                .ok()
-                .and_then(|b| Phrases::parse(&b).ok())
+            let (_, path) = files.iter().find(|(n, _)| {
+                n.strip_prefix(&prefix)
+                    .and_then(|n| n.strip_suffix(".phrases"))
+                    .is_some_and(|mid| crate::data::same_language(mid, l))
+            })?;
+            std::fs::read(path).ok().and_then(|b| Phrases::parse(&b).ok())
         })
         .unwrap_or_default()
 }
@@ -549,12 +570,83 @@ fn tick_banner(mut b: ResMut<Banner>) {
     }
 }
 
+/// The software hi-res icon set ([`HudIcons::doubled`]).
+#[derive(Resource)]
+pub struct HudIcons2x(pub HudIcons);
+
+/// The HUD canvas for a window (physical pixels): the hi-res layout when
+/// enabled and the window is at least 640×400 (`InitGraphics` @ 1008d110,
+/// Amiga `FUN_010138dc`: W > 639 && H > 399 sets `AreIconsScaled` @
+/// 10085eb0), on a canvas of window / s pixels, s the largest whole factor
+/// that keeps it at least 640×400 (s = 1 for the Mac's 640×480, 800×600
+/// and 1024×768); otherwise the lo-res 256-line canvas as wide as the
+/// window's aspect. Returns (w, h, hi-res).
+pub fn hud_canvas(physical: UVec2, hires: bool) -> (usize, usize, bool) {
+    let (w, h) = (physical.x as usize, physical.y.max(1) as usize);
+    if hires && w > 639 && h > 399 {
+        let s = (w / 640).min(h / 400).max(1);
+        (w / s, h / s, true)
+    } else {
+        (canvas_width(w as f32 / h as f32), CANVAS_H, false)
+    }
+}
+
+/// Draws icons and text at the HUD's scale. Hi-res doubles every offset
+/// and pitch that the original doubles (each call site below cites its
+/// own constants; several are not exactly 2×) and uses doubled icons:
+/// pre-doubled through Alpha table 4 in software ([`HudIcons2x`]),
+/// bilinear 2× quads in hardware (`DrawIcon__FP4Iconii` @ 10085300).
+struct Pen<'p, 'a> {
+    p: &'p mut Painter<'a>,
+    /// The icons as loaded for this mode (lo-res or software-doubled).
+    icons: &'p HudIcons,
+    hi: bool,
+    /// Hardware hi-res: lo-res icons drawn ×2 bilinear.
+    bilinear: bool,
+}
+
+impl Pen<'_, '_> {
+    /// Offset scale: 2 in hi-res.
+    fn k(&self) -> i32 {
+        if self.hi { 2 } else { 1 }
+    }
+
+    fn icon(&mut self, icon: &Icon, x: i32, y: i32, blend: Blend) {
+        if self.bilinear {
+            self.p.icon_bilinear2(icon, x, y, blend);
+        } else {
+            self.p.icon(icon, x, y, blend);
+        }
+    }
+
+    /// `DisplayText*` (@ 1008ecd0, 1008bcd0): the pitch doubles in hi-res.
+    fn text(&mut self, font: &Font, s: &str, x: i32, y: i32, pitch: i32, blend: Blend) {
+        let pitch = pitch * self.k();
+        let bilinear = self.bilinear;
+        let p = &mut *self.p;
+        for_each_glyph(font, s, x, pitch, |g, gx| {
+            if bilinear {
+                p.icon_bilinear2(g, gx, y, blend);
+            } else {
+                p.icon(g, gx, y, blend);
+            }
+        });
+    }
+}
+
+/// `ys` of `ReadScreenParams` @ 10051fc0 (`FUN_0104107c`): ((H+8)·16)>>8.
+fn ys(h: i32) -> i32 {
+    ((h + 8) * 16) >> 8
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     mut canvas: ResMut<Canvas>,
     mut images: ResMut<Assets<Image>>,
     window: Query<&Window, With<PrimaryWindow>>,
     icons: Option<Res<HudIcons>>,
+    icons2x: Option<Res<HudIcons2x>>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
     data: Res<GameData>,
     hud: Res<HudData>,
     dialog: Res<Dialog>,
@@ -562,20 +654,22 @@ fn draw(
     banner: Res<Banner>,
     texts: Res<Texts>,
 ) {
-    let Some(icons) = icons else { return };
-    let aspect = window
-        .single()
-        .map(|w| w.width() / w.height().max(1.0))
-        .unwrap_or(1.25);
+    let Some(lo) = icons else { return };
     let physical = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
-    let w = canvas_width(aspect);
+    let (w, h, hi) = hud_canvas(physical, settings.as_ref().is_none_or(|s| s.hires_hud));
+    let bilinear = hi && crate::render_mode::is_hardware();
+    let set: &HudIcons = match &icons2x {
+        Some(d) if hi && !bilinear => &d.0,
+        _ => &lo,
+    };
     canvas.frame = canvas.frame.wrapping_add(1);
     let frame = canvas.frame;
     let minimap = canvas.minimap.clone();
-    if canvas.w != w {
+    if (canvas.w, canvas.h) != (w, h) {
         canvas.w = w;
+        canvas.h = h;
         if let Some(mut img) = images.get_mut(&canvas.image) {
-            *img = blank(w);
+            *img = blank_sized(w, h);
         }
     }
     let Some(mut img) = images.get_mut(&canvas.image) else {
@@ -583,106 +677,104 @@ fn draw(
     };
     let Some(px) = img.data.as_mut() else { return };
     px.fill(0);
-    if hud.multiplayer {
-        let label = texts.global(2189);
-        let views = Views { icons: &icons, title: &title, banner: &banner, label: &label, frame };
-        views.draw(px, w, &data.palette, &hud.views, physical);
-        return;
-    }
     let mut p = Painter {
         px,
         w,
         pal: &data.palette,
     };
+    let mut pen = Pen { p: &mut p, icons: set, hi, bilinear };
+    if hud.multiplayer {
+        let label = texts.global(2189);
+        let views = Views { title: &title, banner: &banner, label: &label, frame };
+        views.draw(&mut pen, &hud.views, physical);
+        return;
+    }
+    let ic = pen.icons;
+    let k = pen.k();
     let xmax = w as i32 - 1;
-    let ymax = CANVAS_H as i32 - 1;
+    let ymax = h as i32 - 1;
     let cx = (xmax >> 1) + 1;
 
+    // `DrawGraphics__FiP6Objectisi` @ 100929e0 (OS4 `FUN_01019bd8`).
     let blink = frame & 2 != 0;
-    draw_weapons(&mut p, &icons, hud.weapon, &hud.ammo, blink);
+    draw_weapons(&mut pen, hud.weapon, &hud.ammo, blink);
 
-    if !hud.multiplayer {
-        // Score: 7 digits (8 when larger).
-        let score = hud.score.max(0);
-        let digits = if score > 9_999_999 {
-            format!("{score:08}")
-        } else {
-            format!("{score:07}")
+    // Score (`DisplayScore__Fiii` @ 10090f70, called with xmax − 75):
+    // 7 digits from x (hi-res x − 70), 8 when larger from x − 10 (x − 80),
+    // 10 px apart (20), y 5 (10).
+    let score = hud.score.max(0);
+    let digits = if score > 9_999_999 {
+        format!("{score:08}")
+    } else {
+        format!("{score:07}")
+    };
+    let x0 = xmax
+        - 75
+        - match (digits.len() > 7, hi) {
+            (false, false) => 0,
+            (true, false) => 10,
+            (false, true) => 70,
+            (true, true) => 80,
         };
-        let x0 = xmax - 75 - if digits.len() > 7 { 10 } else { 0 };
-        for (k, d) in digits.bytes().enumerate() {
-            p.icon(
-                &icons.small_digits[(d - b'0') as usize],
-                x0 + 10 * k as i32,
-                5,
-                Blend::Lighten,
-            );
-        }
-        // Bonus multiplier (green) and lives.
-        p.icon(&icons.small_x, xmax - 75, 19, Blend::Green);
-        p.icon(
-            &icons.small_digits[hud.multiplier.clamp(0, 9) as usize],
-            xmax - 65,
-            19,
-            Blend::Green,
-        );
-        p.icon(&icons.small_person, xmax - 35, 19, Blend::Plain);
-        p.icon(&icons.small_x, xmax - 25, 19, Blend::Lighten);
-        p.icon(
-            &icons.small_digits[hud.lives.clamp(0, 9) as usize],
-            xmax - 15,
-            19,
-            Blend::Lighten,
-        );
+    for (i, d) in digits.bytes().enumerate() {
+        pen.icon(&ic.small_digits[(d - b'0') as usize], x0 + 10 * k * i as i32, 5 * k, Blend::Lighten);
+    }
+    // Bonus multiplier (green, `DisplayBonusMultiplier__Fiii` @ 10091190)
+    // at (xmax − 75, 19), hi-res (xmax − 150, 38); lives
+    // (`DisplayLives__Fiii` @ 100910b0) at (xmax − 35, 19), (xmax − 70, 38).
+    pen.icon(&ic.small_x, xmax - 75 * k, 19 * k, Blend::Green);
+    pen.icon(
+        &ic.small_digits[hud.multiplier.clamp(0, 9) as usize],
+        xmax - 75 * k + 10 * k,
+        19 * k,
+        Blend::Green,
+    );
+    pen.icon(&ic.small_person, xmax - 35 * k, 19 * k, Blend::Plain);
+    pen.icon(&ic.small_x, xmax - 25 * k, 19 * k, Blend::Lighten);
+    pen.icon(
+        &ic.small_digits[hud.lives.clamp(0, 9) as usize],
+        xmax - 15 * k,
+        19 * k,
+        Blend::Lighten,
+    );
 
-        // Minimap with player/target blobs (1 px = 2 squares).
-        if let Some(mm) = &minimap {
-            let (mx, my) = (xmax - 71, 33);
-            p.icon(mm, mx + 1, my + 1, Blend::Plain);
-            if let Some(t) = hud.target_pos {
-                let b = if blink {
-                    &icons.blobs[3]
-                } else {
-                    &icons.blobs[2]
-                };
-                p.icon(b, (t.x >> 12) + mx - 3, (t.y >> 12) + my - 3, Blend::Plain);
-            }
-            if let Some(pp) = hud.player_pos {
-                let b = if blink {
-                    &icons.blobs[1]
-                } else {
-                    &icons.blobs[0]
-                };
-                p.icon(
-                    b,
-                    (pp.x >> 12) + mx - 3,
-                    (pp.y >> 12) + my - 3,
-                    Blend::Plain,
-                );
-            }
+    // Minimap (`DisplayMinimap__Fiiiiii` @ 10091630, called with
+    // (xmax − 71, 33), hi-res (xmax − 142, 66)), image at (X+1, Y+1) with
+    // player/target blobs (1 px = 2 squares). The map itself is not doubled
+    // in software hi-res; hardware draws it ×2 and plots at >> 11.
+    if let Some(mm) = &minimap {
+        let (mx, my) = (xmax - 71 * k, 33 * k);
+        pen.icon(mm, mx + 1, my + 1, Blend::Plain);
+        let shift = if bilinear { 11 } else { 12 };
+        if let Some(t) = hud.target_pos {
+            let b = if blink { &ic.blobs[3] } else { &ic.blobs[2] };
+            pen.icon(b, (t.x >> shift) + mx - 3, (t.y >> shift) + my - 3, Blend::Plain);
+        }
+        if let Some(pp) = hud.player_pos {
+            let b = if blink { &ic.blobs[1] } else { &ic.blobs[0] };
+            pen.icon(b, (pp.x >> shift) + mx - 3, (pp.y >> shift) + my - 3, Blend::Plain);
         }
     }
 
-    // Hearts.
+    // Hearts (`DisplayHealth__Fiii` @ 10091390): x = cx − 25 + 10i, y 31;
+    // hi-res cx − 50 + 20i, y 62.
     for i in 0..5 {
         let big = hud.health >= 1 && hud.health / 20 >= i;
-        let icon = if big {
-            &icons.heart_big
-        } else {
-            &icons.heart_small
-        };
-        p.icon(icon, cx - 25 + 10 * i, 31, Blend::Lighten);
+        let icon = if big { &ic.heart_big } else { &ic.heart_small };
+        pen.icon(icon, cx - 25 * k + 10 * k * i, 31 * k, Blend::Lighten);
     }
 
-    // Wanted stars: a ripple of spinning stars, centred.
+    // Wanted stars (`DisplayWanted__Fiii` @ 10091270): a ripple of
+    // spinning stars, centred, y 16 (32). Pitch = icon width + 2, doubled
+    // again in hardware hi-res (20 in software hi-res, 22 in hardware).
     let n = hud.wanted.clamp(0, 6);
     if n > 0 {
-        let s = 11;
+        let s = (ic.siren[0].w as i32 + 2) * if bilinear { 2 } else { 1 };
         let x0 = cx - n * s / 2;
         let mut ph = (frame % 30) as i32;
         for i in 0..n {
             let f = if ph <= 9 { ph as usize } else { 0 };
-            p.icon(&icons.siren[f], x0 + i * s, 16, Blend::Lighten);
+            pen.icon(&ic.siren[f], x0 + i * s, 16 * k, Blend::Lighten);
             ph += 2;
             if ph > 29 {
                 ph = 0;
@@ -690,128 +782,121 @@ fn draw(
         }
     }
 
-    // Countdown pager or lap counter.
+    // Countdown pager (`DisplayTimer__Fii` @ 100914d0) at (5, 45), digits
+    // at x + 8 + 8i, y + 15; hi-res (10, 90), x + 16 + 16i, y + 30. Or the
+    // lap counter (`DisplayLap__Fii` @ 10090ea0) at (5, 45), (10, 90).
     if let Some(t) = hud.timer.filter(|t| (0..1000).contains(t)) {
-        p.icon(&icons.pager, 5, 45, Blend::Plain);
-        for (k, d) in format!("{t:03}").bytes().enumerate() {
-            p.icon(
-                &icons.pager_digits[(d - b'0') as usize],
-                13 + 8 * k as i32,
-                60,
+        pen.icon(&ic.pager, 5 * k, 45 * k, Blend::Plain);
+        for (i, d) in format!("{t:03}").bytes().enumerate() {
+            pen.icon(
+                &ic.pager_digits[(d - b'0') as usize],
+                5 * k + 8 * k + 8 * k * i as i32,
+                60 * k,
                 Blend::Plain,
             );
         }
     } else if let Some((lap, total)) = hud.lap {
-        p.text(
-            &icons.you,
-            &format!("Lap {lap} of {total}"),
-            5,
-            45,
-            7,
-            Blend::Plain,
-        );
+        pen.text(&ic.you, &format!("Lap {lap} of {total}"), 5 * k, 45 * k, 7, Blend::Plain);
     }
+    // Start lights (`DisplayLights__Fii` @ 10090db0) at (cx − 19, H·50/200),
+    // hi-res x cx − 38.
     if let Some(l) = hud.start_lights {
-        if let Some(icon) = icons.lights.get(l) {
-            p.icon(icon, cx - 19, CANVAS_H as i32 / 4, Blend::Plain);
+        if let Some(icon) = ic.lights.get(l) {
+            pen.icon(icon, cx - 19 * k, h as i32 * 50 / 200, Blend::Plain);
         }
     }
 
-    draw_banner(&mut p, &icons, &banner, cx);
+    draw_banner(&mut pen, &banner, cx);
 
-    // Message box.
+    // Message box (`DisplayMessage__Fv` @ 1008f840): opening/closing over
+    // 40 lines (80 hi-res) in 15 ticks, icon at (2, ymax − 39) (ymax − 78),
+    // text at x 29 (58), lines ymax − 34 + 11·min(n − 1, 2) + scroll − 11k
+    // (hi-res −68, 22 apart; the scroll is not doubled).
     if let Some(speaker) = dialog.open {
-        let top = ymax - 1 - 40 * dialog.anim / 15;
-        p.darken(0, top, xmax, ymax);
+        let top = ymax - 1 - 40 * k * dialog.anim / 15;
+        pen.p.darken(0, top, xmax, ymax);
         if dialog.anim >= 15 {
-            p.icon(
-                &icons.speakers[speaker as usize],
-                2,
-                ymax - 39,
-                Blend::Plain,
-            );
+            pen.icon(&ic.speakers[speaker as usize], 2, ymax - 39 * k, Blend::Plain);
             let n = dialog.lines.len() as i32;
-            for (k, (line, voice)) in dialog.lines.iter().rev().enumerate() {
-                let y = ymax - 34 + 11 * (n - 1).min(2) + dialog.scroll - 11 * k as i32;
+            for (i, (line, voice)) in dialog.lines.iter().rev().enumerate() {
+                let y = ymax - 34 * k + 11 * k * (n - 1).min(2) + dialog.scroll - 11 * k * i as i32;
                 if y < top {
                     continue;
                 }
-                let font = if *voice == Voice::You {
-                    &icons.you
-                } else {
-                    &icons.them
-                };
-                p.text(font, line, 29, y, 7, Blend::Plain);
+                let font = if *voice == Voice::You { &ic.you } else { &ic.them };
+                pen.text(font, line, 29 * k, y, 7, Blend::Plain);
             }
         }
     }
 
-    // Big title.
+    // Big title (`DrawAnnouncement__Fi` @ 1008fe10): x = cx −
+    // (k·pitch·realstrlen >> 1), y = (ys·y >> 12) − 11, the pitch doubled
+    // in hi-res.
     if title.ticks > 0 {
-        let n = title.text.len() as i32;
-        let x = cx - title.pitch * n / 2;
-        let y = (title.y * 16 >> 12) - 11;
-        p.text(
-            &icons.big,
-            &title.text.to_uppercase(),
-            x,
-            y,
-            title.pitch,
-            Blend::Lighten,
-        );
+        let n = text_len(&title.text);
+        let x = cx - ((k * title.pitch * n) >> 1);
+        let y = ((ys(h as i32) * title.y) >> 12) - 11;
+        pen.text(&ic.big, &title.text.to_uppercase(), x, y, title.pitch, Blend::Lighten);
     }
 }
 
-/// Weapons: fist at (5,5), then slots 1..7 every 10 px; ammo of the
-/// selected one below.
-fn draw_weapons(p: &mut Painter, icons: &HudIcons, weapon: usize, ammo: &[i32; 8], blink: bool) {
+/// Weapons (`DrawWeapons__FP6Object` @ 10092480): fist at (5,5), then
+/// slots 1..7 every 10 px (hi-res 20); ammo of the selected one
+/// (`DisplayAmmo__Fiii` @ 10090490) at (5, 26), hi-res (5, 47), digits
+/// 10 (20) apart.
+fn draw_weapons(pen: &mut Pen, weapon: usize, ammo: &[i32; 8], blink: bool) {
+    let ic = pen.icons;
+    let k = pen.k();
     for slot in 0..8 {
         if slot != 0 && ammo[slot] <= 0 {
             continue;
         }
-        let x = if slot == 0 { 5 } else { 5 + 10 * slot as i32 };
-        let (normal, bright) = &icons.weapons[slot];
+        let x = 5 + 10 * k * slot as i32;
+        let (normal, bright) = &ic.weapons[slot];
         let icon = if slot == weapon && blink { bright } else { normal };
-        p.icon(icon, x, 5, Blend::Plain);
+        pen.icon(icon, x, 5, Blend::Plain);
     }
     if weapon != 0 {
         let ammo = ammo[weapon].clamp(0, 99999);
-        for (k, d) in format!("{ammo:05}").bytes().enumerate() {
-            p.icon(
-                &icons.small_digits[(d - b'0') as usize],
-                5 + 10 * k as i32,
-                26,
-                Blend::Lighten,
-            );
+        let y = if pen.hi { 47 } else { 26 };
+        for (i, d) in format!("{ammo:05}").bytes().enumerate() {
+            pen.icon(&ic.small_digits[(d - b'0') as usize], 5 + 10 * k * i as i32, y, Blend::Lighten);
         }
     }
 }
 
-/// Vehicle-name banner: slides in, holds, slides out.
-fn draw_banner(p: &mut Painter, icons: &HudIcons, banner: &Banner, cx: i32) {
+/// Vehicle-name banner (`DisplayVehicleName__Fi` @ 1008f5f0): slides in,
+/// holds, slides out. Lo-res: band (cx − 80, 0)–(cx + 80, h), h = 16t/20,
+/// text y = h − 14, holding at h 16, y 2. Hi-res: ±160, h = 16t/10, text y
+/// = h − 28, holding at h 32, y 2. Text x = cx − (7k·realstrlen >> 1)
+/// (`SetVehicleName__FiPc` @ 1008fc80; `realstrlen` skips `^`).
+fn draw_banner(pen: &mut Pen, banner: &Banner, cx: i32) {
     if banner.text.is_empty() || banner.t > 149 {
         return;
     }
+    let k = pen.k();
+    let d = 20 / k;
     let t = banner.t;
     let (h, ty) = if t < 20 {
-        (16 * t / 20, 16 * t / 20 - 14)
+        (16 * t / d, 16 * t / d - 14 * k)
     } else if t < 130 {
-        (16, 2)
+        (16 * k, 2)
     } else {
-        let k = 149 - t;
-        (16 * k / 20, 16 * k / 20 - 14)
+        let r = 149 - t;
+        (16 * r / d, 16 * r / d - 14 * k)
     };
-    p.darken(cx - 80, 0, cx + 80, h);
-    let tx = cx - 7 * banner.text.len() as i32 / 2;
-    p.text(&icons.you, &banner.text, tx, ty, 7, Blend::Lighten);
+    pen.p.darken(cx - 80 * k, 0, cx + 80 * k, h);
+    let tx = cx - ((7 * k * text_len(&banner.text)) >> 1);
+    let ic = pen.icons;
+    pen.text(&ic.you, &banner.text, tx, ty, 7, Blend::Lighten);
 }
 
-/// The split-screen HUD (`FUN_0105bd98`): per view the vehicle banner,
-/// weapons and ammo at the usual place, hearts centred at x = xmax' - 30,
-/// y = 10, and the kills box at (5, ymax' - 13); no minimap, score,
-/// stars, lives, timer or message box.
+/// The split-screen HUD (`FUN_0105bd98`, Mac `DrawView__Fv` @ 1006eb80):
+/// per view the vehicle banner, weapons and ammo at the usual place,
+/// hearts centred at x = xmax' − 30 (hi-res − 60), y = 10, and the kills
+/// box (`DrawKills__Fiii` @ 10092860) at (5, ymax' − 13) (− 26); no
+/// minimap, score, stars, lives, timer or message box.
 struct Views<'a> {
-    icons: &'a HudIcons,
     title: &'a BigTitle,
     banner: &'a Banner,
     /// "Kill(s):" (2189).
@@ -820,47 +905,51 @@ struct Views<'a> {
 }
 
 impl Views<'_> {
-    /// Draw every view into its rectangle of the `w`x256 canvas;
-    /// `physical` is the window size the view rectangles are laid out in.
-    fn draw(&self, px: &mut [u8], w: usize, pal: &[u8; 768], views: &[ViewHud], physical: UVec2) {
+    /// Draw every view into its rectangle of the canvas; `physical` is the
+    /// window size the view rectangles are laid out in.
+    fn draw(&self, pen: &mut Pen, views: &[ViewHud], physical: UVec2) {
+        let (w, h) = (pen.p.w, pen.p.h());
         let (pw, ph) = (physical.x.max(2), physical.y.max(2));
         let rects = crate::camera::view_rects(views.len(), pw, ph);
         for (i, v) in views.iter().enumerate() {
             let Some(&(x, y, rw, rh)) = rects.get(i) else { continue };
             let sx = |a: u32| (a as u64 * w as u64 / pw as u64) as usize;
-            let sy = |a: u32| (a as u64 * CANVAS_H as u64 / ph as u64) as usize;
+            let sy = |a: u32| (a as u64 * h as u64 / ph as u64) as usize;
             let (x0, y0) = (sx(x), sy(y));
-            let (vw, vh) = (sx(rw).clamp(1, w - x0.min(w - 1)), sy(rh).clamp(1, CANVAS_H - y0.min(CANVAS_H - 1)));
-            let mut buf = vec![0u8; vw * CANVAS_H * 4];
-            let mut p = Painter { px: &mut buf, w: vw, pal };
-            self.view(&mut p, i, v, vw as i32, vh as i32);
+            let (vw, vh) = (sx(rw).clamp(1, w - x0.min(w - 1)), sy(rh).clamp(1, h - y0.min(h - 1)));
+            let mut buf = vec![0u8; vw * vh * 4];
+            let mut sub = Painter { px: &mut buf, w: vw, pal: pen.p.pal };
+            let mut sp = Pen { p: &mut sub, icons: pen.icons, hi: pen.hi, bilinear: pen.bilinear };
+            self.view(&mut sp, i, v, vw as i32, vh as i32, h as i32);
             for row in 0..vh {
                 let src = &buf[row * vw * 4..(row + 1) * vw * 4];
                 let at = ((y0 + row) * w + x0) * 4;
-                px[at..at + vw * 4].copy_from_slice(src);
+                pen.p.px[at..at + vw * 4].copy_from_slice(src);
             }
         }
     }
 
-    fn view(&self, p: &mut Painter, i: usize, v: &ViewHud, vw: i32, vh: i32) {
-        let icons = self.icons;
+    /// One view, `vw`×`vh` of a canvas `h` lines tall.
+    fn view(&self, pen: &mut Pen, i: usize, v: &ViewHud, vw: i32, vh: i32, h: i32) {
+        let ic = pen.icons;
+        let k = pen.k();
         let (xmax, ymax) = (vw - 1, vh - 1);
         let cx = (xmax >> 1) + 1;
-        draw_weapons(p, icons, v.weapon, &v.ammo, self.frame & 2 != 0);
-        // Hearts centred at xmax - 30.
-        for k in 0..5 {
-            let big = v.health >= 1 && v.health / 20 >= k;
-            let icon = if big { &icons.heart_big } else { &icons.heart_small };
-            p.icon(icon, xmax - 30 - 25 + 10 * k, 10, Blend::Lighten);
+        draw_weapons(pen, v.weapon, &v.ammo, self.frame & 2 != 0);
+        // Hearts centred at xmax − 30 (60), y 10 in both.
+        for n in 0..5 {
+            let big = v.health >= 1 && v.health / 20 >= n;
+            let icon = if big { &ic.heart_big } else { &ic.heart_small };
+            pen.icon(icon, xmax - 30 * k - 25 * k + 10 * k * n, 10, Blend::Lighten);
         }
-        // Kills box (`FUN_010199ec`).
-        let y = ymax - 13;
+        // Kills box: FadeDarken (0, y − 5)–(5 + (len + 3)·7k + 5, y + 13k).
+        let y = ymax - 13 * k;
         let len = text_len(self.label);
-        p.darken(0, y - 5, 5 + (len + 3) * 7 + 5, y + 13);
+        pen.p.darken(0, y - 5, 5 + (len + 3) * 7 * k + 5, y + 13 * k);
         let s = format!("{} {}", self.label, v.kills);
-        p.text(&icons.them, &s, 5, y, 7, Blend::Lighten);
+        pen.text(&ic.them, &s, 5, y, 7, Blend::Lighten);
         if self.banner.view.is_none_or(|b| b as usize == i) {
-            draw_banner(p, icons, self.banner, cx);
+            draw_banner(pen, self.banner, cx);
         }
         // Big title, smaller in a split view (pitch - 8), scaled to the
         // view height.
@@ -869,9 +958,9 @@ impl Views<'_> {
             let text = t.each.get(i).unwrap_or(&t.text).to_uppercase();
             let pitch = (t.pitch - 8).max(8);
             let n = text_len(&text);
-            let x = cx - pitch * n / 2;
-            let y = ((t.y * 16) >> 12) * vh / CANVAS_H as i32 - 11;
-            p.text(&icons.big, &text, x, y, pitch, Blend::Lighten);
+            let x = cx - k * pitch * n / 2;
+            let y = ((t.y * ys(h)) >> 12) * vh / h - 11;
+            pen.text(&ic.big, &text, x, y, pitch, Blend::Lighten);
         }
     }
 }

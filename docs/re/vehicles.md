@@ -13,7 +13,7 @@ instance fields are also 2 lower (68k speed `+0x3ae` = OS4 `+0x3b0` = `[0xec]`).
 
 Conventions are the same as in `people.md` §1 (C):
 
-- Tick: 1/25 s on 68k. `ticks` per frame = `DAT_00348090` (68k) / `DAT_0114c6a0` (OS4), clamped to 1..5.
+- Tick: 1/25 s on 68k, 1/30 s on OS4, the Mac and the port (`people.md` §1.1). `ticks` per frame = `DAT_00348090` (68k) / `DAT_0114c6a0` (OS4), clamped to 1..5.
 - Positions: 2048 units per map square, `x>>11` = square. x points east, y points south. z is down-positive.
 - Angles: 5760 (0x1680) per turn. Forward = (sin h, cos h); h = 0 faces +y (south).
 - `random(n)` = OS4 `FUN_0103ac94`, 68k `FUN_0003fc8c`.
@@ -141,7 +141,7 @@ Defaults come from the `.Obj` reader (OS4 `FUN_010bf8bc` tail). The per-type ove
 | 8 | Limo | 380 | −180 | 7 | 25 | 45 | 26 | 3000 | 100 | 0x46 | 3 | – | 2 | any | f8=c8·2/3 |
 | 9 | Police car | 600 | −250 | 17 | 40 | 60 | 45 | 1600 | 200 | 0x44 | 0x0b | – | – | any | police |
 | 10 | Scooby | 480 | −240 | 14 | 35 | 53 | 42 | 1235 | 150 | 0x44 | 3 | – | 10 | any | |
-| 11 | Tank | 220 | −100 | 6 | 20 | 55 | 50 | 40000 | 0 | 0x1b | 3 | – | – | any | 4928 |
+| 11 | Tank | 220 | −100 (Mac −220) | 6 | 20 | 55 | 50 | 40000 | 0 | 0x1b | 3 | – | – | any | 4928 |
 | 12 | Evo | 470 | −230 | 15 | 35 | 55 | 45 | 1400 | 130 | 0x44 | 3 | – | 9 | any | |
 | 13 | Taxi | 310 | −200 | 6 | 21 | 43 | 24 | 1380 | 256 | 1 | 3 | – | 3 | any | |
 | 14 | Ice cream van | 240 | −170 | 5 | 20 | 32 | 23 | 2000 | 100 | 0x46 | 0x2c | – | – | 0 | f8=c8·5/6 |
@@ -159,6 +159,8 @@ Defaults come from the `.Obj` reader (OS4 `FUN_010bf8bc` tail). The per-type ove
 
 Notes:
 
+- The Mac build gives the tank a reverse limit of −220 (`InitStructures` @ 1005ffb0), so it reverses as fast as it
+  drives forward. Every other value matches. The port uses the Mac value (CONFIRMED).
 - `policevan_red` uses brake 10 and grip 20 (the other two use 15/25), and mass 2000. Its spawn value is 50 like
   the others. This looks like a typo in the original.
 - In the 68k build, police vehicles set `+0x490a = 1` directly (68k `0x48c8+0x42`).
@@ -183,6 +185,9 @@ Spawn-time instance fields (C, `FUN_01047af4`):
 - `+0x348` = `clamp(DAT_0114c69c·8 − 30 + random(90), 0, 99)`; for a white van, `min(DAT_0114c69c·8 + random(90), 99)`.
   `DAT_0114c69c` is the level number. I: driver aggression/skill.
 - `z = ground − 0x200` (spawns slightly above the ground and drops).
+- Speed: the Amiga leaves it 0. The **Mac** (`AddThing` @ 10058350) sets `+0x890` speed = `min(maxF, 100)`
+  (velocity untouched; grip brings it up), so new traffic is already rolling. The port follows the Mac
+  (`traffic.rs` `spawn_traffic`). CONFIRMED.
 - `[0xce] = 1`.
 - The engine sound `+0x4924` starts looped at volume 10000000, pitch 20000 (handle `[0x10b]`). The skid sound 2
   starts silent (handle `[0x10d]`).
@@ -391,6 +396,26 @@ it. Blocking an axis restores that coordinate from the previous position [0x103]
 the push sign per axis: +1 = blocked moving −, −1 = blocked moving +. Positions are clamped to `[0, 0x3ffff]` at
 the map edge, which counts as a wall.
 
+Corrections from the Mac comparison (CONFIRMED, Mac `CheckForCubeCollision` @ 100af980 = 68k `FUN_00044f82`):
+
+- The vehicle branch does **not** restore the position; `BounceUnit` pushes the car off the wall. The box edges are
+  tested against the walls beyond the box-centre square, the centre path against those beyond the previous
+  square (`GetCollideInfo`, people.md §5.1). Glass faces (type 3) break instead of blocking.
+- **Map edge.** Only the Mac clamps the 3×3 points of the last sub-step and flags them as a hit. The Amiga does it
+  only on the earlier sub-steps (the 2×2 path), so at one tick per frame the edge never bounced a car there
+  (effect INFERRED). The port follows the Mac: a probe beyond the edge is a wall hit (damage, sound, deflection).
+- **Heading deflection (N7, all builds).** If a hit opposes the velocity (`hitX > 0 && vx < 1` or
+  `hitX < 0 && vx >= 0`), the heading turns by 0x5a: for x, −0x5a with the heading in [1, 0x5a0] or
+  [0xb41, 0x10e0], +0x5a otherwise; for y the signs swap (applied after x). This makes cars glance off walls.
+- When nothing is hit, the ground heights under the 9 box points are stored (+0x8b8..+0x8d8: rows −half-width,
+  centre, +half-width; each rear, centre, front). The centre uses `GetCubeInfo` (the floor rule), the others
+  `GetCubeInfo2` (the surface nearest the car's z, a higher one winning within 32 h). `PositionUnit` and the
+  scenery test read them.
+
+Port (`collide.rs` `resolve_walls_glass`, `driving.rs`): a cross of half-size 256 instead of the box, the
+position restored to the previous one on a hit, and the speed halved on a hit (`BounceUnit` leaves the speed);
+the bounce keeps half the normal velocity pointing away from the wall, as `BounceUnit` does.
+
 Wall bounce `FUN_010cd198(obj, hitX, hitY)`, per blocked axis (shown for x; y is identical with vy):
 
 ```
@@ -431,15 +456,36 @@ For a non-helicopter in the air:
 
 Engine pitch uses the wheel speed (revs freely). Helicopter: see §4.
 
-### 2.10 Slopes (I, OS4 `FUN_010cbc7c`)
+### 2.10 Slopes (C, Mac `PositionUnit` @ 10081450 = OS4 `FUN_010cbc7c` = 68k `FUN_000a1758`)
 
-Each frame:
+Called from `do_Other` @ 10146280 while the car is on the ground (z ≥ centre height) and not sinking, after the
+steering and before `SkidUnit`, as `PositionUnit(obj, ticks)` (k = ticks, CONFIRMED). Heights h are the 3×3 box
+heights of §2.7 (z down, so larger = lower).
 
-- Roll [3] and pitch [4] are recomputed from the ground heights of the corner samples ([0x3e4..0x3f8], the 3×3
-  ground heights). It uses an atan table (`FUN_0103a8c4`, ±0x5a0) of the height difference over the wheelbase.
-- Each angle is low-pass filtered: `new = (old + target)/2`.
-- **Downhill acceleration**: `speed += pitchAngle·k >> 8`. k is the function's second argument (register r4,
-  not recovered; I: `ticks`). Going downhill speeds the car up, uphill slows it down.
+```
+L, C, R = min of each row (−half-width, centre line, +half-width)
+if L − C < 0 or C − R > 0:  ratio = (L − R)·256 / (2·hw)
+else: ratio = (|C − R| < |L − C|) ? (C − R)·256/hw : (L − C)·256/hw     # a crest: the gentler half
+roll target = arctan(ratio · K) + obj+0x7fc + lean(+0x7e8)            # K hidden; INFERRED 1/256
+rear, mid, nose = centre line
+if rear − mid < 0 or mid − nose > 0:  p = −arctan((rear − nose) / (front + rear))
+else: p = −arctan(|mid − nose| < |rear − mid| ? (mid − nose)/front : (rear − mid)/rear)
+speed += p·ticks >> 8                                                  # downhill speeds up, uphill slows
+pitch target = p + obj+0x800 + dip(+0x7ec)
+roll, pitch = (old + target) / 2, the short way round
+```
+
+`arctan` @ 10083170 returns angle units in ±0x5a0 from two tables built by `InitArctan` @ 10083050 (below 1:
+`atan(i/1000)`; above: `atan(1 + i)` by whole units; 0x5a0 past the table; the table constants are INFERRED).
+Positive pitch is nose down.
+
+In the air (`PositionAirborneUnit` @ 10082620): the nose tips by 16·ticks, down when moving forward until 0x5a0,
+up otherwise until −0x5a0; the flying helicopter takes pitch = speed and roll 0. Sinking raises the pitch by
+4·ticks to 0x5a0 (§2.8).
+
+Port (`driving.rs` `position_unit`, `box_heights`): as above, with ticks = 1. The `+0x7fc`/`+0x800` terms are
+unknown and taken as 0, and the steering lean is drawn separately rather than added to the roll. The body roll
+and pitch are drawn on the vehicle model.
 
 ### 2.11 Vehicle ↔ vehicle, people, scenery
 
@@ -483,7 +529,7 @@ Steering target `+0x2e6/+0x2ea` per state:
 
 | State | Target |
 |---|---|
-| 3 | traffic lane choice `FUN_000a143e` (square centres, junction picks) |
+| 3 | traffic lane choice `FUN_000a143e` (square centres, junction picks). The next square is picked once the car is within r of the target centre on both axes: Amiga `r = max(5·speed²/yaw, front)`, **Mac** (`MoveUnit` @ 10081080) `r = max(speed·1000/yaw, front)` (front = `+0x48c8`; equal at speed 200), so fast traffic no longer re-targets squares ahead. The port follows the Mac (`traffic.rs`). CONFIRMED. |
 | 8 / 10 | route node `node.xy << 3` (combat_police.md §1, §2.2) |
 | 9 / 11 | the target object (`+0x41e`); police lead it by `v·(5−aggr)·3` |
 | 0x0f / 0x15 | the script point, written once by trigger types 0x17 / 0x32 / 0x44. For a **police car** (not a van) state 0x15 (and 0x14) is also in the pursuit-selection list (combat_police.md §2.2), so the car leaves the order at once: state 3 below wanted 3, state 10 from 3. State 0x0f is excluded. (68k ~124171, CONFIRMED.) |
@@ -551,7 +597,9 @@ throttle if speed < −ticks·accel. "Honk" is the horn/fire input `_DAT_0034c3b
 (`+0x491a`). On the tank it fires the cannon instead (`FUN_000e2a50`), so a stuck AI tank shoots.
 
 Anti-spin: below skill 81 the driver does not steer while the J-turn latch `+0x3c1` is set or while braking;
-from 81 it only drops steering that fights the current yaw rate during a J-turn.
+from 81 it only drops steering that fights the current yaw rate during a J-turn. The **Mac** (`do_Other`
+@ 10146280) drops the "or while braking" (`throttle == 1`) part, so low-skill drivers steer while braking or
+reversing; the port follows the Mac (`vehicle_ai.rs` `controller`). CONFIRMED.
 
 Last, the script speed cap: `if speed > +0x386: speed = +0x386` (default 1000000; `Actor_SetMaxSpeed`). The
 helicopter (`+0x4928`) never honks; a flying model (`+0x492a`) gets no input while `+0x338` is 0.

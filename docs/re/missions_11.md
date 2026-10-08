@@ -255,6 +255,8 @@ within range of the block). Block centre B = (0x28400,0x38400) = (80,112), floor
         for x = 78..82: for y = 110..113:                   // 5x4 squares, loop vars reuse 0x2fba08/0x2fb150
             if Random(2) == 0:
                 Explosion(x*0x800+Random(0x800), y*0x800+Random(0x800), 17000+Random(1500), 0, 3000)
+                // drawn last argument first: z, y, x (68k 0xc4d9c..0xc4dc4, Mac 10137f88;
+                // OS4 draws x, y, z). CONFIRMED
             SetCube(x,y,1, 0x200,0x200, 0,0,0)              // remove cube level 1 (the block)
         SetFaceTop(sx,sy,0, 1, 0x1dd, 1) for (78..83,114) and (83,110..113)   // retexture surrounding ground [INFERRED rubble]
         KA(); D(2, 9 "Excellent. Here's the dosh."); WIN(220000)

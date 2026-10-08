@@ -52,11 +52,11 @@
 //! saturated channels, gas pure green, dirt its colours, all alpha = max),
 //! tables 5-8 ONE/ONE with a red / amber / green / blue vertex colour. Lens
 //! flares are never occlusion-tested there; rain streaks and splashes are
-//! white lines / points at alpha 0.4.
+//! white lines / points blended (7, 8) at alpha 0.4.
 
 use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, view_layer};
 use crate::data::GameData;
-use crate::sim::Rng;
+use crate::sim::VisualRng;
 use crate::world::{City, SQUARE, to_render, z_of_h};
 use std::collections::HashMap;
 use bevy::{
@@ -88,13 +88,14 @@ const BUBBLE_SURFACE_Z: i32 = 23000;
 /// The original projects effects with depth `z + camH·16 − 256`, i.e. as if
 /// 16 h-units nearer the camera; in render units.
 const NEARER: f32 = crate::world::OBJECT_LIFT;
-/// Weather and snow-mark depth: the ground plane of the weather records
-/// (`0x57e4`, 22500); rain splashes start at `0x5780`.
-const WEATHER_GROUND_Z: i32 = 0x57e4;
+/// Snow lands at street level: a flake deeper than this is removed and
+/// leaves its mark there (Mac `UpdateEffects` @ 100aa1f0: `0x4dc0`, 19904;
+/// OS4 `FUN_010386e8` let flakes fall to `Z_LIMIT` and marked at 0x57e4,
+/// below the streets; rendering D1).
+const SNOW_GROUND_Z: i32 = 0x4dc0;
+/// Rain splashes start at `0x5780`.
 const SPLASH_Z: i32 = 0x5780;
-/// Base screen of the original (320x256): weather wrap rectangle and flare
-/// sizes are in its pixels.
-const SCREEN_W: i64 = 320;
+/// Base screen of the original (320x256): flare sizes are in its pixels.
 const SCREEN_H: i64 = 256;
 /// `AddFlare` keeps at most this many flares per frame.
 const MAX_FLARES: usize = 199;
@@ -150,43 +151,36 @@ impl Flares {
 pub struct EffectsDraw;
 
 /// The game camera as the effect updater sees it: position in object units,
-/// `camH` (h-units) and whether the view rotates.
+/// `camH` (h-units) and the half-size of the drawn area in squares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct View {
     x: i32,
     y: i32,
     h: i32,
-    rotating: bool,
+    half: (i32, i32),
 }
 
 impl View {
+    /// Weather only runs in single player, so the one-view square range.
     fn of(cam: &GameCam, rotating: bool) -> View {
         View {
             x: (cam.x >> 5) as i32,
             y: (cam.y >> 5) as i32,
             h: cam.h,
-            rotating,
+            half: cam.visible_squares(1, rotating),
         }
     }
 
-    /// The view rectangle `[x0, x1] × [y0, y1]` in object units
-    /// (`FUN_010386e8`): the screen projected at depth `camH·16 + 0x2af2`
-    /// plus one square, or in the rotating view a fixed ±0xf00000 >> 9 =
-    /// ±0x7800 (15 squares) around the camera.
+    /// The view rectangle `[x0, x1] × [y0, y1]` in object units: the drawn
+    /// half-size plus one square either side of the camera, `cx·(camH +
+    /// 1500) / (fx << 12) + 1` squares (`GameCam::visible_squares`, also
+    /// the rotating and split-screen variants). Mac `UpdateEffects` @
+    /// 100aa1f0; the OS4 `FUN_010386e8` scaled `(camH·16 + 0x2af2)·W` with
+    /// the screen width instead, so its rectangle grew with the resolution
+    /// (rendering D2).
     fn rect(&self) -> (i32, i32, i32, i32) {
-        let (cx, cy) = (self.x as i64 * 512, self.y as i64 * 512);
-        let (hw, hh) = if self.rotating {
-            (0xf00000, 0xf00000)
-        } else {
-            let d = self.h as i64 * 16 + 0x2af2;
-            (d * SCREEN_W + 0x800, d * SCREEN_H + 0x800)
-        };
-        (
-            ((cx - hw) >> 9) as i32,
-            ((cx + hw) >> 9) as i32,
-            ((cy - hh) >> 9) as i32,
-            ((cy + hh) >> 9) as i32,
-        )
+        let (hw, hh) = (self.half.0 * 0x800, self.half.1 * 0x800);
+        (self.x - hw, self.x + hw, self.y - hh, self.y + hh)
     }
 }
 
@@ -267,9 +261,9 @@ impl Effect {
                 self.vel.z += GRAVITY;
                 self.size -= 3;
                 if rand(5) < 1 {
-                    let frame = rand(4) as u8;
-                    let pos = self.pos + jitter(rand, 50);
                     let vel = jitter(rand, 10);
+                    let pos = self.pos + jitter(rand, 50);
+                    let frame = rand(4) as u8;
                     return Some(Effect::new(4, Tex::Flame, frame, pos, vel, 400, Blend::Add));
                 }
             }
@@ -302,11 +296,11 @@ impl Effect {
             15 => {
                 self.size -= 2;
                 if rand(5) < 1 {
-                    let frame = rand(4) as u8;
-                    let pos = self.pos + jitter(rand, 50);
-                    let vx = rand(20) - 10;
-                    let vy = rand(20) - 10;
                     let vz = rand(100) - 650;
+                    let vy = rand(20) - 10;
+                    let vx = rand(20) - 10;
+                    let pos = self.pos + jitter(rand, 50);
+                    let frame = rand(4) as u8;
                     let vel = IVec3::new(vx, vy, vz);
                     return Some(Effect::new(
                         4,
@@ -331,9 +325,9 @@ impl Effect {
         if !(100..=250).contains(&self.size) || rand(2) >= 1 {
             return None;
         }
-        let pos = self.pos + jitter(rand, 100);
-        let vel = self.vel + jitter(rand, 10);
         let size = base + rand(range);
+        let vel = self.vel + jitter(rand, 10);
+        let pos = self.pos + jitter(rand, 100);
         Some(Effect::new(
             1,
             Tex::Dust2,
@@ -364,17 +358,22 @@ impl Effect {
     fn expired(&self) -> bool {
         if self.kind == 5 {
             self.pos.z <= BUBBLE_SURFACE_Z
+        } else if self.kind == 12 && self.pos.z > SNOW_GROUND_Z {
+            true
         } else {
             self.pos.z > Z_LIMIT || self.size < 1
         }
     }
 }
 
-/// `rand(2h) − h` on each axis, drawn x, y, z.
+/// `rand(2h) − h` on each axis, drawn z, y, x: the original evaluates
+/// `AddEffect`'s arguments last first (Mac `UpdateEffects` @ 100aa1f0 and
+/// the 68k build; only OS4 `FUN_010386e8` draws x, y, z), so every spawn in
+/// the updater draws its last argument first.
 fn jitter(rand: &mut impl FnMut(i32) -> i32, half: i32) -> IVec3 {
-    let x = rand(2 * half) - half;
-    let y = rand(2 * half) - half;
     let z = rand(2 * half) - half;
+    let y = rand(2 * half) - half;
+    let x = rand(2 * half) - half;
     IVec3::new(x, y, z)
 }
 
@@ -486,11 +485,13 @@ impl Effects {
         }
     }
 
-    /// A snowflake or raindrop reached the ground (`FUN_010386e8`): snow
-    /// leaves a mark (type 8 Dust, additive, list 0) and a new flake starts
-    /// at the camera; rain starts a new drop and splashes 3 times (type
-    /// 14). New records go to list 3. Values are the call-site ones, /3 on
-    /// entry.
+    /// A snowflake or raindrop reached the ground (`UpdateEffects` @
+    /// 100aa1f0, OS4 `FUN_010386e8`): snow leaves a mark (type 8 Dust,
+    /// additive, list 0) and a new flake starts at the camera; rain starts a
+    /// new drop and splashes 3 times (type 14). New records go to list 3.
+    /// Values are the call-site ones, /3 on entry; the arguments are drawn
+    /// last first, as the Mac and 68k builds evaluate them (OS4: first to
+    /// last).
     fn respawn_weather(
         &mut self,
         e: &Effect,
@@ -502,19 +503,22 @@ impl Effects {
         let top = 0x100 - v.h * 16;
         match e.kind {
             12 => {
-                // The original puts the mark at z 22500 and draws list 0
-                // after the ground tops; here it sits on the ground.
+                // The Mac puts the mark at street level (z 19904) and draws
+                // list 0 after the ground tops; here it sits on the ground.
                 let size = rand(50) + 200;
-                let z = ground(e.pos.x, e.pos.y).unwrap_or(WEATHER_GROUND_Z);
+                let z = ground(e.pos.x, e.pos.y).unwrap_or(SNOW_GROUND_Z);
                 let pos = IVec3::new(e.pos.x, e.pos.y, z);
                 self.push(
                     0,
                     Effect::new(8, Tex::Dust, 0, pos, IVec3::ZERO, size, Blend::Add),
                 );
-                let x = rand(0x10000) + v.x - 0x8000;
-                let y = rand(0xa000) + v.y - 0x5000;
-                let vel = IVec3::new(rand(20) + 10, rand(20) - 10, rand(100) + 200);
                 let size = rand(50) + 100;
+                let vz = rand(100) + 200;
+                let vy = rand(20) - 10;
+                let vx = rand(20) + 10;
+                let vel = IVec3::new(vx, vy, vz);
+                let y = rand(0xa000) + v.y - 0x5000;
+                let x = rand(0x10000) + v.x - 0x8000;
                 let flake = Effect::new(
                     12,
                     Tex::Dust,
@@ -527,13 +531,19 @@ impl Effects {
                 self.push(3, flake);
             }
             13 => {
-                let x = rand(0x8000) + v.x - 0x4000;
+                let vz = rand(200) + 1000;
+                let vy = rand(20) - 10;
+                let vx = rand(30) + 50;
                 let y = rand(0x5000) + v.y - 0x2800;
-                let vel = IVec3::new(rand(30) + 50, rand(20) - 10, rand(200) + 1000);
+                let x = rand(0x8000) + v.x - 0x4000;
+                let vel = IVec3::new(vx, vy, vz);
                 let drop = Effect::new(13, Tex::Dust, 0, IVec3::new(x, y, top), vel, 1, Blend::Add);
                 self.push(3, drop);
                 for _ in 0..3 {
-                    let vel = IVec3::new(rand(100) - 50, rand(100) - 50, -200 - rand(200));
+                    let vz = -200 - rand(200);
+                    let vy = rand(100) - 50;
+                    let vx = rand(100) - 50;
+                    let vel = IVec3::new(vx, vy, vz);
                     let pos = IVec3::new(e.pos.x, e.pos.y, SPLASH_Z);
                     self.push(3, Effect::new(14, Tex::Dust, 0, pos, vel, 1, Blend::Add));
                 }
@@ -562,21 +572,26 @@ impl Plugin for EffectsPlugin {
                 },
             )
             .configure_sets(PostUpdate, EffectsDraw.after(TransformSystems::Propagate))
-            .add_systems(PostUpdate, (sync_mode, build_meshes).chain().in_set(EffectsDraw));
+            .add_systems(PostUpdate, (sync_blood, sync_mode, build_meshes).chain().in_set(EffectsDraw));
     }
 }
 
+/// One tick of the effect lists. Their random numbers come from the
+/// cosmetic generator (`random3` in Mac `UpdateEffects` @ 100aa1f0), so
+/// effects never move the game's sequence.
 fn update_effects(
     mut effects: ResMut<Effects>,
     mut flash: ResMut<ScreenFlash>,
-    rng: Option<ResMut<Rng>>,
-    cam: Res<GameCam>,
+    rng: Option<ResMut<VisualRng>>,
+    eyes: Res<crate::camera::ViewEyes>,
     rotating: Res<RotatingView>,
     city: Option<Res<City>>,
 ) {
     // The flash decays x3/4 per tick before anything adds to it.
     flash.0 = flash.0 * 3 >> 2;
     let Some(mut rng) = rng else { return };
+    // Wrapped around view 0's eye (rotating view, replay TV camera).
+    let cam = eyes.cams.first().copied().unwrap_or_default();
     effects.view = Some(View::of(&cam, rotating.0));
     if !effects.is_empty() {
         // Top of the ground cube under (x, y), as an object z.
@@ -687,6 +702,8 @@ const GHOSTS: [(usize, f32, f32); 9] = [
 /// Rain streak and splash colour: palette colour 0x67 added through table 0
 /// (`DAT_0114c440 + 0x6700`).
 const RAIN_COLOUR: usize = 0x67;
+/// Hardware rain: white lines and points blended at this alpha.
+const RAIN_HW_ALPHA: f32 = 0.4;
 
 /// Render batch of a sprite: one of the blends, or additive without depth
 /// test (lens flares, weather, the screen flash: the original draws flares
@@ -789,10 +806,11 @@ fn hw_format(name: &str) -> HwFormat {
 /// coverage) and 0 for texel 0. With `hardware`, the W3D conversions of
 /// [`HwFormat`] (5-bit channels for the A1R5G5B5 ones), the smoke tile, and
 /// bilinear filtering.
-fn build_atlas(data: &GameData, hardware: bool) -> Image {
+fn build_atlas(data: &GameData, hardware: bool, blood: BloodSlot) -> Image {
     let mut rgba = vec![0u8; ATLAS_W * ATLAS_H * 4];
     let files = FILES.iter().copied().chain(std::iter::once("Dust"));
     for (i, name) in files.enumerate() {
+        let (name, mac) = blood.file(i, name, data);
         let format = match (hardware, i) {
             (false, _) => None,
             (true, SMOKE_HW_TILE) => Some(HwFormat::Dark),
@@ -806,7 +824,7 @@ fn build_atlas(data: &GameData, hardware: bool) -> Image {
             }
             continue;
         }
-        let texels = match data.read(format!("EffectTextures/{name}")) {
+        let texels = match data.read_variant(format!("EffectTextures/{name}"), mac) {
             Ok(b) if b.len() >= TILE * TILE => b,
             _ => {
                 warn!("missing effect texture {name}");
@@ -919,6 +937,10 @@ impl Material for EffectMaterial {
             // W3D_SetBlendMode(SRC_ALPHA, ONE_MINUS_SRC_ALPHA) for tables 1
             // and 3, ONE/ONE for the others.
             Pass::Blend(Blend::Subtract | Blend::Tint) if hardware => alpha_blend,
+            // Flares and snow ONE/ONE, rain (7, 8) at alpha 0.4: the shader
+            // premultiplies, so ONE / ONE_MINUS_SRC_ALPHA does both (additive
+            // sprites write alpha 0).
+            Pass::Flare if hardware => component(one, BlendFactor::OneMinusSrcAlpha, add),
             _ if hardware => component(one, one, add),
             Pass::Blend(Blend::Add) | Pass::Flare => component(one, one, add),
             Pass::Blend(Blend::Subtract) => component(one, one, BlendOperation::ReverseSubtract),
@@ -936,6 +958,9 @@ impl Material for EffectMaterial {
         if let Some(fragment) = descriptor.fragment.as_mut() {
             if hardware {
                 fragment.shader_defs.push("EFFECT_HARDWARE".into());
+                if pass == Pass::Flare {
+                    fragment.shader_defs.push("EFFECT_HW_OVERLAY".into());
+                }
             } else if pass == Pass::Blend(Blend::Average) {
                 fragment.shader_defs.push("EFFECT_AVERAGE".into());
             }
@@ -991,8 +1016,12 @@ fn setup(
     data: Res<GameData>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<EffectMaterial>>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    language: Option<Res<crate::hud::Language>>,
 ) {
-    let atlas = images.add(build_atlas(&data, false));
+    let blood = BloodSlot::new(settings.as_deref(), language.as_deref());
+    commands.insert_resource(blood);
+    let atlas = images.add(build_atlas(&data, false, blood));
     let mut handles = Vec::new();
     for layer in 0..LAYERS {
         for pass in Pass::ORDER {
@@ -1008,11 +1037,75 @@ fn setup(
     commands.insert_resource(BatchMaterials(handles));
     commands.insert_resource(Atlases {
         software: atlas,
-        hardware: images.add(build_atlas(&data, true)),
+        hardware: images.add(build_atlas(&data, true, blood)),
     });
     let rgb = &data.palette[RAIN_COLOUR * 3..RAIN_COLOUR * 3 + 3];
     let c = Color::srgb_u8(rgb[0], rgb[1], rgb[2]).to_linear();
     commands.insert_resource(RainColour([c.red, c.green, c.blue, 1.0]));
+}
+
+/// What the blood slot (atlas tiles `BLOOD_TILE` and its night
+/// replacement `BLOOD_DARK_TILE`) shows. `mac` (`Variants::blood`): the Mac
+/// `Blood`, smaller and darker, day and night: the Mac ships no
+/// `Blood.dark` and `InitAll` @ 100632a0 loads only `Blood`. Otherwise (or
+/// without Mac data) the Amiga `Blood` with `Blood.dark` at night
+/// (`FUN_01035250`). `gas` (`Variants::gas` with the language Deutsch):
+/// `Gas` instead, day and night, as the Mac `InitAll` and `DoSetLanguage`
+/// @ 1008c2b0 load it for German (Amiga `FUN_0104feb0` always loads
+/// `Blood`).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BloodSlot {
+    pub mac: bool,
+    pub gas: bool,
+}
+
+impl BloodSlot {
+    fn new(settings: Option<&crate::frontend::progress::Settings>, language: Option<&crate::hud::Language>) -> Self {
+        let variants = settings.map(|s| s.variants).unwrap_or_default();
+        BloodSlot {
+            mac: variants.blood,
+            gas: variants.gas && language.is_some_and(|l| crate::data::same_language(&l.0, "Deutsch")),
+        }
+    }
+
+    /// The file for atlas tile `tile` (listed as `name`), and whether to
+    /// read the Mac copy.
+    fn file(self, tile: usize, name: &'static str, data: &GameData) -> (&'static str, bool) {
+        match tile {
+            BLOOD_TILE | BLOOD_DARK_TILE if self.gas => ("Gas", false),
+            BLOOD_TILE => ("Blood", self.mac),
+            BLOOD_DARK_TILE if self.mac && data.mac_path("EffectTextures/Blood").is_some() => {
+                ("Blood", true)
+            }
+            _ => (name, false),
+        }
+    }
+}
+
+/// Rebuild the atlases when the blood or gas setting or the language
+/// changes (the Mac `DoSetLanguage` reloads the slot).
+fn sync_blood(
+    data: Res<GameData>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    language: Option<Res<crate::hud::Language>>,
+    current: Option<ResMut<BloodSlot>>,
+    atlases: Option<Res<Atlases>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let (Some(mut current), Some(atlases)) = (current, atlases) else { return };
+    if !settings.as_ref().is_some_and(|s| s.is_changed()) && !language.as_ref().is_some_and(|l| l.is_changed()) {
+        return;
+    }
+    let blood = BloodSlot::new(settings.as_deref(), language.as_deref());
+    if blood == *current {
+        return;
+    }
+    *current = blood;
+    for (handle, hardware) in [(&atlases.software, false), (&atlases.hardware, true)] {
+        if let Some(mut image) = images.get_mut(handle) {
+            *image = build_atlas(&data, hardware, blood);
+        }
+    }
 }
 
 /// Follow the renderer (blend modes and atlas).
@@ -1295,11 +1388,13 @@ fn build_meshes(
     let night = city.as_ref().is_some_and(|c| c.map.night);
     let hardware = render_mode.hardware();
     let mut sources = std::mem::take(&mut flares.0);
-    // Warp3D: white at alpha 0.4 (`FUN_010360fc` DrawLine / DrawPoint
-    // under (7, 8)); approximated here in the additive batch as 0.4 white.
+    // Warp3D: white at alpha 0.4 under W3D_SetBlendMode(7, 8), i.e.
+    // SRC_ALPHA / ONE_MINUS_SRC_ALPHA (OS4 `FUN_010360fc` DrawLine /
+    // DrawPoint; Mac `UpdateEffects` @ 100aa1f0 with the colour from the
+    // float pool, 0.4). A vertex alpha below 1 marks it for the hardware
+    // overlay batch, which blends it instead of adding.
     let rain = if hardware {
-        let c = Color::srgb(0.4, 0.4, 0.4).to_linear();
-        [c.red, c.green, c.blue, 1.0]
+        [1.0, 1.0, 1.0, RAIN_HW_ALPHA]
     } else {
         rain.map_or(WHITE, |r| r.0)
     };
@@ -1666,7 +1761,7 @@ mod tests {
             x: 100_000,
             y: 100_000,
             h: 1000,
-            rotating: false,
+            half: (7, 6),
         });
         let (x0, x1, _, _) = fx.view.unwrap().rect();
         // A drop just past the right edge wraps to the left side.
@@ -1693,12 +1788,13 @@ mod tests {
             x: 0,
             y: 0,
             h: 1000,
-            rotating: false,
+            half: (7, 6),
         });
+        // It dies at street level (z > 0x4dc0), not at 24000.
         fx.add(
             12,
             Tex::Dust,
-            Vec3::new(0.0, 0.0, 23_990.0),
+            Vec3::new(0.0, 0.0, 19_900.0),
             Vec3::new(0.0, 0.0, 300.0),
             120.0,
             3,

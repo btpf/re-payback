@@ -17,6 +17,11 @@
 //! mode 0x14 (`CD.obj`) is averaged with the background (Alpha.256 table
 //! 4) in software and added in hardware.
 //!
+//! The Mac release's models are drawn where adopted (`prefer_mac`; the
+//! simulation's extents stay the Amiga ones), with open doors
+//! (`vehicle_doors`) and shadows (`shadows`); docs/re/rendering.md §10
+//! "Mac models, face modes, doors and shadows".
+//!
 //! Also: traffic lights, crossing beacons and alarm boxes that change model
 //! with the light phase, spinning pickups, chimney smoke, lens-flare sources
 //! and the burnt / dented variants of vehicles.
@@ -29,7 +34,9 @@
 //! CloudsReflect overlay of mode 0x11 faces is added ONE/ONE instead of
 //! table 9.
 
-use crate::camera::{ExtraView, GameCam, GameCamera, RotatingView, ViewCams};
+mod shadows;
+
+use crate::camera::{ExtraView, GameCamera, RotatingView, ViewCams};
 use crate::data::GameData;
 use crate::effects::{Blend, Effects, EffectsDraw, FlareSource, Flares, FxMode, Tex};
 use crate::level::{AppState, LevelEntity};
@@ -51,6 +58,49 @@ use bevy::{
 };
 use payback_formats::{IndexedImage, Obj, map::MAP_SIZE, obj::Vertex};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Mirrors of `Settings::variants.scenery` / `.menu_props` for the object
+/// loader, which has no world access (kept in step by [`follow_settings`]).
+static MAC_SCENERY: AtomicBool = AtomicBool::new(true);
+static MAC_MENU_PROPS: AtomicBool = AtomicBool::new(true);
+
+/// Set which `.Obj` set the scenery and the menu props come from (true =
+/// the Mac's). Takes effect for models loaded afterwards: the scenery at
+/// the next level load.
+pub fn set_model_variants(scenery: bool, menu_props: bool) {
+    MAC_SCENERY.store(scenery, Ordering::Relaxed);
+    MAC_MENU_PROPS.store(menu_props, Ordering::Relaxed);
+}
+
+/// Whether `Objects/<path>` (lower case) is taken from the Mac data when
+/// it has the file (docs/re/mac_version.md, decisions): the game models
+/// (people, vehicles, doors, weapons) always (decision 4), the scenery
+/// (shorter phones, traffic lights and tree crowns, the `tanne` fir) and
+/// the menu props (`Options/*`) per setting.
+fn prefer_mac(path: &str) -> bool {
+    if path.starts_with("scenery/") {
+        MAC_SCENERY.load(Ordering::Relaxed)
+    } else if path.starts_with("options/") {
+        MAC_MENU_PROPS.load(Ordering::Relaxed)
+    } else {
+        true
+    }
+}
+
+/// Y of the feet of an Amiga people model (the model's max Y; Amiga
+/// people have their origin at the hips). The Mac release re-based every
+/// `People/*.Obj` by exactly these amounts so the feet sit at Y = 0
+/// (vertex diff, `analysis/mac/scratch_gameplay/people.md` M3); its
+/// `DrawObject` @ 10075880 kept the Amiga people transform. Rendering
+/// either set with this shift gives the Mac picture.
+fn amiga_foot_y(path: &str) -> i32 {
+    match path {
+        "people/malenormal.obj" => 90,
+        "people/pedmale4.obj" => 100,
+        _ => 92,
+    }
+}
 
 /// Scenery models by map scenery id (1-based; 0 = none). Order recovered from
 /// the object loader (68k `FUN_000d7874`, table at 0x348000).
@@ -172,8 +222,9 @@ fn shine_kind(mode: i32) -> Option<u32> {
 }
 
 /// How a model's faces are textured.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Skin {
+    #[default]
     Normal,
     /// Burning or burnt-out (`obj+0x33c` burn timer >= 1): mode-1 faces get
     /// the `burnt` texture at fixed UVs, mode-2 faces at their own UVs, and
@@ -197,6 +248,10 @@ pub struct ObjectLibrary {
     /// `+0xff4 = DAT_0114c908 + 0x40000` before `FUN_011113e0`); Warp3D
     /// adds them ONE/ONE (rendering.md §11.6). See [`half_material`].
     half: Handle<ObjectMaterial>,
+    /// Mode 3 and the Genlock shine faces: texel 0 cut out (software
+    /// `Genlock`), blended by the filtered key on the card. See
+    /// [`keyed_material`].
+    keyed: Handle<ObjectMaterial>,
     /// Night map: vehicles get the `Lights` headlight polygon.
     night: bool,
     /// The atlas holds the hardware conversion of the textures.
@@ -213,6 +268,7 @@ pub struct ObjectLibrary {
 struct Overlay {
     additive: Option<Handle<Mesh>>,
     half: Option<Handle<Mesh>>,
+    keyed: Option<Handle<Mesh>>,
     lines: Option<Handle<Mesh>>,
 }
 
@@ -250,6 +306,7 @@ struct Parts {
     main: Mesh,
     additive: Option<Mesh>,
     half: Option<Mesh>,
+    keyed: Option<Mesh>,
     lines: Option<Mesh>,
 }
 
@@ -259,6 +316,14 @@ fn half_material(m: &mut ObjectMaterial, hardware: bool) {
     let a = if hardware { 1.0 } else { 0.5 };
     m.base.base_color = Color::srgba(1.0, 1.0, 1.0, a);
     m.base.alpha_mode = if hardware { AlphaMode::Add } else { AlphaMode::Blend };
+}
+
+/// The colour-keyed faces' blend: a hard cut at texel 0 in software
+/// (`Genlock`); in hardware `W3D_SetBlendMode(SRC_ALPHA,
+/// ONE_MINUS_SRC_ALPHA)` with the A1R5G5B5 key bilinear filtered, so the
+/// edges fade (Mac `DrawObject` @ 10075880 mode 3 and Genlock shines).
+fn keyed_material(m: &mut ObjectMaterial, hardware: bool) {
+    m.base.alpha_mode = if hardware { AlphaMode::Blend } else { AlphaMode::Mask(0.5) };
 }
 
 /// The object texture atlas (`ObjectTextures/*`, 256x128 each, file-name
@@ -272,22 +337,19 @@ fn half_material(m: &mut ObjectMaterial, hardware: bool) {
 fn build_atlas(data: &GameData, night: bool, hardware: bool) -> (Image, HashMap<String, u32>) {
     let mut rgba = vec![0u8; (ATLAS_W * ATLAS_FULL_H * 4) as usize];
     let mut slots = HashMap::new();
-    let mut entries: Vec<_> = std::fs::read_dir(data.root.join("ObjectTextures"))
-        .map(|d| {
-            d.filter_map(|e| e.ok())
-                .filter(|e| e.path().is_file())
-                .collect()
-        })
-        .unwrap_or_default();
-    entries.sort_by_key(|e| e.file_name());
+    // The Amiga set plus the Mac-only textures (the PC, keyboard, monitor,
+    // disk and movie-reel props and the `tanne` fir of the Mac `Tree.Obj`);
+    // the names both ship are byte-identical.
+    let mut entries = data.list_dir("ObjectTextures", true, false);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut night_remap: Option<[u8; 256]> = None;
-    for entry in entries {
+    for (file, entry) in entries {
         let slot = slots.len() as u32;
         if slot >= PALETTE_SLOT {
             warn!("object texture atlas full");
             break;
         }
-        let name = entry.file_name().to_string_lossy().to_lowercase();
+        let name = file.to_lowercase();
         // Night (rendering.md §4, OS4 `FUN_010bf310`): Shine.* (not the
         // cups) and CloudsReflect swap in their `.dark` files; a few
         // textures are left alone; the rest are darkened.
@@ -296,18 +358,16 @@ fn build_atlas(data: &GameData, night: bool, hardware: bool) -> (Image, HashMap<
                 || name == "cloudsreflect")
             && !name.ends_with(".dark");
         let path = if swap {
-            entry
-                .path()
-                .with_file_name(format!("{}.dark", entry.file_name().to_string_lossy()))
+            entry.with_file_name(format!("{file}.dark"))
         } else {
-            entry.path()
+            entry.clone()
         };
         let read = |p: &std::path::Path| {
             std::fs::read(p)
                 .map_err(|e| e.to_string())
                 .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
         };
-        let Ok(mut img) = read(&path).or_else(|_| read(&entry.path())) else {
+        let Ok(mut img) = read(&path).or_else(|_| read(&entry)) else {
             continue;
         };
         // Everything else through T1[c][0x67] (colour 0 unchanged); on the
@@ -379,6 +439,13 @@ fn build_atlas(data: &GameData, night: bool, hardware: bool) -> (Image, HashMap<
     (atlas, slots)
 }
 
+/// Keep the loader's model-set switches in step with the settings.
+fn follow_settings(settings: Option<Res<crate::frontend::progress::Settings>>) {
+    if let Some(s) = settings.filter(|s| s.is_changed()) {
+        set_model_variants(s.variants.scenery, s.variants.menu_props);
+    }
+}
+
 /// Follow the renderer: rebuild the object atlas and set the shader flag.
 fn sync_mode(
     mode: Res<crate::render_mode::RenderMode>,
@@ -395,11 +462,19 @@ fn sync_mode(
     library.hardware = hardware;
     let (atlas, _) = build_atlas(&data, library.night, hardware);
     let flag = if hardware { 1.0 } else { 0.0 };
-    for handle in [library.material.clone(), library.additive.clone(), library.half.clone()] {
+    for handle in [
+        library.material.clone(),
+        library.additive.clone(),
+        library.half.clone(),
+        library.keyed.clone(),
+    ] {
         let Some(mut m) = materials.get_mut(&handle) else { continue };
         m.extension.params.x = flag;
         if handle == library.half {
             half_material(&mut *m, hardware);
+        }
+        if handle == library.keyed {
+            keyed_material(&mut *m, hardware);
         }
         if let Some(image) = m.base.base_color_texture.clone()
             && let Some(mut slot) = images.get_mut(&image)
@@ -458,6 +533,12 @@ impl ObjectLibrary {
             },
             extension: extension.clone(),
         });
+        let mut keyed = ExtendedMaterial {
+            base: base.clone(),
+            extension: extension.clone(),
+        };
+        keyed_material(&mut keyed, hardware);
+        let keyed = materials.add(keyed);
         let mut half = ExtendedMaterial { base, extension };
         half_material(&mut half, hardware);
         let half = materials.add(half);
@@ -467,6 +548,7 @@ impl ObjectLibrary {
             material,
             additive,
             half,
+            keyed,
             night,
             hardware,
             overlays: HashMap::new(),
@@ -487,24 +569,41 @@ impl ObjectLibrary {
         if let Some(&i) = self.by_path.get(&key) {
             return i;
         }
-        let parsed = find_case_insensitive(&data.root.join("Objects"), path)
+        let rel = format!("Objects/{path}");
+        let parse = |b: Vec<u8>| match Obj::parse(&b) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                warn!("{path}: {e}");
+                None
+            }
+        };
+        // The Amiga file (or the Mac one for the Mac-only props) and the
+        // Mac file drawn instead of it (`prefer_mac`).
+        let amiga = data.read(&rel).ok().and_then(parse);
+        let mac = data
+            .mac_path(&rel)
+            .filter(|_| prefer_mac(&key))
             .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| match Obj::parse(&b) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    warn!("{path}: {e}");
-                    None
-                }
-            });
-        let index = parsed.map(|obj| {
-            let info = ModelInfo::from_obj(&key, &obj);
-            let parts = self.build_parts(&obj, Skin::Normal, None, &info, |p, _| static_vertex(p));
+            .and_then(parse);
+        let index = amiga.clone().or_else(|| mac.clone()).map(|base| {
+            // The simulation reads the model extents (radius, front and back
+            // extents, ground mean: collisions, doors, AI), so they always
+            // come from the Amiga file: the Mac re-pivoted people and four
+            // cars, which would move them and break replays.
+            let info = ModelInfo::from_obj(&key, &base);
+            let from_mac = mac.is_some();
+            let obj = mac.unwrap_or(base);
+            let shape = ModelInfo::from_obj(&key, &obj);
+            let foot = if key.starts_with("people/") && !from_mac { amiga_foot_y(&key) } else { 0 };
+            let parts = self.build_parts(&obj, Skin::Normal, None, &shape, |p, _| static_vertex(p));
             let mesh = self.add_parts(meshes, parts);
             let flares = flare_faces(&obj);
             self.models.push(LoadedModel {
                 obj,
                 mesh,
                 info,
+                shape,
+                foot,
                 flares,
                 variants: HashMap::new(),
             });
@@ -537,6 +636,13 @@ impl ObjectLibrary {
         &mut self.models[i]
     }
 
+    /// Make the next [`ObjectLibrary::load`] of the paths starting with
+    /// `prefix` read the file again (the menu props after the
+    /// Mac/Amiga switch). Indices handed out before stay valid.
+    pub fn forget(&mut self, prefix: &str) {
+        self.by_path.retain(|k, _| !k.starts_with(prefix));
+    }
+
     /// Index of an already loaded model.
     pub fn loaded(&self, path: &str) -> Option<usize> {
         self.by_path.get(&path.to_lowercase()).copied().flatten()
@@ -562,7 +668,7 @@ impl ObjectLibrary {
             return h.clone();
         }
         let obj = &self.models[i].obj;
-        let info = &self.models[i].info;
+        let info = &self.models[i].shape;
         let offsets: Vec<[f32; 3]> = (0..obj.vertices.len())
             .map(|n| match dent {
                 Some(rng) => {
@@ -590,7 +696,18 @@ impl ObjectLibrary {
     /// object-local: +X left, +Y up, +Z forward). Vertices are emitted per
     /// face corner, in face order.
     pub fn build_mesh(&self, obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Mesh {
-        self.build_mesh_skin(obj, Skin::Normal, None, |v, _| place(v))
+        self.build_person_mesh(obj, 0, place)
+    }
+
+    /// [`ObjectLibrary::build_mesh`] for player `sand`'s person (0 = red,
+    /// the model's own; see `SANDS`).
+    pub fn build_person_mesh(&self, obj: &Obj, sand: usize, place: impl Fn(&Vertex) -> [f32; 3]) -> Mesh {
+        let look = Look {
+            sand,
+            keep_keyed: true,
+            ..Look::default()
+        };
+        self.build_parts_with(obj, look, None, |v, _| place(v)).main
     }
 
     /// A menu model (`frontend::model`): the main mesh and the blended
@@ -602,10 +719,11 @@ impl ObjectLibrary {
         obj: &Obj,
         place: impl Fn(&Vertex) -> [f32; 3],
     ) -> (Mesh, Vec<(Mesh, Handle<ObjectMaterial>)>) {
-        let parts = self.build_parts_with(obj, Skin::Normal, None, None, |v, _| place(v));
+        let parts = self.build_parts_with(obj, Look::default(), None, |v, _| place(v));
         let overlays = [
             (parts.additive, &self.additive),
             (parts.half, &self.half),
+            (parts.keyed, &self.keyed),
             (parts.lines, &self.material),
         ]
         .into_iter()
@@ -625,28 +743,20 @@ impl ObjectLibrary {
         ]
     }
 
-    /// [`ObjectLibrary::build_mesh`] with a skin; `place` also gets the
-    /// vertex index. Additive (mode 4) faces and lines (mode 5) are left out
-    /// (degenerate); see [`ObjectLibrary::build_parts`].
-    fn build_mesh_skin(
-        &self,
-        obj: &Obj,
-        skin: Skin,
-        paint: Option<usize>,
-        place: impl Fn(&Vertex, usize) -> [f32; 3],
-    ) -> Mesh {
-        self.build_parts_with(obj, skin, paint, None, place).main
-    }
-
     /// Add a mesh and remember its overlay parts.
     fn add_parts(&mut self, meshes: &mut Assets<Mesh>, parts: Parts) -> Handle<Mesh> {
         let h = meshes.add(parts.main);
         let overlay = Overlay {
             additive: parts.additive.map(|m| meshes.add(m)),
             half: parts.half.map(|m| meshes.add(m)),
+            keyed: parts.keyed.map(|m| meshes.add(m)),
             lines: parts.lines.map(|m| meshes.add(m)),
         };
-        if overlay.additive.is_some() || overlay.half.is_some() || overlay.lines.is_some() {
+        if overlay.additive.is_some()
+            || overlay.half.is_some()
+            || overlay.keyed.is_some()
+            || overlay.lines.is_some()
+        {
             self.overlays.insert(h.id(), overlay);
         }
         h
@@ -666,20 +776,33 @@ impl ObjectLibrary {
         } else {
             None
         };
-        self.build_parts_with(obj, skin, paint, lights, place)
+        let look = Look {
+            skin,
+            paint,
+            scenery: info.path.starts_with("scenery/"),
+            ..Look::default()
+        };
+        self.build_parts_with(obj, look, lights, place)
     }
 
     fn build_parts_with(
         &self,
         obj: &Obj,
-        skin: Skin,
-        paint: Option<usize>,
+        look: Look,
         headlights: Option<(&ModelInfo, u32)>,
         place: impl Fn(&Vertex, usize) -> [f32; 3],
     ) -> Parts {
+        let Look {
+            skin,
+            paint,
+            scenery,
+            sand,
+            keep_keyed,
+        } = look;
         let mut main = Tris::default();
         let mut add = Tris::default();
         let mut halves = Tris::default();
+        let mut keyed_tris = Tris::default();
         let mut lines = Tris::default();
         let burnt = self.slots.get("burnt").copied();
         let reflect = self.slots.get("cloudsreflect").copied();
@@ -697,11 +820,34 @@ impl ObjectLibrary {
                 }
             }
         }
+        let palette_uv = |c: u32| {
+            let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
+            let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
+            [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
+        };
         for (face, side) in face_sides(obj) {
             let p0 = || place(&obj.vertices[face.indices[0]], face.indices[0]);
             let Some(side) = side else {
                 // Not drawn: a degenerate triangle keeps the layout.
                 main.degenerate(p0());
+                // Slot 0 mode 5, whatever its `active` byte: a line between
+                // the first two vertices, colour `param` through 64->256
+                // like mode 1, black when burnt (Mac `DrawObject` @ 10075880:
+                // `DrawLine(…, param)`, burnt pass `DrawLine(…, 0)`).
+                let slot = &face.slots[0];
+                if slot.mode == 5 {
+                    let c = match skin {
+                        Skin::Normal => self.flat_colours[(slot.param & 63) as usize] as u32,
+                        Skin::Burnt => 0,
+                    };
+                    for k in [0, 1] {
+                        let vi = face.indices[k];
+                        lines.positions.push(place(&obj.vertices[vi], vi));
+                        lines.uvs.push(palette_uv(c));
+                        lines.env.push([-1.0; 2]);
+                        lines.normals.push([0.0, 1.0, 0.0]);
+                    }
+                }
                 continue;
             };
             let slot = &face.slots[side];
@@ -710,42 +856,42 @@ impl ObjectLibrary {
                 main.degenerate(p0());
                 continue;
             }
-            if mode == 5 {
-                // A line between the first two vertices, colour `param`
-                // through 64->256 like mode 1 (the loader maps every mode
-                // but 6).
-                main.degenerate(p0());
-                let c = self.flat_colours[(slot.param & 63) as usize] as u32;
-                let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
-                let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
-                for k in [0, 1] {
-                    let vi = face.indices[k];
-                    lines.positions.push(place(&obj.vertices[vi], vi));
-                    lines.uvs.push([ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]);
-                    lines.env.push([-1.0; 2]);
-                    lines.normals.push([0.0, 1.0, 0.0]);
-                }
-                continue;
-            }
+            let shine = if skin == Skin::Normal { shine_kind(slot.mode) } else { None };
+            // Shine modes other than 1, 2 and 4 (0x10, 0x13, 0x15, 0x30 …)
+            // go through `Genlock` (texel 0 transparent) in software and
+            // `(7, 8)` in hardware (`DrawObject`'s shine branches).
+            let genlock = shine.is_some() && !matches!(mode, 1 | 2 | 4);
+            // Shine mode 4 (0x14, 0x34; `uVar50 == 4` in `FUN_010c101c`).
+            let quarter = shine.is_some() && mode == 4;
             // Plain mode 4 goes to the additive overlay; the main mesh keeps
             // a degenerate triangle in its place. Without the 0x10 bit, 0x20
             // also takes the software renderer's mode-4 branch (`FUN_010c101c`:
             // mode 0x22, the "White sand" leg faces of PedMale1-4).
             let additive = mode == 4 || slot.mode & 0x20 != 0;
-            let out = if additive && slot.mode & 0x10 == 0 && skin == Skin::Normal {
+            // Mode 3 and the Genlock shines key colour 0 out.
+            let keyed = skin == Skin::Normal && (slot.mode == 3 || genlock);
+            let out = if additive && shine.is_none() && skin == Skin::Normal {
                 main.degenerate(p0());
                 &mut add
-            } else if slot.mode == 0x14 && skin == Skin::Normal {
-                // Shine mode 4 (`uVar50 == 4` in `FUN_010c101c`): table 4.
+            } else if quarter && scenery {
+                // `DrawScenery` @ 10079e90 draws shine mode 4 through table 0
+                // (additive), `DrawObject` through table 4.
+                main.degenerate(p0());
+                &mut add
+            } else if quarter {
                 main.degenerate(p0());
                 &mut halves
+            } else if keyed && !keep_keyed {
+                // A hard mask in software; on the card the filtered colour
+                // key is blended `(7, 8)` (soft edges), see `keyed_material`.
+                main.degenerate(p0());
+                &mut keyed_tris
             } else {
                 &mut main
             };
             let order = side_order(side);
             let [a, b, c] = order.map(|k| face.indices[k]);
             let flat = (placed[b] - placed[a]).cross(placed[c] - placed[a]).normalize_or_zero();
-            let shine = if skin == Skin::Normal { shine_kind(slot.mode) } else { None };
             let smooth_env = slot.mode & 0x20 != 0;
             let tex = match skin {
                 Skin::Burnt => burnt,
@@ -754,13 +900,15 @@ impl ObjectLibrary {
                     let name = match (paint.and_then(|p| PAINTS.get(p)), name.as_str()) {
                         (Some(&(shine, _)), "shine.all") => shine,
                         (Some(&(_, cardef)), "cardef") => cardef,
+                        // Player n's people (instance `+0x99c`, OS4 `+0x4b4`)
+                        // wear sand n: both red sands become its light one
+                        // (`DrawObject`: `_DAT_1017c6a4[n]` for both).
+                        (_, "red sand" | "red dark sand") if sand > 0 && sand < SANDS.len() => SANDS[sand],
                         _ => name.as_str(),
                     };
                     self.slots.get(name).copied()
                 }
             };
-            // Mode 3 keys colour 0 out; additive faces add nothing there.
-            let keyed = skin == Skin::Normal && mode == 3;
             for k in order {
                 let (vi, (u, v)) = (face.indices[k], slot.uv[k]);
                 out.positions.push(place(&obj.vertices[vi], vi));
@@ -775,8 +923,10 @@ impl ObjectLibrary {
                 out.env.push(match (shine, source) {
                     (Some(kind), Some(t)) => {
                         let (cu, cv) = if smooth_env { ENV_CENTRE_SMOOTH } else { ENV_CENTRE_SCREEN };
+                        // Genlock shines sample the keyed copy.
+                        let half = if genlock { 0 } else { ATLAS_H };
                         let ox = (t % ATLAS_COLS * TEX_W) as f32 + cu + 0.5;
-                        let oy = (t / ATLAS_COLS * TEX_H + ATLAS_H) as f32 + cv + 0.5;
+                        let oy = (t / ATLAS_COLS * TEX_H + half) as f32 + cv + 0.5;
                         [ox / ATLAS_W as f32 + 2.0 * kind as f32, oy / ATLAS_FULL_H as f32]
                     }
                     _ => [-1.0, -1.0],
@@ -787,12 +937,7 @@ impl ObjectLibrary {
                         Self::atlas_uv(t, u, v, false)
                     }
                     // Flat colour: the centre of the palette cell.
-                    (Skin::Normal, 1, _) => {
-                        let c = self.flat_colours[(slot.param & 63) as usize] as u32;
-                        let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
-                        let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
-                        [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
-                    }
+                    (Skin::Normal, 1, _) => palette_uv(self.flat_colours[(slot.param & 63) as usize] as u32),
                     (_, _, Some(t)) => Self::atlas_uv(t, u, v, keyed),
                     // Unknown/empty texture: sample a corner of slot 0.
                     (_, _, None) => [0.5 / ATLAS_W as f32, 0.5 / ATLAS_FULL_H as f32],
@@ -807,10 +952,30 @@ impl ObjectLibrary {
             main: main.mesh(PrimitiveTopology::TriangleList),
             additive: nonempty(add, PrimitiveTopology::TriangleList),
             half: nonempty(halves, PrimitiveTopology::TriangleList),
+            keyed: nonempty(keyed_tris, PrimitiveTopology::TriangleList),
             lines: nonempty(lines, PrimitiveTopology::LineList),
         }
     }
 }
+
+/// How a model mesh is built.
+#[derive(Clone, Copy, Debug, Default)]
+struct Look {
+    skin: Skin,
+    /// Index into [`PAINTS`] for `Shine.All` / `Cardef` faces.
+    paint: Option<usize>,
+    /// Drawn by `DrawScenery` (shine mode 4 additive).
+    scenery: bool,
+    /// Player number of a person (`SANDS`).
+    sand: usize,
+    /// Keep the colour-keyed faces in the main mesh (people: re-posing only
+    /// moves the main mesh).
+    keep_keyed: bool,
+}
+
+/// The light sand of player n's people (`InitObjects` @ 10072d50 loads
+/// `_DAT_1017c6a4[0..4]`); player 0 keeps red.
+const SANDS: [&str; 4] = ["red sand", "green sand", "yellow sand", "blue sand"];
 
 /// Model-space vertex to render units for ordinary (non-people) models:
 /// one model unit = 2 h-units horizontally; vertically the top-down view
@@ -882,6 +1047,7 @@ fn sync_overlays(
         for (part, material) in [
             (&overlay.additive, &library.additive),
             (&overlay.half, &library.half),
+            (&overlay.keyed, &library.keyed),
             (&overlay.lines, &library.material),
         ] {
             if let Some(part) = part {
@@ -920,6 +1086,9 @@ pub fn corner_positions(obj: &Obj, place: impl Fn(&Vertex) -> [f32; 3]) -> Vec<[
 fn face_sides(obj: &Obj) -> impl Iterator<Item = (&payback_formats::obj::Face, Option<usize>)> {
     obj.faces.iter().flat_map(|f| {
         let sides: Vec<Option<usize>> = match (f.slots[0].active, f.slots[1].active) {
+            // Slot 0 mode 5 / 6 makes a line / a lens flare instead of a
+            // triangle (Mac `DrawObject` @ 10075880).
+            _ if matches!(f.slots[0].mode, 5 | 6) => vec![None],
             (false, false) => vec![None],
             (a, b) => [(a, 0), (b, 1)].into_iter().filter(|s| s.0).map(|s| Some(s.1)).collect(),
         };
@@ -968,31 +1137,22 @@ fn flare_faces(obj: &Obj) -> Vec<FlareFace> {
 }
 
 pub struct LoadedModel {
+    /// The model as drawn (the Mac file where adopted, see `prefer_mac`).
     pub obj: Obj,
     pub mesh: Handle<Mesh>,
+    /// Extents and constants the simulation uses (from the Amiga file).
     pub info: ModelInfo,
+    /// Extents of the drawn model (`obj`), for drawing: the headlight
+    /// polygon, door hinges and shadows of the original are computed from
+    /// the loaded model.
+    pub shape: ModelInfo,
+    /// Model Y of the feet of a person (`amiga_foot_y`; 0 for the Mac
+    /// people, whose origin is at the feet).
+    pub foot: i32,
     /// Lens-flare faces.
     pub flares: Vec<FlareFace>,
     /// Burnt / dented / painted meshes, by (skin, dented, paint).
     variants: HashMap<(Skin, bool, Option<usize>), Handle<Mesh>>,
-}
-
-/// AmigaOS paths are case-insensitive; the extracted files keep the CD's case.
-fn find_case_insensitive(root: &std::path::Path, rel: &str) -> Option<std::path::PathBuf> {
-    let mut dir = root.to_path_buf();
-    for part in rel.split('/') {
-        let exact = dir.join(part);
-        dir = if exact.exists() {
-            exact
-        } else {
-            std::fs::read_dir(&dir)
-                .ok()?
-                .filter_map(|e| e.ok())
-                .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part))?
-                .path()
-        };
-    }
-    Some(dir)
 }
 
 /// Scenery entity per map cell (sx, sy, cube level).
@@ -1016,6 +1176,8 @@ pub struct SceneryPlugin;
 impl Plugin for SceneryPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/objects.wgsl");
+        embedded_asset!(app, "shaders/shadows.wgsl");
+        shadows::plugin(app);
         app.add_plugins(MaterialPlugin::<ObjectMaterial>::default())
             .init_resource::<SceneryIndex>()
             .init_resource::<SceneryClock>()
@@ -1028,7 +1190,10 @@ impl Plugin for SceneryPlugin {
             .add_systems(OnExit(AppState::Playing), |mut c: ResMut<SceneryClock>| {
                 *c = SceneryClock::default();
             })
-            .add_systems(Update, (animate_scenery, vehicle_skins, sync_mode))
+            .add_systems(
+                Update,
+                (follow_settings, animate_scenery, (vehicle_skins, vehicle_doors).chain(), sync_mode),
+            )
             .add_systems(PostUpdate, sync_overlays.before(TransformSystems::Propagate))
             .add_systems(
                 FixedUpdate,
@@ -1171,16 +1336,18 @@ fn animate_scenery(
     }
 }
 
-/// Chimneys in view smoke (`FUN_01049374`, scenery 0x11): every view's
-/// city pass (once per view in split screen) draws one set of random
-/// numbers; if `rand(3) == 1`, every chimney in that view's square range
-/// (`GameCam::visible_squares`) adds a type 6 Dust2 puff 2500 z-units above
-/// its base.
+/// Chimneys in view smoke (scenery 0x11): every view's city pass (once per
+/// view in split screen) gives each chimney in that view's square range
+/// (`ViewEyes::visible_squares`) a chance `random3(3) == 1` per tick of a
+/// type 6 Dust2 puff 2500 z-units above its base, with its own numbers
+/// drawn last argument first (Mac `DrawMap` @ 1005b0b8, rendering C2/D5).
+/// OS4 `FUN_01049374` drew one set from the game generator per view and
+/// puffed every chimney in step; the Mac's come from the cosmetic
+/// generator, so the chimneys smoke independently.
 fn chimney_smoke(
-    cam: Res<GameCam>,
-    views: Res<ViewCams>,
+    eyes: Res<crate::camera::ViewEyes>,
     rotating: Res<RotatingView>,
-    rng: Option<ResMut<Rng>>,
+    rng: Option<ResMut<crate::sim::VisualRng>>,
     mut effects: ResMut<Effects>,
     city: Option<Res<City>>,
     q: Query<(&Scenery, &Transform)>,
@@ -1188,13 +1355,9 @@ fn chimney_smoke(
     let (Some(mut rng), Some(city)) = (rng, city) else {
         return;
     };
-    let cams = views.all(&cam);
-    for view in cams {
-        let r = [3, 100, 100, 300, 30, 30, 30, 200].map(|n| rng.rand(n));
-        if r[0] != 1 {
-            continue;
-        }
-        let (hw, hh) = view.visible_squares(cams.len(), rotating.0);
+    // The views' eyes (rotating view, replay TV camera; camera.rs).
+    for (i, view) in eyes.cams.iter().enumerate() {
+        let (hw, hh) = eyes.visible_squares(i, rotating.0);
         let centre = view.square();
         for (sc, tf) in &q {
             if sc.id != sid::CHIMNEY {
@@ -1205,17 +1368,26 @@ fn chimney_smoke(
             if (sx - centre.x).abs() > hw || (sy - centre.y).abs() > hh {
                 continue;
             }
+            if rng.rand(3) != 1 {
+                continue;
+            }
+            let size = (rng.rand(200) + 300) as f32;
+            let vz = rng.rand(30) - 250;
+            let vy = rng.rand(30) - 15;
+            let vx = rng.rand(30) + 150;
+            let dz = rng.rand(300) - 2500;
+            let dy = rng.rand(100) - 50;
+            let dx = rng.rand(100) - 50;
             let level = city
                 .floor(x * 2048.0, y * 2048.0, tf.translation.y * H_PER_SQUARE, 1.0)
                 .map_or(0, |(_, l, _)| l);
             let base = z_of_h(tf.translation.y * H_PER_SQUARE);
             let pos = Vec3::new(
-                x.floor() * 2048.0 + 0x400 as f32 + (r[1] - 50) as f32,
-                y.floor() * 2048.0 + 0x400 as f32 + (r[2] - 50) as f32,
-                base + (r[3] - 2500) as f32,
+                x.floor() * 2048.0 + 0x400 as f32 + dx as f32,
+                y.floor() * 2048.0 + 0x400 as f32 + dy as f32,
+                base + dz as f32,
             );
-            let vel = Vec3::new((r[4] + 150) as f32, (r[5] - 15) as f32, (r[6] - 250) as f32);
-            let size = (r[7] + 300) as f32;
+            let vel = Vec3::new(vx as f32, vy as f32, vz as f32);
             effects.add(6, Tex::Dust2, pos, vel, size, level as u8, Blend::Subtract);
         }
     }
@@ -1247,6 +1419,82 @@ fn vehicle_skins(
         let h = library.variant_mesh(&mut meshes, obj.model, skin, dent, paint);
         if mesh.0 != h {
             mesh.0 = h;
+        }
+    }
+}
+
+/// Door model of a vehicle type (`+0x8158`, OS4 `+0x48fc`; the loader's
+/// table, people.md §6.2).
+fn door_model(kind: usize) -> Option<&'static str> {
+    use crate::vehicles::Door;
+    Some(match crate::vehicles::TYPES.get(kind)?.door {
+        Door::Default => "doors/default.obj",
+        Door::Police => "doors/police.obj",
+        Door::Bus => "doors/bus.obj",
+        Door::Taxi => "doors/taxi.obj",
+        Door::Without => return None,
+    })
+}
+
+/// The open door of a vehicle, a child of it.
+#[derive(Component)]
+struct DoorPanel(Entity);
+
+/// An open driver's door (`Drive::door` != 0) is drawn as its own object
+/// (Mac `DrawObject` @ 10075880 tail = OS4 `FUN_010c101c` tail): the door
+/// model created at the hinge (`+0x8150`, `+0x8154`: −max|X| on the right
+/// side, at the door's longitudinal position) turned by heading + door
+/// angle, with the vehicle's depth, pitch and roll, paint and burn timer
+/// (not its dents). The Mac draws the models where they are, with no
+/// placement offset; its raised Pug, Pug Racer, Taxi and Vapour keep the
+/// unchanged ±18 doors, so their doors hang lower than the body there too.
+#[allow(clippy::type_complexity)]
+fn vehicle_doors(
+    mut commands: Commands,
+    data: Res<GameData>,
+    library: Option<ResMut<ObjectLibrary>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    vehicles: Query<(Entity, &SimObj, &Vehicle, &Drive, Option<&DoorPanel>)>,
+    mut panels: Query<(&mut Transform, &mut Mesh3d), Without<SimObj>>,
+) {
+    let Some(mut library) = library else { return };
+    // `--open-doors`: every door fully open (visual checks).
+    let forced = std::env::args().any(|a| a == "--open-doors");
+    for (e, obj, vehicle, drive, panel) in &vehicles {
+        let angle = if forced { 0x370 } else { drive.door };
+        let door = (angle != 0)
+            .then(|| door_model(vehicle.kind))
+            .flatten()
+            .and_then(|p| library.load(&data, &mut meshes, p));
+        let Some(door) = door else {
+            if let Some(panel) = panel {
+                commands.entity(panel.0).try_despawn();
+                commands.entity(e).remove::<DoorPanel>();
+            }
+            continue;
+        };
+        let shape = &library.model(obj.model).shape;
+        let lat = -shape.radius as f32 / 16.0;
+        let fwd = crate::sim::boarding::door_y(vehicle.kind, shape.max_y) as f32 / 16.0;
+        let sh = 2.0 / H_PER_SQUARE;
+        let tf = Transform::from_xyz(lat * sh, 0.0, fwd * sh)
+            .with_rotation(heading_to_render(angle as f32));
+        let paint = usize::try_from(vehicle.colour).ok().filter(|&c| c < PAINTS.len());
+        let skin = if obj.burn > 0 { Skin::Burnt } else { Skin::Normal };
+        let mesh = library.variant_mesh(&mut meshes, door, skin, None, paint);
+        match panel.and_then(|p| panels.get_mut(p.0).ok()) {
+            Some((mut t, mut m)) => {
+                *t = tf;
+                if m.0 != mesh {
+                    m.0 = mesh;
+                }
+            }
+            None => {
+                let child = commands
+                    .spawn((Mesh3d(mesh), MeshMaterial3d(library.material.clone()), tf, ChildOf(e)))
+                    .id();
+                commands.entity(e).insert(DoorPanel(child));
+            }
         }
     }
 }

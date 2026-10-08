@@ -1,14 +1,20 @@
 //! Sound effects, reimplementing the original software mixer's behaviour
-//! (docs/re/frontend_audio.md, OS4 `FUN_01007290` / `FUN_0100815c`).
+//! (docs/re/frontend_audio.md, OS4 `FUN_01007290` / `FUN_0100815c`; Mac
+//! `DoAudio` @ 100f32f0 / `AddSound` @ 100f4000, analysis/mac/audio_platform.md).
 //!
 //! The original mixes at 22050 Hz; every AddSound call gives the playback
-//! rate in Hz and a volume. Positional sounds are heard with amplitude
-//! `A = vol / d²` (d in world units >> 4), clamped to 255, audible when
-//! `A > 19`; at most 6 voices play at once. Samples are headerless signed
-//! 8-bit PCM, wrapped here as WAVs at 22050 Hz and sped up or down to the
-//! requested rate. Mixing is done here (a [`MixerStream`] played as one
-//! endless stereo source), so the original's per-voice left/right volumes
-//! (pan) and Doppler pitch can be reproduced.
+//! rate in Hz (kept as a rate byte, Hz / 200) and a volume. Positional
+//! sounds are heard with amplitude `A = vol / d²` (d in world units >> 4),
+//! audible when `A > 19`; at most 6 voices play at once. Samples are
+//! headerless signed 8-bit PCM, played here at the requested rate with
+//! nearest-sample stepping (the Mac opens its channels with `initNoInterp`).
+//! Mixing is done here (a [`MixerStream`] played as one endless stereo
+//! source), so the per-voice left/right volumes (pan) and Doppler pitch can
+//! be reproduced. Levels follow the Mac (`DoAudio` → `CMSPlayPaybackSFX`
+//! @ 10156a50): per side `FX · min(A, 255) · 2.56e-5`, summed and clipped.
+//! Menu sounds ([`Sound::menu`], Mac `PlaySound` @ 100f1960) mix alongside
+//! the game voices; the pause menu pauses the game voices
+//! (`PauseAllSounds` @ 100f1810 / `ResumeAllSounds` @ 100f1880).
 
 use crate::data::GameData;
 use bevy::{
@@ -199,6 +205,9 @@ pub struct Sound {
     /// Playback rate in Hz.
     pub hz: f32,
     pub pos: SoundPos,
+    /// A menu sound (`PlaySound`): exact Hz, volume `FX·256/100`, outside
+    /// the 6-voice selection, never paused or cut.
+    pub menu: bool,
 }
 
 impl Sound {
@@ -209,6 +218,7 @@ impl Sound {
             volume,
             hz,
             pos,
+            menu: false,
         }
     }
 
@@ -219,6 +229,18 @@ impl Sound {
             volume,
             hz,
             pos,
+            menu: false,
+        }
+    }
+
+    /// A menu sound (Mac `PlaySound__Fii` @ 100f1960): played at `hz`
+    /// exactly, centred, at `FX·256/100` (unity at FX 100) on any free
+    /// channel, mixed with the game voices (the Amiga's `FUN_010053c4`
+    /// stopped the mixer channels instead).
+    pub fn menu(id: u16, hz: f32) -> Sound {
+        Sound {
+            menu: true,
+            ..Sound::once(id, 255.0, hz, SoundPos::Global)
         }
     }
 }
@@ -234,13 +256,25 @@ pub struct Listener(pub Vec3);
 #[derive(Resource, Default, Clone)]
 pub struct OtherListeners(pub Vec<Vec3>);
 
-/// Global FX volume, 0-100 (pause-menu option).
+/// Global FX volume, 0-100 in steps of 10 (pause-menu option). Default 50,
+/// the Mac's (`ClearPreference` @ 100508c0: `prefs[0] = 0x32`); at 50 the
+/// Mac's level law gives the Amiga's loudness at 100.
 #[derive(Resource, Clone, Copy)]
 pub struct FxVolume(pub u8);
 
 impl Default for FxVolume {
     fn default() -> Self {
-        FxVolume(100)
+        FxVolume(50)
+    }
+}
+
+impl FxVolume {
+    /// The CD music volume tied to the slider (Mac `SetSoundVolume`
+    /// @ 100f24f0 → `UCDAudio::SetVolume`): 200/256 up to FX 50, then
+    /// `200 − 4·(FX − 50)`, silent at 100. 0..1.
+    pub fn music(self) -> f32 {
+        let fx = self.0.min(100) as f32;
+        (200.0 - 4.0 * (fx - 50.0).max(0.0)) / 256.0
     }
 }
 
@@ -254,6 +288,7 @@ impl Plugin for AudioPlugin {
             .init_resource::<FxVolume>()
             .init_resource::<Mixer>()
             .add_systems(Startup, start_mixer)
+            .add_systems(FixedPostUpdate, slot_clock)
             .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain());
     }
 }
@@ -298,36 +333,50 @@ pub(crate) fn load_sounds(mut commands: Commands, data: Res<GameData>) {
     commands.insert_resource(sounds);
 }
 
-/// Amplitude 0-255 of a sound at the listener, per the original mixer.
-pub fn amplitude(sound: &Sound, listener: Vec3) -> f32 {
+/// Unclamped amplitude of a sound at the listener: `vol / d²` (d² = 0 → 1),
+/// or `vol` for a non-positional sound.
+pub fn amplitude_raw(sound: &Sound, listener: Vec3) -> f32 {
     match sound.pos {
-        SoundPos::Global => sound.volume.min(255.0),
+        SoundPos::Global => sound.volume,
         SoundPos::At(p) => {
             let d = (p - listener) / 16.0;
-            (sound.volume / d.length_squared().max(1.0)).min(255.0)
+            sound.volume / d.length_squared().max(1.0)
         }
     }
 }
 
-/// Pan of a positional sound (`FUN_01007290`): `r = dx / |dy|` (integer,
-/// world units >> 4); the far side gets `A / (|r| + 1)`, the near side `A`;
-/// `r = 0` or `dy = 0` is centred. Returns (left, right) factors.
+/// Amplitude 0-255 of a sound at the listener, per the original mixer.
+pub fn amplitude(sound: &Sound, listener: Vec3) -> f32 {
+    amplitude_raw(sound, listener).min(255.0)
+}
+
+/// Left and right levels 0..255 of a sound (Mac `DoAudio` @ 100f32f0,
+/// OS4 `FUN_01007290` from 0x01007590): `dx`, `dy` are differences of the
+/// positions >> 4; `r = dx / |dy|` in floating point; the near side gets
+/// `min(A, 255)`, the far side `min(A / (|r| + 1), 255)` with the
+/// unclamped `A`, so a loud close sound stays centred. `|dy| < 1` or
+/// `r = 0` is centred.
 pub fn pan(sound: &Sound, listener: Vec3) -> (f32, f32) {
+    let a = amplitude_raw(sound, listener);
+    let near = a.min(255.0);
     let SoundPos::At(p) = sound.pos else {
-        return (1.0, 1.0);
+        return (near, near);
     };
-    let dx = ((p.x - listener.x) / 16.0) as i32;
-    let dy = ((p.y - listener.y) / 16.0) as i32;
-    if dy == 0 {
-        return (1.0, 1.0);
+    let dx = ((p.x as i32) >> 4) - ((listener.x as i32) >> 4);
+    let dy = (((p.y as i32) >> 4) - ((listener.y as i32) >> 4)).abs();
+    if dy < 1 || dx == 0 {
+        return (near, near);
     }
-    let r = dx / dy.abs();
-    let far = 1.0 / (r.unsigned_abs() as f32 + 1.0);
-    match r.signum() {
-        1 => (far, 1.0),
-        -1 => (1.0, far),
-        _ => (1.0, 1.0),
-    }
+    let r = dx as f64 / dy as f64;
+    let far = ((a as f64 / (r.abs() + 1.0)) as i32).min(255) as f32;
+    if r > 0.0 { (far, near) } else { (near, far) }
+}
+
+/// The rate actually played: Hz kept as the rate byte `Hz / 200`
+/// (`AddSound` @ 100f4000, OS4 `FUN_0100815c`), so every sound plays in
+/// 200 Hz steps.
+pub fn quantise(hz: f32) -> f32 {
+    (hz / 200.0).floor().max(0.0) * 200.0
 }
 
 /// One mixer channel.
@@ -340,6 +389,8 @@ struct Voice {
     right: f32,
     looping: bool,
     done: bool,
+    /// Held where it is (pause menu); neither advances nor sounds.
+    paused: bool,
 }
 
 /// Voices shared between the game (which sets volumes and pitch each
@@ -382,7 +433,7 @@ impl Iterator for MixerDecoder {
             self.buf.resize(BLOCK * 2, 0.0);
             self.at = 0;
             if let Ok(mut voices) = self.mixer.0.lock() {
-                for v in voices.values_mut().filter(|v| !v.done) {
+                for v in voices.values_mut().filter(|v| !v.done && !v.paused) {
                     for frame in self.buf.chunks_mut(2) {
                         if v.pos as usize >= v.pcm.len() {
                             if v.looping && !v.pcm.is_empty() {
@@ -436,16 +487,72 @@ struct Started;
 #[derive(Component)]
 struct LastDistance(f32);
 
+/// A one-shot's slot position in source bytes (the Mac one-shot cut).
+#[derive(Component)]
+struct SlotClock(f64);
+
+/// Whether the Mac one-shot cut is on (`Settings.variants.oneshot_cut`).
+fn oneshot_cut(settings: Option<&crate::frontend::progress::Settings>) -> bool {
+    settings.is_some_and(|s| s.variants.oneshot_cut)
+}
+
+/// The Mac slot clock, run once per game tick so the cut follows the
+/// (recorded) ticks and replays sound the same (`DoAudio` @ 100f32f0, lines
+/// 486–497; OS4 `FUN_01007290` the same): each frame of `t` ticks advances
+/// a slot by `(735·t + 399)·200·rate/22050` source bytes, `rate` = Hz/200
+/// without Doppler, and deletes a one-shot once that passes the sample
+/// length (`DeleteSound` → `CMSQuietSound`). Real playback consumes only
+/// `735·t` output samples a frame, so at the Mac's 30 fps (t = 1) one-shots
+/// are silenced after 735/1134 ≈ 65 % of their length. Here a tick is one
+/// such frame. Off by default (decision 2, docs/re/mac_version.md); loops
+/// are unaffected, menu sounds have no slot.
+fn slot_clock(
+    mut commands: Commands,
+    sounds: Option<Res<Sounds>>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    time: Res<Time<Fixed>>,
+    mut q: Query<(Entity, &Sound, Option<&mut SlotClock>)>,
+) {
+    let Some(sounds) = sounds else { return };
+    if !oneshot_cut(settings.as_deref()) {
+        return;
+    }
+    let per_hz = time.timestep().as_secs_f64() * (735.0 + 399.0) / 735.0;
+    for (e, s, clock) in &mut q {
+        if s.looping || s.menu {
+            continue;
+        }
+        let step = quantise(s.hz) as f64 * per_hz;
+        let pos = match clock {
+            Some(mut c) => {
+                c.0 += step;
+                c.0
+            }
+            None => {
+                commands.entity(e).insert(SlotClock(step));
+                step
+            }
+        };
+        if sounds.get(s.id).is_some_and(|pcm| pos > pcm.len() as f64) {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
 fn start_sounds(
     mut commands: Commands,
     sounds: Option<Res<Sounds>>,
     mixer: Res<Mixer>,
+    fx: Res<FxVolume>,
     new: Query<(Entity, &Sound), Without<Started>>,
 ) {
     let Some(sounds) = sounds else { return };
     let Ok(mut voices) = mixer.0.lock() else { return };
     for (e, s) in &new {
-        let Some(pcm) = sounds.get(s.id) else {
+        let pcm = sounds.get(s.id);
+        // AddSound refuses one-shots at FX 0 (both builds).
+        let refused = fx.0 == 0 && !s.looping && !s.menu;
+        let Some(pcm) = pcm.filter(|_| !refused) else {
             commands.entity(e).despawn();
             continue;
         };
@@ -459,18 +566,27 @@ fn start_sounds(
                 right: 0.0,
                 looping: s.looping,
                 done: false,
+                paused: false,
             },
         );
         commands.entity(e).insert(Started);
     }
 }
 
-/// Doppler (`FUN_01007290`): the rate byte (Hz / 200) gains
-/// `(prevDist - dist) * 184 / len` per 30 Hz frame of `len` = 1134
-/// samples, clamped to 1..255.
+/// Doppler (`FUN_01007290`, Mac `DoAudio` lines 300–345): the rate byte
+/// (Hz / 200) gains `(prevDist - dist) * 184 / (len + 400)` per 30 Hz frame
+/// of `len + 400` = 1134 samples, clamped to 1..255.
 fn doppler(hz: f32, approach_per_frame: f32) -> f32 {
     let rate = (hz / 200.0).floor() + (approach_per_frame * 184.0 / 1134.0).trunc();
     rate.clamp(1.0, 255.0) * 200.0
+}
+
+/// Per-side voice gain from a 0..255 level (Mac `DoAudio` lines 435–445:
+/// `volumeCmd = FX · (L << 8) · 256 / 1e7`, 0x100 = unity), i.e.
+/// `FX · L · 2.56e-5`: 0.653 at FX 100, L 255. The quiet-voice doubling the
+/// Mac leaves uncompensated (+6 dB) is not reproduced (decision 3).
+fn voice_gain(fx: u8, level: f32) -> f32 {
+    fx as f32 * level.min(255.0) * 65536.0 / 1e7 / 256.0
 }
 
 /// Apply the original mixer's voice selection, attenuation, pan and pitch.
@@ -481,6 +597,7 @@ fn mix(
     others: Res<OtherListeners>,
     fx: Res<FxVolume>,
     time: Res<Time<Real>>,
+    virtual_time: Res<Time<Virtual>>,
     mixer: Res<Mixer>,
     mut playing: Query<(Entity, &Sound, Option<&mut LastDistance>), With<Started>>,
 ) {
@@ -492,26 +609,47 @@ fn mix(
         })
     };
     let Ok(mut voices) = mixer.0.lock() else { return };
-    let mut ranked: Vec<(f32, Vec3, Entity, &Sound, Option<Mut<LastDistance>>)> = playing
-        .iter_mut()
-        .map(|(e, s, last)| {
-            let (a, l) = nearest(s);
-            (a, l, e, s, last)
-        })
-        .collect();
+    // The pause menu holds every game voice where it is (Mac `ShowOptions`
+    // @ 10093240: `PauseAllSounds`, then `ResumeAllSounds` on leaving);
+    // its own menu sounds still play.
+    let paused = virtual_time.is_paused();
+    let mut ranked: Vec<(f32, Vec3, Entity, &Sound, Option<Mut<LastDistance>>)> = Vec::new();
+    for (e, s, last) in playing.iter_mut() {
+        if s.menu {
+            // Centred at `FX·256/100`, outside the voice selection.
+            if let Some(v) = voices.get_mut(&e) {
+                let gain = fx.0 as f32 / 100.0;
+                v.left = gain;
+                v.right = gain;
+                v.step = s.hz as f64 / MIX_RATE as f64;
+            }
+            continue;
+        }
+        if let Some(v) = voices.get_mut(&e) {
+            v.paused = paused;
+        }
+        if paused {
+            continue;
+        }
+        let (a, l) = nearest(s);
+        ranked.push((a, l, e, s, last));
+    }
+    if paused {
+        return;
+    }
+    // Stable: earlier sounds win ties, as the original's strict `<` insertion.
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let master = fx.0 as f32 / 100.0;
     // Original mixer frames (30 Hz) since the last update.
     let frames = (time.delta_secs() * 30.0).max(1e-3);
     for (rank, (a, l, e, s, last)) in ranked.into_iter().enumerate() {
         let Some(v) = voices.get_mut(&e) else { continue };
         let audible = rank < MAX_VOICES && a > AUDIBLE;
-        // Three voices at full amplitude sum to full scale.
-        let gain = if audible { a / 255.0 / 3.0 * master } else { 0.0 };
-        let (pl, pr) = pan(s, l);
-        v.left = gain * pl;
-        v.right = gain * pr;
-        let mut hz = s.hz;
+        let (pl, pr) = if audible { pan(s, l) } else { (0.0, 0.0) };
+        v.left = voice_gain(fx.0, pl);
+        v.right = voice_gain(fx.0, pr);
+        // The rate byte: 200 Hz steps, unclamped on the first frame, then
+        // with Doppler clamped to 1..255.
+        let mut hz = quantise(s.hz);
         if let SoundPos::At(p) = s.pos {
             let dist = (p - l).length() / 16.0;
             match last {
@@ -571,7 +709,7 @@ mod tests {
     fn mixer_renders_voices() {
         let mixer = Mixer::default();
         let pcm: Arc<[i8]> = Arc::from(vec![64i8; 100]);
-        let voice = |looping, left, right| Voice { pcm: pcm.clone(), pos: 0.0, step: 1.0, left, right, looping, done: false };
+        let voice = |looping, left, right| Voice { pcm: pcm.clone(), pos: 0.0, step: 1.0, left, right, looping, done: false, paused: false };
         {
             let mut v = mixer.0.lock().unwrap();
             v.insert(Entity::from_raw_u32(1).unwrap(), voice(true, 1.0, 0.0));
@@ -589,17 +727,48 @@ mod tests {
 
     #[test]
     fn pan_and_doppler() {
-        let at = |x: f32, y: f32| Sound::once(id::THUD, 1e6, 15000.0, SoundPos::At(Vec3::new(x, y, 0.0)));
-        // Within the |dx| < |dy| cone the integer ratio is 0: centred.
-        assert_eq!(pan(&at(-100.0 * 16.0, 200.0 * 16.0), Vec3::ZERO), (1.0, 1.0));
+        // `vol = d² · A` puts amplitude A at the listener.
+        let at = |x: f32, y: f32, a: f32| {
+            Sound::once(id::THUD, (x * x + y * y) * a, 15000.0, SoundPos::At(Vec3::new(x * 16.0, y * 16.0, 0.0)))
+        };
+        // r = -0.5 in floating point: right at 90 / 1.5.
+        assert_eq!(pan(&at(-100.0, 200.0, 90.0), Vec3::ZERO), (90.0, 60.0));
         // Twice as far east as south: r = 2, left at A/3.
-        assert_eq!(pan(&at(400.0 * 16.0, 200.0 * 16.0), Vec3::ZERO), (1.0 / 3.0, 1.0));
-        assert_eq!(pan(&at(-400.0 * 16.0, -200.0 * 16.0), Vec3::ZERO), (1.0, 1.0 / 3.0));
+        assert_eq!(pan(&at(400.0, 200.0, 90.0), Vec3::ZERO), (30.0, 90.0));
+        assert_eq!(pan(&at(-400.0, -200.0, 90.0), Vec3::ZERO), (90.0, 30.0));
+        // A loud sound stays centred: the far side uses the unclamped A.
+        assert_eq!(pan(&at(400.0, 200.0, 3000.0), Vec3::ZERO), (255.0, 255.0));
         // dy = 0 is centred (quirk of the original).
-        assert_eq!(pan(&at(500.0 * 16.0, 0.0), Vec3::ZERO), (1.0, 1.0));
+        assert_eq!(pan(&at(500.0, 0.0, 90.0), Vec3::ZERO), (90.0, 90.0));
         // Approaching 2 x 1134/184 units per frame raises the rate two steps.
         assert_eq!(doppler(15000.0, 0.0), 15000.0);
         assert_eq!(doppler(15000.0, 1134.0 / 184.0 * 2.0), 15400.0);
         assert_eq!(doppler(100.0, -1e6), 200.0);
+    }
+
+    #[test]
+    fn rate_steps_and_levels() {
+        // Beep1 at 4182 Hz plays at 4000 Hz.
+        assert_eq!(quantise(4182.0), 4000.0);
+        assert_eq!(quantise(22050.0), 22000.0);
+        // Mac level law: 167/256 at FX 100, A 255; the Amiga's 1/3 at FX 50.
+        assert!((voice_gain(100, 255.0) - 0.65280).abs() < 1e-4);
+        assert!((voice_gain(50, 255.0) - 0.3264).abs() < 1e-4);
+        assert_eq!(voice_gain(0, 255.0), 0.0);
+    }
+
+    #[test]
+    fn paused_voices_hold() {
+        let mixer = Mixer::default();
+        let pcm: Arc<[i8]> = Arc::from(vec![64i8; 100]);
+        let e = Entity::from_raw_u32(1).unwrap();
+        mixer.0.lock().unwrap().insert(
+            e,
+            Voice { pcm, pos: 0.0, step: 1.0, left: 1.0, right: 1.0, looping: false, done: false, paused: true },
+        );
+        let mut d = MixerStream(mixer.clone()).decoder();
+        assert_eq!(d.next(), Some(0.0));
+        let v = mixer.0.lock().unwrap();
+        assert_eq!(v[&e].pos, 0.0);
     }
 }

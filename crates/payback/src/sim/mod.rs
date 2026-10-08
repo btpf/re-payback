@@ -3,7 +3,8 @@
 //!
 //! State is kept in the original integer units: x, y with 2048 per square,
 //! z downward (16 per h-unit), angles 5760 per turn, rates per game tick.
-//! One game tick is 1/25 s; systems run in `FixedUpdate` with ticks = 1.
+//! One game tick is 1/30 s (Mac and OS4; the 68k uses 1/25 s); systems run
+//! in `FixedUpdate` with ticks = 1.
 
 pub mod ai;
 pub mod boarding;
@@ -104,10 +105,13 @@ impl Rng {
         Rng { table, idx: 0 }
     }
 
-    /// 0..n-1 (for n > 0).
+    /// 0..n-1 (for n > 0). The product is a 32-bit int that wraps, as in
+    /// the original (`random__Fi` @ 100834e0: `n * T[i] >> 9`); callers with
+    /// n above 2^31 / 511 (the light jitter of millions) get its wrapped
+    /// values.
     pub fn rand(&mut self, n: i32) -> i32 {
         self.idx = (self.idx + 1) & 0xffff;
-        self.table[self.idx] * n >> 9
+        self.table[self.idx].wrapping_mul(n) >> 9
     }
 
     /// Deterministic hash lookup `T[i] * n >> 9` (OS4 `FUN_0103ad20`).
@@ -125,6 +129,37 @@ impl Rng {
     /// Current table index (the value [`Rng::seed`] restores).
     pub fn index(&self) -> u16 {
         self.idx as u16
+    }
+
+    /// The cosmetic stream over the same table, from index 0
+    /// (`InitRandom` @ 100833b0 zeroes both counters).
+    pub fn visual(&self) -> VisualRng {
+        VisualRng {
+            table: self.table.clone(),
+            idx: 0,
+        }
+    }
+}
+
+/// The original's second generator, `random3` (Mac `random3__Fi` @
+/// 10083530, OS4 `0103acc4`, 68k `FUN_0003fce6`): the same table as [`Rng`]
+/// with its own counter (`_DAT_1017c6f0` / OS4 `c448`). The original draws
+/// every cosmetic random number from it (effect updates, chimney smoke,
+/// weather, effect lights, text wobble), so rendering never moves the
+/// game's sequence. Render code uses this and never [`Rng`]; it is not
+/// part of the replay state.
+#[derive(Resource)]
+pub struct VisualRng {
+    table: Vec<i32>,
+    idx: usize,
+}
+
+impl VisualRng {
+    /// 0..n-1 (for n > 0): `T[++i3 & 0xffff] * n >> 9`, the product
+    /// wrapping at 32 bits as in the original (see [`Rng::rand`]).
+    pub fn rand(&mut self, n: i32) -> i32 {
+        self.idx = (self.idx + 1) & 0xffff;
+        self.table[self.idx].wrapping_mul(n) >> 9
     }
 }
 
@@ -299,7 +334,9 @@ impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Trig>()
             .add_systems(Startup, |mut commands: Commands, data: Res<GameData>| {
-                commands.insert_resource(Rng::load(&data));
+                let rng = Rng::load(&data);
+                commands.insert_resource(rng.visual());
+                commands.insert_resource(rng);
             })
             .add_plugins((
                 people::PeoplePlugin,

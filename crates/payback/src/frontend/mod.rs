@@ -37,7 +37,7 @@ mod replays;
 pub mod ui;
 pub mod usermaps;
 
-use crate::audio::{FxVolume, Sound, SoundPos};
+use crate::audio::{FxVolume, Sound};
 use crate::camera::GameCamera;
 use crate::data::GameData;
 use crate::hud::icons::HudIcons;
@@ -62,8 +62,10 @@ use progress::{Profile, Settings};
 use ui::*;
 
 /// Seconds between the level's outcome and the result screen, so the
-/// in-game "Level complete" / "Game over" message can be seen.
-const END_DELAY: f32 = 4.0;
+/// in-game "Level complete" / "Game over" message can be seen: the Mac's
+/// fade counter of 150 ticks (`0x96`, `amiga_levelloop` @ 10100f50), 5 s
+/// at 30 Hz (68k and OS4: 100 ticks).
+const END_DELAY: f32 = 5.0;
 
 /// Phrase-file languages found at start-up (InitLanguages `FUN_0101345c`).
 #[derive(Resource, Default)]
@@ -196,6 +198,8 @@ impl Plugin for FrontendPlugin {
                     .run_if(in_state(AppState::Playing)),
             )
             .add_systems(Update, (run, model::sync_model).chain().in_set(FrontendRun))
+            .add_systems(Last, menus::save_on_exit)
+            .add_systems(Update, sync_title)
             // The pause menu's FX option drives the lens flares (`--fx` wins).
             .add_systems(Update, |settings: Res<Settings>, mut mode: ResMut<crate::effects::FxMode>| {
                 if settings.is_changed() && crate::arg("--fx").is_none() && mode.0 != settings.fx {
@@ -205,23 +209,34 @@ impl Plugin for FrontendPlugin {
     }
 }
 
-fn setup(mut commands: Commands, data: Res<GameData>) {
-    commands.insert_resource(FrontendIcons::load(&data));
+fn setup(mut commands: Commands, data: Res<GameData>, settings: Res<Settings>) {
+    commands.insert_resource(FrontendIcons::load(&data, settings.variants.title));
     commands.insert_resource(usermaps::UserMaps::scan(&data));
-    // Phrases/Global.<language>.phrases, keeping the middle token.
-    let mut langs: Vec<String> = std::fs::read_dir(data.root.join("Phrases"))
-        .map(|d| {
-            d.flatten()
-                .filter_map(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    let mid = n.strip_prefix("Global.")?.strip_suffix(".phrases")?;
-                    Some(mid.to_string())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Phrases/Global.<language>.phrases, keeping the middle token, from the
+    // Amiga data (14 languages) and the Mac data (English, Deutsch and
+    // `Francais`, the same language as the Amiga `Français`: listed once,
+    // under the Amiga name).
+    let mut langs: Vec<String> = Vec::new();
+    for (n, _) in data.list_dir("Phrases", true, false) {
+        let Some(mid) = n.strip_prefix("Global.").and_then(|n| n.strip_suffix(".phrases")) else {
+            continue;
+        };
+        if !langs.iter().any(|l| crate::data::same_language(l, mid)) {
+            langs.push(mid.to_string());
+        }
+    }
     langs.sort_by_key(|l| l.to_lowercase());
     commands.insert_resource(Languages(langs));
+}
+
+/// Reload the title screens when `Variants::title` changes.
+fn sync_title(data: Res<GameData>, settings: Res<Settings>, icons: Option<ResMut<FrontendIcons>>) {
+    if let Some(mut icons) = icons
+        && settings.is_changed()
+        && icons.mac_title != settings.variants.title
+    {
+        icons.reload_title(&data, settings.variants.title);
+    }
 }
 
 /// The menu loop (`run`); the start-up loader runs before it.
@@ -552,6 +567,7 @@ struct Env<'w, 's> {
     pending_end: Res<'w, PendingEnd>,
     result: Option<Res<'w, LevelResult>>,
     fx: ResMut<'w, FxVolume>,
+    music: ResMut<'w, crate::music::MusicCue>,
     spec: ResMut<'w, LevelSpec>,
     mode: ResMut<'w, GameMode>,
     high: Res<'w, ScoreHighWater>,
@@ -597,6 +613,13 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     let startup = env.startup.as_deref().map(|s| (s.pieces(), s.intro_playing()));
     let intro_on = env.intro.is_some() || fe.wait_intro || startup.is_some_and(|s| s.1);
     let playing = *env.state.get() == AppState::Playing;
+    // The music request (`crate::music`): the top screen's CD track;
+    // loading (`InitProgress`) and the intro stop it.
+    *env.music = if intro_on || fe.loading.is_some() || startup.is_some() {
+        crate::music::MusicCue::Stop
+    } else {
+        fe.stack.last().map_or(crate::music::MusicCue::None, |s| crate::music::MusicCue::Check(s.cd_track()))
+    };
 
     // Esc (or a gamepad's Start) in a level opens the pause menu
     // (`FUN_0101a7dc`).
@@ -640,6 +663,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         mp_totals: &mut env.mp_totals,
         user_maps: &env.user_maps.0,
         display: &env.display,
+        pads: env.pads.iter().count(),
         hardware: env.render_mode.as_deref().is_some_and(|m| m.hardware()),
         sfx: Vec::new(),
         requests: Vec::new(),
@@ -709,7 +733,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
 
     for s in std::mem::take(&mut cx.sfx) {
         let (id, hz) = s.id_hz();
-        env.commands.spawn(Sound::once(id, 255.0, hz, SoundPos::Global));
+        env.commands.spawn(Sound::menu(id, hz));
     }
     let mut close = false;
     for r in std::mem::take(&mut cx.requests) {
@@ -731,7 +755,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
                 fe.loading = Some((l, 0));
             }
             Request::PlayReplay { replay, back_to_game } => {
-                if let Some((spec, mode)) = crate::replay::launch_of(&replay) {
+                if let Some((spec, mode)) = replays::launch(cx.user_maps, &replay) {
                     let replay = Some(*replay);
                     fe.loading = Some((Launch { spec, mode, replay, back_to_game, devices: None }, 0));
                 }
@@ -862,7 +886,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
             hardware: cx.hardware,
         };
         match top {
-            _ if loading => draw_loading(&mut ui, pieces),
+            _ if loading => draw_loading(&mut ui),
             Some(top) => top.draw(&mut ui, &cx),
             None => {}
         }
@@ -883,31 +907,25 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         node.color = Color::srgb(b, b, b);
         *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
     }
+    if loading && shown {
+        // The `Loading` box itself is drawn at its native size by the HUD
+        // (`crate::hud::loading`).
+        env.commands.insert_resource(crate::hud::loading::LoadingPanel(pieces));
+    }
     let top = top.filter(|_| shown && !loading);
     env.current.0 = top.and_then(|t| t.model());
     env.current.1 = top.and_then(|t| t.back_model());
 }
 
-/// InitProgress (`FUN_01042ff8`): clear a box round the centre and draw
-/// `Loading` with its empty slots; DrawProgress (`FUN_01042688`) puts a
-/// `LoadingPiece` in each of the first `pieces` slots at
-/// (cx−0x2e+8i, cy+2).
-fn draw_loading(ui: &mut Ui, pieces: usize) {
-    let (cx, cy) = ((ui.w - 1) / 2, (H - 1) / 2);
-    for y in cy - 0x16..=cy + 0x17 {
-        for x in cx - 0x36..=cx + 0x35 {
-            ui.front.put_rgb(x, y, [0, 0, 0]);
-        }
-    }
+/// The loading screen behind the panel: black. InitProgress
+/// (`FUN_01042ff8`) and DrawProgress (`FUN_01042688`) draw the box with
+/// `Loading` and its pieces, which never scale with the screen; that is
+/// [`crate::hud::loading`], at its native size.
+fn draw_loading(ui: &mut Ui) {
     for y in 0..H {
         for x in 0..ui.w {
             ui.back.put_rgb(x, y, [0, 0, 0]);
         }
-    }
-    let fe = ui.fe;
-    ui.icon(&fe.loading, cx - 0x2e, cy - 0x11);
-    for i in 0..pieces.min(12) as i32 {
-        ui.icon(&fe.piece, cx - 0x2e + 8 * i, cy + 2);
     }
 }
 

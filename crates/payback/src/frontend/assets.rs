@@ -20,8 +20,9 @@ impl Picture {
         Picture { w, h, px }
     }
 
-    fn load(data: &GameData, path: &str, w: usize, h: usize) -> Picture {
-        let mut px = data.read(path).unwrap_or_else(|e| {
+    /// `path`, from the Mac data when `mac` and the Mac has it.
+    fn load(data: &GameData, path: &str, w: usize, h: usize, mac: bool) -> Picture {
+        let mut px = data.read_variant(path, mac).unwrap_or_else(|e| {
             warn!("{path}: {e}");
             Vec::new()
         });
@@ -32,6 +33,8 @@ impl Picture {
 
 #[derive(Resource)]
 pub struct FrontendIcons {
+    /// The title pictures are the Mac ones (`Variants::title`).
+    pub mac_title: bool,
     /// `TitleScreen.medium` (320×256), the PAL-sized title picture.
     pub title: Picture,
     /// `TitleScreen.w3d`: the hardware (Warp3D) title, 256×256 raw 24-bit
@@ -46,16 +49,24 @@ pub struct FrontendIcons {
     pub piece: Icon,
     pub piece_empty: Icon,
     pub logo: Icon,
-    /// `Maps/0..2.thumb`, 256×256.
+    /// `Maps/0..2.thumb`, 256×256 (the Mac's regenerated `2.thumb`, with
+    /// green grass, when the Mac data is present).
     pub thumbs: Vec<Picture>,
 }
 
 impl FrontendIcons {
-    pub fn load(data: &GameData) -> FrontendIcons {
+    /// `mac_title`: the Mac title screens (`Variants::title`): the
+    /// repainted art with the Apex and Virtual Programming logos (same
+    /// sizes and formats; `analysis/mac/assets.md` §6). Read at start-up.
+    pub fn load(data: &GameData, mac_title: bool) -> FrontendIcons {
         let cup = |n: &str| Icon::load(data, &format!("Cup.{n}"), 15, 20);
         FrontendIcons {
-            title: Picture::load(data, "Icons/TitleScreen.medium", 320, 256),
-            title_w3d: data.read("Icons/TitleScreen.w3d").ok().filter(|b| b.len() >= 256 * 256 * 3),
+            mac_title,
+            title: Picture::load(data, "Icons/TitleScreen.medium", 320, 256, mac_title),
+            title_w3d: data
+                .read_variant("Icons/TitleScreen.w3d", mac_title)
+                .ok()
+                .filter(|b| b.len() >= 256 * 256 * 3),
             left_arrow: shadow_icon(data, "LeftArrow"),
             right_arrow: shadow_icon(data, "RightArrow"),
             cursor: Icon::load(data, "Cursor", 6, 10),
@@ -65,9 +76,19 @@ impl FrontendIcons {
             piece_empty: Icon::load(data, "LoadingPiece2", 6, 16),
             logo: Icon::load(data, "PaybackLogo", 166, 80),
             thumbs: (0..3)
-                .map(|n| Picture::load(data, &format!("Maps/{n}.thumb"), 256, 256))
+                .map(|n| Picture::load(data, &format!("Maps/{n}.thumb"), 256, 256, true))
                 .collect(),
         }
+    }
+}
+
+impl FrontendIcons {
+    /// Swap the title pictures for the Mac or Amiga ones.
+    pub fn reload_title(&mut self, data: &GameData, mac_title: bool) {
+        let fresh = FrontendIcons::load(data, mac_title);
+        self.mac_title = mac_title;
+        self.title = fresh.title;
+        self.title_w3d = fresh.title_w3d;
     }
 }
 

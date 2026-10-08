@@ -13,6 +13,7 @@ use crate::audio::{Sound, SoundPos};
 use crate::camera::{CameraTarget, GameCam};
 use crate::level::LevelSpec;
 use crate::mission::MissionState;
+use crate::objects::ObjectLibrary;
 use crate::vehicles::{self, TYPES, Vehicle, kind as vk};
 use crate::world::{City, z_of_h};
 use bevy::prelude::*;
@@ -290,6 +291,10 @@ fn spawn_traffic(world: &mut World) {
             if let Some(mut o) = world.get_mut::<Obj>(e) {
                 o.state = State::Wander;
                 o.level = level;
+                // The Mac (`AddThing` @ 10058350) starts new traffic at
+                // speed min(maxF, 100); the Amiga (`FUN_000cf5cc`) left it
+                // 0. Only the speed: grip brings the velocity up.
+                o.speed = TYPES[kind].max_speed.min(100);
             }
             world.entity_mut(e).insert((
                 Traffic {
@@ -300,6 +305,7 @@ fn spawn_traffic(world: &mut World) {
                     horn_sound: None,
                 },
                 Ambient,
+                super::boarding::AiDriver,
             ));
         }
     }
@@ -325,12 +331,15 @@ fn cruise(aggro: i32, police_chase: bool) -> (i32, i32, i32, i32) {
 fn drive_traffic(
     mut commands: Commands,
     city: Option<Res<City>>,
+    library: Option<Res<ObjectLibrary>>,
     lights: Res<LightPhase>,
     mut rng: ResMut<Rng>,
     others: Query<(Entity, &Obj)>,
     mut q: Query<(Entity, &Obj, &Vehicle, &mut Traffic, &mut Stick)>,
 ) {
-    let Some(city) = city else { return };
+    let (Some(city), Some(library)) = (city, library) else {
+        return;
+    };
     // Occupancy of other objects by square and level.
     let mut occ: Vec<(IVec2, usize, Entity)> = Vec::new();
     for (e, o) in &others {
@@ -344,8 +353,13 @@ fn drive_traffic(
         }
         let t = &TYPES[veh.kind];
         let pos = obj.pos.truncate();
-        // Junction: close enough to the target square's centre.
-        let r = (obj.speed * obj.speed * 5 / t.turn.max(1)).max(512);
+        // Junction: close enough to the target square's centre. Mac
+        // `MoveUnit` @ 10081080: `max(speed·1000/yaw, front)`, the floor
+        // being the model's front extent (+0x48c8). The Amiga's
+        // `5·speed²/yaw` (68k `FUN_000a143e`, OS4 `FUN_010cb7e4`) made
+        // fast cars re-target several squares ahead.
+        let front = library.model(obj.model).info.max_y;
+        let r = (obj.speed * 1000 / t.turn.max(1)).max(front);
         let goal = centre(tr.target);
         if (goal - pos).abs().max_element() <= r {
             let f = flags_at(&city, tr.target, obj.level) & 0x1f;

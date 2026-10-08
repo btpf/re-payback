@@ -180,7 +180,6 @@ struct Me {
     on_foot: bool,
     boarding: bool,
     vehicle: i32,
-    flying: bool,
 }
 
 fn me(world: &mut World) -> Option<Me> {
@@ -202,7 +201,6 @@ fn me(world: &mut World) -> Option<Me> {
         on_foot,
         boarding,
         vehicle: veh.map_or(-1, |v| v.kind as i32),
-        flying: veh.is_some_and(|v| v.flying),
     })
 }
 
@@ -527,6 +525,11 @@ fn generic(world: &mut World, t: &Trigger) -> Option<(u32, Goal)> {
         ACTOR_IN_WATER => (3, Goal::Dump(t.actor?)),
         // Passengers walking to the player's car: hold still.
         ACTOR_BOARDS_PLAYER => (6, Goal::Wait),
+        // A random phone (-1, Rampage's Random missions): its square.
+        PHONE if t.a == -1 => {
+            let pos = Script::new(world).phone_square_pos(t.b as usize, t.c as usize, t.d as usize);
+            (7, reach(pos.x, pos.y, t.d, Some(true)))
+        }
         PHONE => (7, Goal::Phone(t.a)),
         SECRET_PHONE => (8, Goal::Phone(t.a)),
         ACTOR_LOST | ACTOR_FLEES | ACTOR_SEES_PLAYER | ACTOR_SEES_PLAYER_QUIET => {
@@ -648,7 +651,9 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             }
         }
         Goal::Exit => {
-            if !me.on_foot && !me.flying {
+            // A helicopter takes three presses (engine on, engine off and
+            // armed, out; `boarding.rs`).
+            if !me.on_foot {
                 press_use(world, bot);
             }
         }
@@ -1427,7 +1432,9 @@ fn hint_11(world: &mut World, me: &Me, c: &Ctx) -> Option<Goal> {
             }
         }
         // M3: at the helipad, get out.
-        3 if c.has(0x14f) => Some(Goal::Exit),
+        // (Out of the helicopter: the generic goals walk the brother to
+        // the gang, trigger 0x150.)
+        3 if c.has(0x14f) && !me.on_foot => Some(Goal::Exit),
         // M5: at the meeting point, get out; after the swap, kill them all.
         5 if c.has(0x1f7) => Some(Goal::Exit),
         5 if c.has(0x21c) || c.has(0x21d) => kill_ids(world, &[0x1f7, 0x1f8, 0x1f9, 0x1f6]),

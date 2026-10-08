@@ -37,7 +37,7 @@ The game uses a **variable timestep counted in whole ticks.**
 - Every rate in this document is "per tick" and gets multiplied by `ticks`. Some of the code instead loops
   `ticks` times (sub-stepping).
 
-**68k build (Update 7, the target).** Main loop `FUN_000ec686`, around line 1950 of its decompile:
+**68k build (Update 7).** Main loop `FUN_000ec686`, around line 1950 of its decompile:
 
 ```
 now = DateStamp ticks (50 Hz, FUN_00110e28; dos.library LVO −0xC0)
@@ -49,8 +49,21 @@ ticks = clamp(ticks_raw, 1, 5); last = now (end of frame)
 So **one game tick is 1/25 s on 68k** (C).
 
 **OS4 port.** It scales the 50 Hz timer by 60/50 (`t*0x3c/0x32`, in `FUN_010692bc` and `FUN_0110761c`), so a
-tick there is **1/30 s** (C). A faithful port of Update 7 should use **25 Hz**. With exactly 1 tick per step,
-every rule below reproduces the original exactly.
+tick there is **1/30 s** (C).
+
+**Mac release.** `amiga_levelloop` @ 10100f50 has the same code on `TickCount()` (60 Hz), halved:
+`ticks_raw = (TickCount() − last + 1) >> 1`, a busy-wait of at least 2 Mac ticks per game tick, clamp 1..5. A
+tick is **1/30 s** (CONFIRMED; `analysis/mac/gameplay.md` §1). Both builds mix 735 audio samples per tick
+(22050/30, `UpdateAudio(ticks*0x2df − 1)`), so 30 Hz looks like the design rate and the 68k's 25 Hz an artefact
+of the 50 Hz DateStamp (I).
+
+**The port runs a fixed 30 Hz tick** (`Time::<Fixed>::from_hz(30.0)` in `main.rs`), as the Mac and OS4 do, with
+exactly 1 tick per step, so every rule below reproduces the original exactly. All per-tick constants are the
+same in all three builds, so only the wall-clock speed differs from the 68k (20 % faster). Time shown to the
+player is counted in ticks at 30 per second: the level clock and trophy minutes (1800 ticks, `DAT_0114c738`),
+the HUD countdown (`counter / 30`), the replay duration, and the level-end delay (Mac fade counter 150 ticks =
+5 s; 68k and OS4 100 ticks). The seconds quoted below are at 25 Hz (68k) unless marked; divide by 1.2 for the
+port.
 
 The demo time limit is 9000 ticks: `DAT_0034c414`, message 2490 "Time out!".
 
@@ -303,16 +316,17 @@ else:
     if speed_prev == 0: t = 0; P = −1; N = 5          // start: fade into frame 5
     t += speed·ticks·3/2
     while t >= 256 (max 3×): t −= 256; P = N; N = (N+1) mod 12;  footstep check
-    while t < 0   (max 3×): t += 256; N = P; P = (P−1) mod 12   // walking backwards
-footstep check (when the frame being left is 0 or 6, i.e. a foot plants):
+    while t < 0   (max 3×): footstep check on N; t += 256; N = P; P = (P−1) mod 12   // walking backwards
+footstep check (when the frame being left is 0 or 6, i.e. a foot plants; also walking backwards, Mac `do_Person`
+@ 1013fbd0 l.106448, 68k ~122773):
     cube = square(x,y)[level]
-    if top face type == 4 (water): sound 0x41 (splash)
+    if top face type == 4 (water): sound 0x41 (splash, range 15000; other steps 19000)
     else sound = surface sound of top texture (FUN_00091dde); if sound is 0x32/0x33 (snow):
          footprint effect type 8 at (x ± cos h/2, y ∓ sin h/2) (left/right by frame)
 ```
 
 At top speed 96 the blend gains 144 per tick, which is 0.5625 frames per tick. A full 12-frame cycle takes 21.3
-ticks: **0.85 s at 25 Hz**.
+ticks: **0.85 s at 25 Hz**, 0.71 s at 30 Hz (port).
 
 There is no separate run animation. "Running" is just a higher speed, so the legs cycle faster.
 
@@ -394,8 +408,20 @@ if throttle > 0:   // backward
     land:  speed −= 24·ticks; floor −clamp(H·70/100 + 35, 24, 64)
     water: speed −=  6·ticks; floor −clamp(H·70/100 + 35, 6, 16)
 if throttle == 0:  speed moves toward 0 by 8·ticks
-vx (+0x2fa/+0x2fc) = sin[h]·speed >> 8 ;  vy (+0x2fe/+0x300) = cos[h]·speed >> 8
+vx (+0x2fa/+0x2fc) = sin[h]·speed >> 8 ;  vy (+0x2fe/+0x300) = cos[h]·speed >> 8     // Amiga
+vx (+0x7dc) = (vx + (speed·sin[h] >> 7)) / 3 ;  vy (+0x7e0) = (vy + (speed·cos[h] >> 7)) / 3   // Mac
 ```
+
+**Mac velocity smoothing (C: Mac `do_Person` @ 1013fbd0, l.106712–106721; 68k ~123026).** The Mac closes only 2/3
+of the gap to `sin·speed >> 8` each frame (per frame, not times ticks; `/` truncates toward zero). Steady state is
+the same, but starts, stops and turns are softer, and anything else that changes the velocity carries over a few
+frames: the wall-bounce sign flip and the pushes from `CheckForCollisions` (people hit by a car are knocked along).
+The port follows the Mac.
+
+**Order (C).** Each frame the object is first moved with its current velocity (`MoveObject_General` @ 1006e4f0 /
+68k `FUN_000e0e46`, §4.3), then `do_Person` reads the AI and controls and computes the velocity for the next frame.
+The port's `move_people` does the same (move, collide, water, then turn/speed/velocity). Remaining difference (I):
+the port's AI (`ped_ai`) runs before the move, so it sees the position and wall hit of the previous move.
 
 | Quantity | Per tick | Per second at 25 Hz (68k) | At 30 Hz (OS4) |
 |---|---|---|---|
@@ -452,7 +478,7 @@ else:                                               // drowned
     state = 6 (removed)
 ```
 
-- From a map-0 river surface (z 24000) you drown in (27000−24000)/24 = **125 ticks, 5 s**.
+- From a map-0 river surface (z 24000) you drown in (27000−24000)/24 = **125 ticks** (5 s at 25 Hz, 4.2 s at 30 Hz).
 - Climbing out is only possible while the bank top is within the 64 h-unit step of your z (§5.1). In practice you
   cannot climb back out of the rivers (I).
 - Footsteps in water play splash sound 0x41 (Update 3 "splashing sound when you walk through a pond").
@@ -462,19 +488,24 @@ else:                                               // drowned
 **Health.**
 
 - Health is at +0x34a (68k) / +0x34c (OS4). Everyone starts at **100** (constructor).
-- The player regains **+1 every 250 ticks** (10 s at 25 Hz) while health is 1..99. This is `DAT_0034c410`
+- The player regains **+1 every 250 ticks** (10 s at 25 Hz, 8.3 s at 30 Hz) while health is 1..99. This is `DAT_0034c410`
   at the tail of `FUN_000e3a58`. While driving, the regen applies to the stored on-foot health, `DAT_0034c1a0[p]`
   (68k) / `DAT_012a6304[p]` (OS4).
 
 **Damage sources:**
 
 - **Impacts** with vehicles or other objects (`FUN_01056c58` / `FUN_000de0b6`):
-  - `base = ((dvx²+dvy²+(dvz/2)²) >> 7)·min(m_self, m_other)/m_self`
+  - `base = ((dvx²+dvy²+(dvz/2)²) >> 7)·min(m_self, m_other)/m_self`, where **dv is the averaged push
+    correction** of the pair (the sum over touching circle pairs of `d·R/|d| − d`, divided by their count; the z
+    term is accumulated doubled and halved here), not the relative velocity (Mac `CheckForCollisions` @ 1006a150,
+    CONFIRMED). It applies only when the victim's damage filter (+0x8ac Mac) is −1. Vehicles take base>>5.
   - The player on foot takes base>>3; NPC people take base>>1.
   - More than 10 damage plays scream 0x25–0x27 and blood effects 8/9.
   - Death from this shows "Flattened!" (2021).
   - If the killing car is the one this ped was pulled out of (car id `+0x498` == ped `+0x340`): "Irony bonus!"
-    (2027) and +10000 × multiplier.
+    (2027) and +10000 × multiplier. The ids are serial numbers from `NewObj` (Mac `+0x980`), and
+    `GetOutOfVehicle` @ 10065c90 writes the car's into the ejected person's `+0x820` (CONFIRMED). The port keeps
+    the car entity in the thrown-out driver's `Obj::owner` (hijacks, `boarding.rs`).
 - **Punch** (fists, model code 0xfe, when the fire cooldown +0x3aa(68k) is 0):
   - The model switches to MaleNormalPunch.
   - The hit point is `pos + (sin h, cos h)·256`.
@@ -571,10 +602,13 @@ The floor is written to all 9 floor samples (+0x3d6..+0x3f6 68k; centre +0x3e6/+
 At each square boundary crossed, it finds which cube level the segment height falls in:
 
 ```
-level = 0 if zh >= top0 (below top of cube 0, where top0 = 1500 − h0) and
-            (cube0 is a solid Flat non-water cube, or zh is below its lower edge top0+h0−h2) …
+level = 0 if zh >= top0 (at or below the top of cube 0, where top0 = 1500 − h0)
+          or (cube 0 is not a solid Flat non-water cube and zh >= top0 + h0 − h2) …
         (same test for cubes 1, 2; −1 if above all three)
 ```
+
+This is an **OR** (Mac `GetCubeNumFast` @ 100ae920, CONFIRMED): a slope or water cube is entered as soon as the
+probe is below either end's height. The port follows it (`collide.rs` `cube_num`).
 
 The crossing is **blocked** when all of these hold:
 
@@ -586,8 +620,12 @@ The crossing is **blocked** when all of these hold:
 The face checked depends on the movement direction: +x checks the W face (+0xd), −x the E face (+0xb), +y the N
 face (+0xa), −y the S face (+0xc).
 
-- Faces of type 3 (Alpha/glass) are **broken by projectiles**: the cube is deleted and sound 0x31 plays. People
-  are blocked by them.
+- Faces of type 3 (Alpha/glass) are **broken by any object whose class is not 1** (vehicles and projectiles):
+  the cube is deleted (`+8 = 0`) and sound 0x31 plays at the square centre (volume 20000000, pitch 7000).
+  People are blocked by them, and line-of-sight tests (object 0) never break them (Mac `GetCollideInfo` @
+  100af0e0, CONFIRMED). The port reports the "cube smashed" trigger (0x2a) when it happens.
+- The segment is walked **from the second point to the first**, and the other coordinate and the depth are
+  interpolated at each boundary. Deltas of 0xae9d or more on any axis are not tested (no hit).
 - Map edges block.
 
 **Per-step resolution for people (`FUN_00044f82`, 0x4909 ∈ {1, 2}):**
@@ -596,11 +634,11 @@ face (+0xa), −y the S face (+0xc).
 zh = (z − 0x400) >> 4               // probe 64 h-units above the origin → obstacles lower than this are stepped over
 r  = model.0x48c4                    // 192 for every person ("People now have volume", Update 1)
 test segments (x−r,y)→(x+r,y), (x+r,y)→(x−r,y), (x,y−r)→(x,y+r), (x,y+r)→(x,y−r) at zh
-if blocked in x: x = prev_x ± 0x80   (sign = collision side)
+if blocked in x: x = prev_x ± 0x80   (sign = collision side; both sides blocked → the later probe wins, −0x80)
 if blocked in y: y = prev_y ± 0x80
 loop: test (x,y,zh) → (prev_x,prev_y,(prev_z−0x400)>>4); while blocked, revert the blocked axis to prev
 recompute floor/level/in_water at (x,y); ceiling check (§4.3)
-clamp x,y to [0,0x3ffff]
+clamp x,y to [0,0x3ffff]; a clamp counts as a hit (flag +1 at 0, −1 at 0x3ffff)
 prev_{x,y,z} (+0x40a.. 68k / +0x40c.. OS4) = x,y,z
 ```
 
@@ -628,6 +666,18 @@ wall (`vx = ±|vx|`). AI peds use the "hit a wall" flag to choose a new directio
 - Only applies when the z ranges overlap within ±500.
 - Penetration is resolved by moving the person and its velocity out by **half the overlap** per sub-step.
 - **People take no damage from scenery.** Vehicles do, except from the snowman (0x4908 = 0xfe).
+
+Details from the Mac `AddCollideObj` @ 10055c70 (CONFIRMED; port: `collide.rs` `scenery_collide`, called from
+`driving.rs` and `people.rs`):
+
+- Only scenery on the object's own cube level, in the squares under its footprint (a person's rotated square of
+  radius r; a vehicle's rotated box ±half-width × [−rear, front]; the RC car one square more each side).
+- A vehicle tests 4 circles along its heading at {0, r − rear, front − r, front/2 − r}, radius = half-width;
+  each only if its ground height (box heights +0x8c8, +0x8c4, +0x8cc, +0x8cc) is within 500 of z.
+- A hit pushes position and velocity out by half the overlap, and sets **speed = 0** for every class.
+- Vehicle damage = `(px² + py²) >> 12` of the half push; below 11 Thud (5) at volume dmg·100000, pitch 8000; else
+  Thud2 (0x4b), the crash flag, and the bus scream. The snowman instead throws 5 snow effects and is removed.
+- Projectiles (class 2): the crate, missile and bullet cases are in `combat_police.md`.
 
 Pickups (`0x4908` ∈ weapon IDs, 0x50 info, 0x51 key, 100 radar) are collected by walking over them. That logic
 is in combat_police.md.
@@ -660,11 +710,15 @@ state 2:
     - a police vehicle in state 0x0f.
   - A candidate must also have +0x33c == 0 (not burning/destroyed) and (+0x33a == 0 or `model.0x492c ≠ 0`,
     the boat).
-  - The **driver's-door point** is `D = veh.pos + R(h)·(lateral = −person.0x48c4 − veh.0x48f4, forward =
-    veh.0x48f8)`, with lateral measured along model +X.
+  - The **driver's-door point** is `D = veh.pos + R(h)·(lateral = veh.0x48f4 + person.0x48c4, forward =
+    veh.0x48f8)`, with lateral measured along model +X. With `0x48f4 = −maxX` that is **192 inside** the
+    right side (Mac `GetInOutVehicles` @ 10066140: `model+0x8150 + person_model+0x8120`). CONFIRMED.
+  - Candidates also exclude objects in state 0x14 (route flee) and, unless police, 0x0f (goto).
   - The nearest candidate by squared distance from the player to D is chosen, with **no range limit**: any of the
     ≤ 32 active objects.
-  - **Boat** (`0x492c ≠ 0`): board immediately if within `veh.0x48c4/8` and |dz| ≤ 0xbff.
+  - **Boat** (`0x492c ≠ 0`): board immediately if the squared distance from the **boat centre**, in >>5 units,
+    is below `(veh.0x48c4 >> 3)²` (about 4·r) and |dz| < 0xc00; otherwise nothing happens (no walk). The
+    person's burn timer is not checked on this path. CONFIRMED (Mac `GetInOutVehicles`).
   - **Any other vehicle**: set +0x420 = vehicle, +0x424 = 1 (walking to car), waypoint +0x310 = 5.
 - **If already heading for a car** (+0x424 == 1): pressing again cancels (+0x424 = 0).
 
@@ -701,7 +755,9 @@ When it is fully open and the player's +0x33c ≤ 0:
 1. The player becomes the vehicle: `DAT_012a62f4[p] = vehicle index`.
 2. The vehicle's name phrase (`model+0x493c`) is shown.
 3. **Hijack**, if the vehicle has an AI driver (+0x344 ≠ 0):
-   - Wanted level goes to at least **3** for a police car (`0x490a`), otherwise at least **2**.
+   - Wanted level goes to at least **3** for a police car (`0x490a`), otherwise at least **2**: if the
+     vehicle's own wanted level is ≤ 3 (≤ 2), it becomes `max(person.wanted, 3 (2))` and the wanted timer
+     (`DAT_0030c3b8`, Mac `DAT_1017c614`) is reset to 0. CONFIRMED (Mac `GetInOutVehicles`).
    - **If the vehicle is in state 5** (stopped and empty), no driver is ejected. Score += 1500 (police) or 1000,
      times the multiplier `DAT_0114c74c`.
    - **Otherwise the driver is thrown out** by `FUN_01052714`:
@@ -728,8 +784,16 @@ When it is fully open and the player's +0x33c ≤ 0:
 6. Vehicle state = 2, +0x344 = 0, +0x426 = 1.
 7. The person object is removed (`FUN_01047824`).
 
-**Door closing.** While the vehicle is player-driven the door shuts at `0x418 −= 50·ticks`, about 18 ticks. It
-plays sound 0x28 (door slam) when it reaches 0 (68k `FUN_000e3a58`, around line 2860).
+**Door closing.** While the vehicle is driven the door shuts at `0x418 −= 50·ticks`, about 18 ticks. It
+plays sound 0x28 (door slam) when it reaches 0 (68k `FUN_000e3a58`, around line 2860). Driven means state 2
+(player), 3, 8–11, 0x0f, 0x14, 0x15, or 0x0c for a police model (Mac `do_Other` @ 10146280). CONFIRMED.
+
+**Port** (`sim/boarding.rs`): target pick 192 inside, boat boarding on the spot, waypoints 0–5 with the
+contact re-plan (`Touched`, set by `contact.rs`) and the circle arrival, the burn check before getting in, the
+state-5 hijack branch for cars with an AI driver (`AiDriver`, set on traffic), the wanted-timer reset, the
+exit offset `1.2·(192 + maxX)` (`side_point`, also for ejected drivers and the cop drop-off in `pursuit.rs`),
+the boat's 1.6·L water fallback, door closing for AI states, and the helicopter three-press cycle
+(`HeliExit`).
 
 ### 6.2 Door models (`Objects/Doors/*.Obj`) (C: OS4 `FUN_010c101c` tail)
 
@@ -848,8 +912,10 @@ OS4 +0x428.
 
 Common AI steering, for any target heading T:
 
-- If the signed angle to T is under 200 units (0xc8; 0xa0 on one branch), throttle forward.
-- Otherwise steer toward T.
+- With d1 = (T − heading) and d2 = (heading − T) mod 0x1680, take the shorter one. If it is under the threshold
+  (d1 < 0xc9, d2 < 200), throttle forward; otherwise steer that way (C: Mac `do_Person` l.105830–105876). Steer
+  and throttle exclude each other, so a fleeing ped does not accelerate while turning.
+- The wander (below) uses d1 < 0xc9, d2 < 0xa0, and sets T = −1 instead of throttling.
 - Several states release the throttle above a speed cap so the person ambles: 0x30 for police and states 0xe,
   0x10, 0x11; 0x20 for state 0xf; 0x18 for flee.
 
@@ -900,7 +966,9 @@ each**.
 
 ### 7.3 Walking, panic, police
 
-**Wander (state 3).** The target heading T is at +0x2ee (68k) / +0x2f0 (OS4).
+**Wander (state 3).** The target heading T is at +0x2ee (68k) / +0x2f0 (OS4) / +0x7d0 (Mac).
+
+Amiga (68k `FUN_000e3a58` ~122295–122400):
 
 ```
 if T < 0: T −= ticks                    // count straight-walking ticks
@@ -915,6 +983,37 @@ if T < 0 and speed < 0x30: throttle forward
   Corners keep them on the pavements loosely, not strictly.
 - Typical wandering speed oscillates around 40–64, average about **52 units/tick** (0.63 squares/s at 25 Hz).
 - Peds do not avoid cars or other people; only the pair collision of §5.3 applies.
+
+**Mac wander (C: Mac `do_Person` @ 1013fbd0, l.105953–106096).** The Mac rewrote it so peds keep to the pavement.
+New fields: a re-aim timer (+0x900) and an anchor (+0x7d4/+0x7d8). `CreateObject` @ 10075630 sets the anchor to
+(−1, −1) and T to the spawn heading; `AddThing` @ 10058350 (the ped spawner, §7.2) sets the anchor to the spawn
+square's centre.
+
+```
+if timer > 0: timer −= ticks
+if !hit_wall and square(x, y)[level].flags & 0x20
+             and square(clamp((x + 2·sin h) >> 11, 0, 127), clamp((y + 2·cos h) >> 11, 0, 127))[level].flags & 0x20:
+    if timer < 1:
+        if random(50) == 0: T = −1                        // straight on; re-rolled next tick
+        else: T = heading + random(1000) − 500; timer = 3  // not wrapped: T < 0 walks straight
+    anchor = ((x & ~0x7ff) + 0x400, (y & ~0x7ff) + 0x400)  // centre of the current square
+elif timer < 1:
+    T = GetAngle(x − anchor.x, y − anchor.y); timer = 20   // head back to the last pavement square
+if T >= 0:
+    S = (T + 0x168)/0x5a0·0x5a0; T += 16·ticks toward S (always a full step); wrap T once
+    steer toward T (d1 < 0xc9 / d2 < 0xa0, see above): facing → T = −1
+if T < 0: throttle if speed < 0x30
+else:     throttle if speed < 0x18                      // new: walk on slowly while turning
+```
+
+- The 50-tick straight walk and the 90–270° turn are gone. On pavement a ped re-aims every 3 ticks to ±31° of its
+  heading, and the 90° snap pulls it back to the nearest axis, so it ambles along the pavement with small wobbles.
+- At a kerb (the square 512 ahead is not pavement), off pavement, or against a wall, it turns back toward the
+  centre of the last good pavement square every 20 ticks.
+- Quirk (I): peds that enter state 3 by another route (thrown-out drivers, the end of a flight, cops leaving cars,
+  scripts) keep the anchor (−1, −1) until they first stand on pavement, so off pavement they head for the map's
+  north-west corner.
+- The port follows the Mac (`sim/people.rs` `wander`). Leaving the flee state does not reset T (Mac l.105694).
 
 **Panic** (OS4 `FUN_010435f4` when the player fires; `FUN_01043788` for an explosion at a point):
 
@@ -968,7 +1067,7 @@ The two builds differ in alignment. In 68k, ints between 0x2e6 and 0x41e sit 2 b
 | +0x18/1c/20 | same | motion frame N, frame P, blend |
 | +0x24 | same | model pointer (swapped for weapon/fire/punch poses) |
 | +0x2fa/2fe/302 | +0x2fc/300/304 | vx, vy, vz (per tick) |
-| +0x2ee | +0x2f0 | wander target heading of state-3 peds (C): starts as the spawn heading, snapped to the nearest 90°, turned toward at ±16/tick. Negative = countdown; past −50 (blocked, or off squares with flag 0x20) it picks heading + 90° + rand(180°). Scripts set −1 (68k `FUN_000e3a58` ~122305–122345, `FUN_000b42b8`). |
+| +0x2ee | +0x2f0 | wander target heading of state-3 peds (C; Mac +0x7d0, with re-aim timer +0x900 and anchor +0x7d4/+0x7d8, §7.3): starts as the spawn heading, snapped to the nearest 90°, turned toward at ±16/tick. Negative = countdown; past −50 (blocked, or off squares with flag 0x20) it picks heading + 90° + rand(180°). Scripts set −1 (68k `FUN_000e3a58` ~122305–122345, `FUN_000b42b8`). |
 | +0x30e | +0x310 | door waypoint 0..5 |
 | +0x326 | +0x328 | turn rate (±100) |
 | +0x32e | +0x330 | wanted level |

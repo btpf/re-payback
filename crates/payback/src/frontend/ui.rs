@@ -42,8 +42,10 @@ pub struct Input {
     pub pad: Vec<GamepadButton>,
 }
 
-/// Menu sounds (`FUN_010053c4(id, period)`, played on Paula at full
-/// volume; rate = PAL clock / period).
+/// Menu sounds (Amiga `FUN_010053c4(id, period)`, Mac `PlaySound__Fii`
+/// @ 100f1960): rate = NTSC clock / period, `1.0 / (2.79365e-7 · period)`
+/// on the Mac (the Amiga used the PAL clock 3,546,895); played through
+/// [`crate::audio::Sound::menu`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sfx {
     /// (0x20, 0xeb) ChangeSelection.
@@ -61,7 +63,7 @@ impl Sfx {
             Sfx::Select => (0x21, 0x10e),
             Sfx::Refuse => (0x2d, 0xa0),
         };
-        (id, 3_546_895.0 / period as f32)
+        (id, 3_579_545.0 / period as f32)
     }
 }
 
@@ -130,6 +132,9 @@ pub struct Ctx<'a> {
     pub hardware: bool,
     /// The window's monitor and size (graphics options).
     pub display: &'a super::display::Display,
+    /// Gamepads connected (the Mac offers the multiplayer devices 0..3
+    /// only when HID input exists, `ControlMethodExists` @ 100f8420).
+    pub pads: usize,
     pub sfx: Vec<Sfx>,
     pub requests: Vec<Request>,
 }
@@ -214,6 +219,41 @@ impl OptionObj {
     }
 }
 
+/// The model the Mac spins behind its control setup (`controlsetup`,
+/// `DoControlSetup` @ 100a1f80) and music setup (`cd`, `DoCDAudioSetup` @
+/// 100a1500); the Amiga screens have none. `CreateObject(model, 0, 600, 0)`
+/// with z = 6000, the option objects' spin, y halved every frame, and z
+/// bobbing: z += v, then v += 2 while z <= 6000, else v -= 2 (v from 100).
+#[derive(Clone, Copy, Debug)]
+pub struct Bobbing {
+    pub view: ModelView,
+    v: i32,
+}
+
+impl Bobbing {
+    pub fn new(path: &'static str) -> Bobbing {
+        Bobbing {
+            view: ModelView {
+                path,
+                pos: [0, 600, 6000],
+                rot: [0; 3],
+            },
+            v: 100,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        let r = &mut self.view.rot;
+        r[0] = (r[0] - 0x20).rem_euclid(TURN);
+        r[1] = (r[1] + 0x40).rem_euclid(TURN);
+        r[2] = (r[2] - 0x10).rem_euclid(TURN);
+        let p = &mut self.view.pos;
+        p[1] >>= 1;
+        p[2] += self.v;
+        self.v += if p[2] < 0x1771 { 2 } else { -2 };
+    }
+}
+
 /// Drawing target for one frame: the back layer (behind the 3D model)
 /// and the front layer (over it).
 pub struct Ui<'a> {
@@ -265,9 +305,14 @@ impl Ui<'_> {
     /// the 50 % blend with colour 0, i.e. half brightness), centred. Used
     /// for an option that cannot be changed.
     pub fn centred_dim(&mut self, s: &str, y: i32, colour: u8) {
+        let x = self.cx() - 7 * text_len(s) / 2;
+        self.text_dim(s, x, y, colour);
+    }
+
+    /// [`Ui::centred_dim`] from `x`.
+    pub fn text_dim(&mut self, s: &str, mut x: i32, y: i32, colour: u8) {
         let font = if colour == 2 { &self.fonts.them } else { &self.fonts.you };
         let pal = self.front.pal;
-        let mut x = self.cx() - 7 * text_len(s) / 2;
         let mut chars = s.chars();
         while let Some(mut c) = chars.next() {
             if c == '^' {
@@ -469,6 +514,11 @@ pub trait Screen: Send + Sync + 'static {
     /// Screen brightness 0..1 (palette fades, `FUN_0104138c`).
     fn brightness(&self) -> f32 {
         1.0
+    }
+    /// The CD track this screen keeps playing (`CD_CheckForTrackEnd(n)`
+    /// in its loop, Mac @ 100fb000; `crate::music`): 13 in the menus.
+    fn cd_track(&self) -> i32 {
+        13
     }
 }
 

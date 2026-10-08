@@ -238,7 +238,8 @@ fn decay_wanted(
 /// Police on foot: chase, arrest and shoot when the player is wanted
 /// (§2.4; 68k ~121928-122130). A driving player is arrested from the
 /// driver's door: the cop opens it 100 per tick (the player's door shuts 50
-/// per tick) and busts him when it is fully open.
+/// per tick) and busts him when it is fully open. Cops stand idle while
+/// the player is stunned (+0x490 / Mac +0x97c).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn cops(
     mut commands: Commands,
@@ -252,18 +253,38 @@ fn cops(
     mut title: ResMut<BigTitle>,
     mut dialog: ResMut<Dialog>,
     mut player: Query<
-        (Entity, &mut Obj, Has<Person>, Option<&mut Drive>),
+        (Entity, &mut Obj, Has<Person>, Option<&mut Drive>, Option<&Person>, Option<&Vehicle>),
         (With<CameraTarget>, Without<Busted>),
     >,
     mut q: Query<(&mut Obj, &mut Stick, &Person, Option<&mut Arsenal>), Without<CameraTarget>>,
 ) {
     let Some(mut library) = library else { return };
     let aggr = aggr.map(|a| a.0).unwrap_or(2);
-    let Ok((pe, mut p, p_on_foot, mut door)) = player.single_mut() else {
+    let Ok((pe, mut p, p_on_foot, mut door, p_person, p_vehicle)) = player.single_mut() else {
         return;
     };
     let wanted = p.wanted;
     let p_info = library.model(p.model).info.clone();
+    // The player's stun timer (+0x97c; only people lie down).
+    let p_stunned = p_person.is_some_and(|pp| pp.stun > 0);
+    // Arrest point: the target model's door offsets (+0x8150/+0x8154 Mac,
+    // 68k +0x48f4/+0x48f8: -max|X| and the door's longitudinal position
+    // for vehicles, 0 for people), with no lead and no cop radius.
+    let (door_lat, door_lon) = match p_vehicle {
+        Some(v) if !p_on_foot => (
+            -p_info.radius,
+            super::boarding::door_y(v.kind, p_info.max_y),
+        ),
+        _ => (0, 0),
+    };
+    let arrest_at = {
+        let (s, c) = (trig.sin(p.heading), trig.cos(p.heading));
+        p.pos.truncate()
+            + IVec2::new(
+                (door_lon * s >> 8) + (door_lat * c >> 8),
+                (-door_lat * s >> 8) + (door_lon * c >> 8),
+            )
+    };
     for (cop, mut stick, person, ars) in &mut q {
         if person.kind != COP || cop.state == State::Player {
             continue;
@@ -272,6 +293,7 @@ fn cops(
         library.model_mut(cop.model).info.police = true;
         if wanted < 3
             || person.stun > 0
+            || p_stunned
             || cop.health < 1
             || p.health < 1
             || cop.state == State::Dead
@@ -285,7 +307,7 @@ fn cops(
         if !p_on_foot {
             let (s, c) = (trig.sin(p.heading), trig.cos(p.heading));
             let lat = -(p_info.radius + 192);
-            let lon = p_info.max_y / 2;
+            let lon = door_lon;
             goal += IVec3::new((c * lat + s * lon) >> 8, (-s * lat + c * lon) >> 8, 0);
         }
         let want = heading_of(goal.x - cop.pos.x, goal.y - cop.pos.y);
@@ -305,12 +327,16 @@ fn cops(
             },
             ..default()
         };
-        // Arrest: close, the player nearly stopped, same level.
-        let d = (goal - cop.pos).truncate() / 16;
+        // Arrest: close to the door point, the player nearly stopped, same
+        // level (Mac `do_Person` @ 1013fbd0 police branch, 68k ~121940):
+        // d in >>4 units; reach (cop.r + t.r)·3>>5 on foot, cop.r>>3 at
+        // a vehicle, with the models' real radii (+0x8120 / +0x48c4).
+        let d: IVec2 = (cop.pos.truncate() - arrest_at) >> IVec2::splat(4);
+        let cop_r = library.model(cop.model).info.radius;
         let reach = if p_on_foot {
-            (192 + 192) * 3 / 32
+            (cop_r + p_info.radius) * 3 >> 5
         } else {
-            192 / 8
+            cop_r >> 3
         };
         if d.length_squared() < reach * reach && p.speed.abs() < 0x1e && p.level == cop.level {
             stick.throttle = 0;

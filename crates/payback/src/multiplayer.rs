@@ -238,13 +238,20 @@ fn read_devices(
                 if just(b::NEXT_WEAPON) {
                     step = 1;
                 }
+                // Digits 0..7 pick a weapon for every keyboard player (Mac
+                // `UpdateInputStatus` @ 100f8490 fixed keys, OS4
+                // `FUN_0103f3d0`).
+                if let Some(d) = (0..8u8).find(|&d| keys.just_pressed(b::digit_key(d))) {
+                    input.weapon_pressed = Some(d);
+                }
             }
             Device::Joystick(n) => {
                 let Some((_, g)) = pads.get(n as usize) else {
                     *input = Default::default();
                     continue;
                 };
-                let t = &controls.mp_pad[p.min(3)];
+                // The picked device's table (Mac `UpdateInputStatus` @ 100f8490).
+                let t = &controls.pads[n as usize % 4];
                 let held = |a: usize| pad_held(g, t[a]);
                 let s = g.left_stick() + g.dpad();
                 input.left = s.x < -0.5 || held(b::LEFT);

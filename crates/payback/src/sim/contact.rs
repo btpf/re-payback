@@ -57,8 +57,10 @@ struct Body {
     /// Player number (kill credit in multiplayer).
     player_no: Option<u8>,
     speed: i32,
-    /// Velocity before this tick's contacts (impact damage).
-    vel: IVec3,
+    /// Damage filter (`+0x8ac`): contacts hurt only when -1.
+    filter: i32,
+    /// The vehicle this person was thrown out of (Irony bonus).
+    owner: Option<Entity>,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -71,12 +73,14 @@ fn contacts(
     mut title: ResMut<BigTitle>,
     mut effects: ResMut<Effects>,
     mut hurt: MessageWriter<Hurt>,
+    session: Res<PlayerSession>,
     mut q: Query<
         (Entity, &mut Obj, Has<Vehicle>, Has<Person>, Has<CameraTarget>, Option<&mut Drive>),
         Without<Projectile>,
     >,
 ) {
     let Some(library) = library else { return };
+    let mut irony = Vec::new();
     let bodies: Vec<Body> = q
         .iter()
         .filter(|(_, o, ..)| o.state != State::Removed)
@@ -93,7 +97,8 @@ fn contacts(
                 player,
                 player_no: if player { Some(o.player.unwrap_or(0)) } else { None },
                 speed: o.speed,
-                vel: o.vel,
+                filter: o.filter,
+                owner: o.owner,
             }
         })
         .collect();
@@ -103,6 +108,9 @@ fn contacts(
             // A person never pushes a car; two people only nudge.
             let r = ((a.radius + b.radius) * 17 / 16) as i64;
             let mut push = IVec3::ZERO;
+            // The z correction, kept apart from the push (damage only):
+            // `2·(dz/2·R/d − dz/2)` per circle pair.
+            let mut push_z = 0i64;
             let mut contacts = 0;
             for ca in &a.circles {
                 for cb in &b.circles {
@@ -117,11 +125,19 @@ fn contacts(
                     let dist = (dist2 as f64).sqrt();
                     let k = r as f64 / dist - 1.0;
                     push += IVec3::new((d.x as f64 * k) as i32, (d.y as f64 * k) as i32, 0);
+                    push_z += 2 * ((d.z / 2) as f64 * k) as i64;
                     contacts += 1;
                 }
             }
             if contacts == 0 {
                 continue;
+            }
+            // Touch flag (OS4 +0x4a4, Mac +0x98c) for the walk-to-door
+            // re-plan (`boarding.rs`); only players walk to cars.
+            for (x, y) in [(a, b), (b, a)] {
+                if x.person && x.player && y.vehicle {
+                    commands.entity(x.e).insert(super::boarding::Touched);
+                }
             }
             let p = push / contacts;
             let m = a.mass.min(b.mass);
@@ -134,16 +150,20 @@ fn contacts(
                 oa.vel -= p * m / a.mass;
                 oa.pos -= p * m / a.mass;
             }
-            // Damage from the push (relative impact). People take it from
-            // the relative velocity (people.md §4.5:
-            // `((dvx²+dvy²+(dvz/2)²) >> 7)·min(m)/m_self`), not from how
-            // deep the bodies overlap: someone stepping out right next to
-            // a car (a cop leaving his car) is pushed clear, not crushed.
-            let push_base = (((p.x as i64).pow(2) + (p.y as i64).pow(2)) >> 7) as i32;
-            let dv = (a.vel - b.vel).as_i64vec3();
-            let vel_base = ((dv.x * dv.x + dv.y * dv.y + (dv.z / 2) * (dv.z / 2)) >> 7).min(i32::MAX as i64) as i32;
+            // Damage from the averaged push correction, z included (Mac
+            // `CheckForCollisions` @ 1006a150, 68k `FUN_000de0b6`:
+            // `((px² + py² + (pz/2)²) >> 7)·min(m)/m_self`, the z term
+            // doubled per pair and halved here), for every victim with the
+            // damage filter -1. A person is only hurt by a vehicle moving
+            // faster than 50 (100 for the player), so a cop stepping out
+            // beside his parked car is pushed clear, not crushed.
+            let pz = push_z / contacts as i64 >> 1;
+            let base = ((p.x as i64).pow(2) + (p.y as i64).pow(2) + pz * pz) >> 7;
+            let base = base.min(i32::MAX as i64) as i32;
             for (victim, other, o, other_speed, drive) in [(b, a, &mut ob, a.speed, db), (a, b, &mut oa, b.speed, da)] {
-                let base = if victim.person { vel_base } else { push_base };
+                if victim.filter != -1 {
+                    continue;
+                }
                 let shift = if victim.vehicle { 5 } else if victim.player { 3 } else { 1 };
                 let mut dmg = (base as i64 * m as i64 / victim.mass as i64) as i32 >> shift;
                 if victim.person {
@@ -156,8 +176,15 @@ fn contacts(
                 if dmg <= 0 {
                     continue;
                 }
+                let alive = o.health >= 1;
                 o.health -= dmg;
                 let at = SoundPos::At(o.posf());
+                // "Irony bonus!": the player runs a person over with the car
+                // that person was thrown out of (`+0x820` = the car's
+                // serial `+0x980`): phrase 2027, 10000 × multiplier.
+                if victim.person && alive && o.health < 1 && other.player && victim.owner == Some(other.e) {
+                    irony.push((other.e, other.player_no));
+                }
                 if victim.person {
                     o.speed = 0;
                     if dmg > 10 {
@@ -186,6 +213,14 @@ fn contacts(
                 }
                 hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false, attacker: other.player_no });
             }
+        }
+    }
+    for (e, player) in irony {
+        if let Ok((_, mut o, ..)) = q.get_mut(e) {
+            o.score += 10_000 * session.multiplier;
+        }
+        if let Some(t) = &texts {
+            title.show_for(player, t.global(2027));
         }
     }
 }

@@ -39,19 +39,53 @@ used: `OpenScreenTags`, `LoadRGB32`, `MatchFirst`, `WritePixelArray8`,
 
 Ghidra headless in the `payback-re` Docker image (see `Dockerfile`). The PEF
 loader picks the wrong language by default (`PowerPC:BE:64:VLE`), so force
-32-bit PowerPC:
+32-bit PowerPC. Run `MacJumpTables.java` before `ExportAll.java`:
 
 ```sh
-docker run -d --rm -v "D:/Payback Reverse Engineered:/work/impl" payback-re sh -c \
-  "mkdir -p /tmp/proj && analyzeHeadless /tmp/proj p_macx \
-   -import '/work/impl/extracted/mac/Payback/Payback (OS X)' \
-   -processor PowerPC:BE:32:default -scriptPath /work/impl/tools/ghidra \
-   -postScript ExportAll.java /work/impl/analysis/ghidra_macx"
+docker run -d --rm -v "D:/Payback Reverse Engineered:/work/impl" payback-re sh -c   "mkdir -p /tmp/proj && analyzeHeadless /tmp/proj p_macx    -import '/work/impl/extracted/mac/Payback/Payback (OS X)'    -processor PowerPC:BE:32:default -scriptPath /work/impl/tools/ghidra    -postScript MacJumpTables.java tsv=/work/impl/analysis/ghidra_macx/jumptables.tsv    -postScript ExportAll.java /work/impl/analysis/ghidra_macx    > /work/impl/analysis/ghidra_macx.log 2>&1"
 ```
+
+For the OS 9 build, use `Payback (OS 9)`, `p_mac9` and `ghidra_mac9`. Each
+build takes about 5 minutes to analyse and 5 minutes to export. To iterate on a
+script without analysing again, import once into a Docker volume
+(`-v payback_ghidra_proj:/proj`, `analyzeHeadless /proj p_macx -import ...`), then
+run `analyzeHeadless /proj p_macx -process -readOnly -noanalysis -scriptPath ...
+-postScript ...`.
+
+**Jump tables (`tools/ghidra/MacJumpTables.java`).** CodeWarrior compiles a
+`switch` into a table that it reaches through the TOC. The sequence is
+`cmplwi rI,N-1; bgt; lwz rB,d(r2)` (or `addi rB,r2,d`), then
+`slwi; lwzx; mtctr; bctr`. Ghidra cannot resolve these tables ("Could not
+recover jumptable ... Too many branches"). It treats the `bctr` as a call, and
+the case bodies end up outside every function. Before this script, the export
+was silently missing most of the level scripts (`ProcessTrigger_00` was 2,840
+bytes instead of 23,228), plus `SetTrigger_Long`, `ProcessTrigger_Random`,
+`DoKidnap`, `UpdateInputStatus`, the replay code (`GetNextFrame`,
+`GetAbbreviatedVals`) and `Get{Next,Prev}Weapon`.
+
+The script works on the raw instruction words. It reads r2 from the program
+context; for code outside any function it uses the TOC value that most
+functions carry (OS X `10183440`, OS 9 `10158f40`). It then reads the targets
+and does what Ghidra's `SwitchOverride.java` does: it disassembles each target,
+adds `COMPUTED_JUMP` references, writes a `JumpTable` override and rebuilds the
+function body. It works in passes, and auto-analysis runs between passes.
+
+It finds 75 tables in each build and applies 73. The other two are in
+PowerPlant code that isn't inside any function: OS X `10010350`/`100106e0`, OS 9
+`1000b7b0`/`1000baa0`. The roughly 700 `bctr` it skips are cross-fragment glue
+stubs, indirect calls and the register save/restore helpers. Those warnings
+are expected.
+
+Switch cases are labelled by target address (`case 0x1012a128:`), not by index.
+`jumptables.tsv` lists, for each table, the `bctr`, the function, the table
+form, the table address, the count and the targets in index order.
 
 Output: `analysis/ghidra_macx/` and `analysis/ghidra_mac9/`, each with
 `decompiled.c`, `functions.tsv` and `strings.tsv`, in the same format as the Amiga
-exports.
+exports, plus `jumptables.tsv`. The exports from before the jump-table pass are
+kept as `analysis/ghidra_macx_v1/` and `analysis/ghidra_mac9_v1/`.
+`ExportAll.java` now gives each function 300 s to decompile, up from 60 s,
+because the level scripts are large.
 
 ## Data differences (first pass, `analysis/mac_datadiff.py`)
 
@@ -78,6 +112,47 @@ The game's exe and window icon is the Mac app's `icns` 128 family (128/48/32/16
 with 8-bit masks; `payback_formats::icon::mac_app_icon`), embedded by
 `crates/payback/build.rs` from `extracted/mac`. It falls back to the Amiga
 `Payback.info`.
+
+## Data loading in the port
+
+`GameData` (`crates/payback/src/data.rs`) keeps the Amiga data as the
+required root and the Mac `Payback` folder as an optional second one.
+- `read` takes the Amiga file, matching names case-insensitively when the
+  exact one is missing, then a Mac-only file (`ObjectTextures/tanne`, the
+  new prop textures). `read_variant(rel, prefer_mac)` serves a Mac-or-Amiga
+  choice; `list_dir` merges both folders and skips `.DS_Store`,
+  `.FBCIndex`, `.FBCLockFolder` and the extractor's `*.rsrc` forks.
+- Texture lists: the Amiga `.CubeTextureList` / `.CubeTextureRemapList`,
+  else the Mac `CubeTextureList.txt` / `CubeTextureRemapList.txt`
+  (byte-identical; CONFIRMED, Mac strings `1018a4f9` / `10193015`).
+- Palette: always from the Amiga `Payback.exe`.
+- Cube textures (`Variants::textures`): the Mac set as a whole, else the
+  Amiga set. Short files are zero-padded to 64x64: the Mac
+  `TentRoof.chunky` is 4032 bytes and the Mac loader reads 0x1000 with no
+  size check (CONFIRMED, `ReloadCubeTexture` @ 1015ac70, `GetCubeTexture`
+  @ 1015a9f0). Applied at the next level load.
+- Title screens (`Variants::title`): `Icons/TitleScreen.medium` and
+  `.w3d` from the Mac or the Amiga; switched live. `Maps/2.thumb` always
+  from the Mac when present (regenerated with green grass).
+- Blood slot (`effects.rs` `BloodSlot`): Mac `Blood` in both the day and
+  night tiles (the Mac `InitAll` @ 100632a0 loads only `Blood`; no
+  `Blood.dark` ships), or the Amiga `Blood` + `Blood.dark` (also the
+  fallback without Mac data). With `Variants::gas` and the language
+  Deutsch, `Gas` fills the slot instead (CONFIRMED, `InitAll` and
+  `DoSetLanguage` @ 1008c2b0; strings `Deutsch`, `Gas`, `Blood` at
+  `1018a4e7..1018a4f3`). The atlases are rebuilt when the setting or the
+  language changes.
+- Phrases: the Mac files are the baseline for English, Deutsch and
+  `Francais`, which matches the Amiga `Français` (the language list shows it
+  once, under the Amiga name). The other 11 languages come from the Amiga
+  data. The Mac French global file lacks the vehicle names 2330-2355, as on
+  the Mac.
+- User maps: the Mac `UserMaps/` is scanned after the Amiga one (31 maps;
+  scores go to `Saves/UserMaps/`). `<map>.textures` (format in
+  `docs/formats.md`) is loaded with the map: 12 of the Mac maps use custom
+  texture numbers >= 2000. They take the last 112 tiles of the cube atlas,
+  their `gouraud` field extends the remap table, and their flags drive
+  footsteps and grip like `.CubeTextureList` flags.
 
 ## Findings
 

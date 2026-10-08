@@ -6,7 +6,11 @@ license.workspace = true
 
 [dependencies]
 payback-formats = { path = "../payback-formats" }
-bevy = { version = "0.19.1", features = ["wav"] }
+payback-mpeg = { path = "../payback-mpeg" }
+# wav: the sound effects; mp3/flac/vorbis too for user-ripped CD music (`music.rs`).
+bevy = { version = "0.19.1", features = ["wav", "mp3", "flac", "vorbis"] }
+# Bevy's decoder, to reject music files it cannot decode instead of panicking.
+rodio = { version = "0.22", default-features = false }
 # Same winit as Bevy, for the window icon.
 winit = { version = "0.30", default-features = false }
 

@@ -19,12 +19,12 @@
 //! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
 //! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
 //! | `window_mode` | `windowed`, `borderless` (borderless fullscreen) or `fullscreen` (exclusive, video mode of `resolution`) |
-//! | `cd_mode` | CD playback 0 off, 1 radio, 2 continuous, 3 disabled |
+//! | `cd_mode` | music mode 0 off, 1 radio (default), 2 continuous; 3 disabled is forced while no music files are found (`music.rs`) and otherwise reads as radio |
 //! | `police` | Rampage police aggressiveness 0..5 (`DAT_0114c2ec`) |
 //! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`; 3.. = user maps) |
 //! | `key.<action>` | single-player key, Bevy `KeyCode` name (actions: phrases 2457–2467); empty = disabled |
-//! | `pad.<action>` | single-player gamepad button, Bevy `GamepadButton` name |
-//! | `mp<n>.key.<action>`, `mp<n>.pad.<action>` | multiplayer key set n, player n's gamepad (`bindings.rs`) |
+//! | `pad.<action>`, `pad<n>.<action>` | gamepad 1 (single player and multiplayer) / gamepad n = 2..4 button, Bevy `GamepadButton` name |
+//! | `mp<n>.key.<action>` | multiplayer key set n (`bindings.rs`) |
 
 use bevy::prelude::*;
 use std::path::PathBuf;
@@ -271,7 +271,8 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             language: String::new(),
-            volume: 100,
+            // The Mac default (`ClearPreference` @ 100508c0); the Amiga's is 100.
+            volume: 50,
             fx: 2,
             motion_blur: false,
             gouraud: true,
@@ -279,13 +280,17 @@ impl Default for Settings {
             hardware: false,
             resolution: None,
             window_mode: default(),
-            cd_mode: 3,
+            // Radio, the Mac default; 3 (Disabled) is forced while no music
+            // is found (`crate::music`).
+            cd_mode: 1,
             police: 2,
             rampage_city: 0,
             controls: default(),
             mp_devices: {
                 use crate::multiplayer::Device;
-                [Device::Keyboard(0), Device::Keyboard(1), Device::Off, Device::Off]
+                // The Mac default (`ClearPreference` @ 100508c0): player 1
+                // Keyboard, player 2 device 1 (Amiga: joystick 0, keyboard).
+                [Device::Keyboard(0), Device::Joystick(0), Device::Off, Device::Off]
             },
             required_kills: 5,
             variants: default(),

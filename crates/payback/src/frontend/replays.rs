@@ -8,22 +8,34 @@ use payback_formats::replay::Replay;
 use std::path::PathBuf;
 
 /// Load a replay the way `FUN_010bc000` reports it: Err(phrase) = 2115
-/// "FILE NOT FOUND", 2116 "WRONG VERSION NUMBER" (only version 10 / 0x3F2
-/// files are accepted; the shipped ones are version 3), 2038 "MAP NOT
-/// FOUND".
+/// "FILE NOT FOUND", 2116 "WRONG VERSION NUMBER", 2038 "MAP NOT FOUND".
+/// Versions 10 / 0x3F2 (Amiga, the OS4 check) and 0x3F3 (Mac `LoadMovie`
+/// @ 100fa7b0, which accepts only 0x3F3, returning 2 for an unknown user
+/// map) are accepted; the shipped Amiga ones are version 3, refused as on
+/// OS4.
 pub fn load(cx: &Ctx, path: &std::path::Path) -> Result<Replay, u32> {
     let b = std::fs::read(path).map_err(|_| 2115u32)?;
     let version = b.get(..4).map(|v| i32::from_be_bytes([v[0], v[1], v[2], v[3]]));
-    if !matches!(version, Some(10 | 0x3f2)) {
+    if !matches!(version, Some(10 | 0x3f2 | 0x3f3)) {
         return Err(2116);
     }
     let r = Replay::parse(&b).map_err(|_| 2116u32)?;
-    let found = crate::replay::launch_of(&r)
-        .is_some_and(|(spec, _)| cx.data.read(format!("Maps/{}.map", spec.map)).is_ok());
+    let found = launch(cx.user_maps, &r).is_some_and(|(spec, _)| cx.data.read(spec.path("map")).is_ok());
     if !found {
         return Err(2038);
     }
     Ok(r)
+}
+
+/// The level of a replay, with `PROGDIR:UserMaps/<name>` found in the
+/// user-map list (`GetCityNumFromFilename` @ 10084d20).
+pub fn launch(
+    user_maps: &[super::usermaps::UserMap],
+    r: &Replay,
+) -> Option<(crate::level::LevelSpec, crate::level::GameMode)> {
+    crate::replay::launch_with(r, |name| {
+        user_maps.iter().find(|m| m.name.eq_ignore_ascii_case(name)).map(|m| m.spec())
+    })
 }
 
 /// The files in `Saves/Replays/` (ours) and the game's `Replays/`
@@ -142,7 +154,12 @@ impl ReplayInfo {
         let fps = r.records.len() as i64 * hz as i64 / (h.players.max(1) as i64 * ticks as i64);
         out.push((format!("{} {fps} {}", cx.g(2123), cx.g(2149)), 0x57, 1));
         let city = r.city().map(|c| c as i32).unwrap_or(-1);
-        let city_name = if (0..3).contains(&city) { cx.g(2170 + city as u32) } else { cx.g(2039) };
+        // `GetCityName` @ 10084f10: 2170.., a user map's name, else 2039.
+        let city_name = match r.user_map() {
+            _ if (0..3).contains(&city) => cx.g(2170 + city as u32),
+            Some(name) => name.to_string(),
+            None => cx.g(2039),
+        };
         out.push((format!("{} {city_name}", cx.g(2124)), 0x69, 2));
         let last = if h.players >= 2 {
             format!("{} {}", cx.g(2199), h.players)

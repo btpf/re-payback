@@ -260,9 +260,12 @@ pub fn controller(
         }
     }
 
-    // Don't steer into a handbrake spin (68k ~124730).
+    // Don't steer into a handbrake spin. The Mac (`do_Other` @ 10146280)
+    // only cuts low-skill steering while the J-turn latch is set; the Amiga
+    // (68k ~124855, OS4 ~1138) also cut it while braking or reversing
+    // (`|| throttle == 1`), so slow drivers backed out straight.
     if d.skill < 0x51 {
-        if drive.j_turn || throttle == 1 {
+        if drive.j_turn {
             steer = 0;
         }
     } else if drive.j_turn && ((obj.turn_rate < 0 && steer > 0) || (obj.turn_rate > 0 && steer < 0))
@@ -278,8 +281,9 @@ pub fn controller(
 }
 
 /// Route following for states 8/10/0x14 (68k ~124213-124290): returns
-/// true on reaching the goal node (state 8 -> 9, 10 -> 11).
-pub fn follow_route(route: &RouteGraph, nav: &mut Nav, obj: &Obj) -> bool {
+/// true on reaching the goal node (state 8 -> 9, 10 -> 11). `pursuit`
+/// selects the node arrival radius of states 8/10 (see below).
+pub fn follow_route(route: &RouteGraph, nav: &mut Nav, obj: &Obj, pursuit: bool) -> bool {
     let Some(goal) = nav.goal else {
         return false;
     };
@@ -290,8 +294,15 @@ pub fn follow_route(route: &RouteGraph, nav: &mut Nav, obj: &Obj) -> bool {
         }
         return false;
     };
-    // Reached when |d| < 300 + |5·speed| on both axes.
-    let r = 300 + (obj.speed * 5).abs();
+    // Reached when |d| < r on both axes. Pursuit (states 8/10) uses the
+    // Mac radius `300 + speed²>>7` (`do_Other` @ 10146280; the Amiga's
+    // `300 + |5·speed|`, 68k ~124245, reached nodes far too early at
+    // speed). Flee (0x14) keeps `300 + |5·speed|` on the Mac too.
+    let r = if pursuit {
+        300 + (obj.speed * obj.speed >> 7)
+    } else {
+        300 + (obj.speed * 5).abs()
+    };
     let d = nav.aim - obj.pos.truncate();
     if d.x.abs() < r && d.y.abs() < r {
         if node == goal {
@@ -446,7 +457,7 @@ pub fn vehicle_orders(
                         }
                         // On the farthest node the original drops into
                         // state 11 (straight chase); the port waits there.
-                        if !follow_route(&route, &mut nav, &obj) {
+                        if !follow_route(&route, &mut nav, &obj, false) {
                             aim = Some(nav.aim);
                         }
                     }
@@ -520,6 +531,7 @@ fn tank_cannon(
     mut library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut effects: ResMut<Effects>,
+    mut crimes: Option<ResMut<super::police::Crimes>>,
     mut q: Query<(
         Entity,
         &Obj,
@@ -569,6 +581,10 @@ fn tank_cannon(
             Transform::from_translation(object_to_render(pos.as_vec3())),
             LevelEntity,
         ));
+        // Firearms crime +1 (Mac `DoVehicleFire` @ 10070c20).
+        if let (true, Some(c)) = (is_player, crimes.as_deref_mut()) {
+            c.firearms += 1;
+        }
         commands.spawn(Sound::once(
             id::BIG_GUN_FIRE,
             15e6,

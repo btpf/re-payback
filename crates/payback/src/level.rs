@@ -238,6 +238,28 @@ impl LevelLoad {
         match self.stage {
             // Read the map.
             0 => {
+                // The cube texture set (`Variants::textures`) and a user
+                // map's `<map>.textures` (`FUN_0106e8ec`), for this level.
+                let mac_textures = world
+                    .get_resource::<crate::frontend::progress::Settings>()
+                    .is_none_or(|s| s.variants.textures);
+                let custom = if self.spec.is_user_map() {
+                    data.read(self.spec.path("textures"))
+                        .ok()
+                        .and_then(|b| {
+                            payback_formats::CustomTextures::parse(&b)
+                                .inspect_err(|e| warn!("{}: {e}", self.spec.path("textures").display()))
+                                .ok()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                };
+                {
+                    let mut d = world.resource_mut::<GameData>();
+                    d.mac_cube_textures = mac_textures;
+                    d.custom_textures = std::sync::Arc::new(custom);
+                }
                 let path = self.spec.path("map");
                 match data
                     .read(&path)

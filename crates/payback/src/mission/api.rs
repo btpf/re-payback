@@ -72,13 +72,50 @@ impl<'w> Script<'w> {
             kind::MONEY_GAIN => t.counter = self.money() as i64 + a as i64,
             kind::VEHICLE_CHANGED => t.counter = self.player_vehicle_type() as i64,
             kind::ACTOR_GOTO_DIRECT => t.kind = kind::ACTOR_GOTO,
+            // With a = -1 these test the player: 0x33..0x36 -> 0x1e..0x21,
+            // and the threshold moves to the first slot (Mac cases
+            // 101075b4/101074f4/10107494/10107554, 68k the same).
             kind::ACTOR_X_LE | kind::ACTOR_X_GT | kind::ACTOR_Y_LE | kind::ACTOR_Y_GT
                 if a == -1 =>
             {
-                t.kind = ty - 0x15; // 0x33..0x36 -> 0x1e..0x21
+                t.kind = ty - 0x15;
+                (t.a, t.b) = (b, -1);
             }
+            // The position and floor of each actor with id a, once, at add
+            // time (Mac case 1010704c, 68k case 2); no actor binding.
+            kind::AT_ACTOR_ON_FOOT => {
+                for actor in self.actors(a) {
+                    if let Some(o) = self.world.get::<Obj>(actor) {
+                        let mut ta = t.clone();
+                        (ta.a, ta.b, ta.c) = (o.pos.x, o.pos.y, o.level as i32);
+                        self.triggers().queue_add(ta);
+                    }
+                }
+                return;
+            }
+            // Nothing at all without the target vehicle (Mac case
+            // 10107a38, 68k `FUN_000efc92(p4) == 0`).
+            kind::ACTOR_BOARDS_ACTOR if self.actors(b).is_empty() => return,
             kind::PHONE | kind::SECRET_PHONE => {
-                if let Some((pos, _)) = self.phone_coords(a) {
+                // Phone -1: a random one of the map's phones
+                // (`GetPhoneCoords(-1)` @ 100b4540, Mac only), kept in
+                // b, c, d as square x, y and cube.
+                if a == -1 {
+                    let phones = self.alt_phones();
+                    let (sx, sy, lvl) = if phones.is_empty() {
+                        (0, 0, 0)
+                    } else {
+                        let i = self.random(phones.len() as i32) as usize;
+                        phones[i]
+                    };
+                    (t.b, t.c, t.d) = (sx as i32, sy as i32, lvl as i32);
+                }
+                let at = if a == -1 {
+                    Some((self.phone_square_pos(t.b as usize, t.c as usize, t.d as usize), 0))
+                } else {
+                    self.phone_coords(a)
+                };
+                if let Some((pos, _)) = at {
                     let s = self
                         .world
                         .spawn(Sound::looping(
@@ -93,17 +130,43 @@ impl<'w> Script<'w> {
             }
             _ => {}
         }
-        // Actor-referencing types: one trigger per matching actor.
+        // Orders: every actor with the id gets the order, one trigger
+        // waits for the first to finish (Mac cases 1010796c, 10107b28,
+        // 10107bf0, 10107dd0, 10107a38, 10107ce0; 68k the same).
+        if order_trigger(t.kind) {
+            let actors = self.actors(a);
+            if actors.is_empty() {
+                return;
+            }
+            for &actor in &actors {
+                self.apply_actor_setup(&t, ty, actor);
+                if ty == kind::ACTOR_GOTO_DIRECT {
+                    // 0x32 also sets the sticky "race driver" flag +0x49e.
+                    crate::sim::ai::set_direct(self.world, actor);
+                }
+            }
+            t.actor = actors.first().copied();
+            t.group = actors;
+            self.triggers().queue_add(t);
+            return;
+        }
+        // The Mac's id triggers: one trigger keyed by the id, added even
+        // before an actor has it (`SetTrigger_Long` @ 10106e50 cases
+        // 10107350, 101070e8, ...; the Amiga added one per actor and none
+        // without one).
+        if id_trigger(t.kind) && a != -1 {
+            t.by_id = true;
+            t.actor = self.actors(a).first().copied();
+            self.triggers().queue_add(t);
+            return;
+        }
+        // Other actor-referencing types: one trigger per matching actor.
         if actor_trigger(t.kind) {
             let actors = self.actors(a);
             for actor in actors {
                 let mut ta = t.clone();
                 ta.actor = Some(actor);
-                self.apply_actor_setup(&ta, actor);
-                if ty == kind::ACTOR_GOTO_DIRECT {
-                    // 0x32 also sets the sticky "race driver" flag +0x49e.
-                    crate::sim::ai::set_direct(self.world, actor);
-                }
+                self.apply_actor_setup(&ta, ty, actor);
                 self.triggers().queue_add(ta);
             }
             return;
@@ -111,14 +174,17 @@ impl<'w> Script<'w> {
         self.triggers().queue_add(t);
     }
 
-    /// AI side effects of adding actor triggers (goto, board, flee).
-    fn apply_actor_setup(&mut self, t: &Trigger, actor: Entity) {
+    /// AI side effects of adding actor triggers (goto, board, flee); `ty`
+    /// is the type the script passed.
+    fn apply_actor_setup(&mut self, t: &Trigger, ty: u8, actor: Entity) {
         let goal = IVec2::new(t.b, t.c);
         let order = match t.kind {
             kind::ACTOR_GOTO_VANISH => Some(crate::sim::ai::Order::GotoVanish(goal)),
+            // Arrival radius `+0x930`: 0x17 always 1000, 0x32 the script's
+            // value as it is (Mac cases 10107bf0 / 10107dd0).
             kind::ACTOR_GOTO => Some(crate::sim::ai::Order::Goto(
                 goal,
-                if t.d > 0 { t.d } else { 1000 },
+                if ty == kind::ACTOR_GOTO_DIRECT { t.d } else { 1000 },
             )),
             kind::ACTOR_GOTO_15 => Some(crate::sim::ai::Order::Goto15(goal)),
             kind::ACTOR_BOARDS_PLAYER => Some(crate::sim::ai::Order::BoardPlayer),
@@ -167,8 +233,15 @@ impl<'w> Script<'w> {
 
     // ---- Dialogue and messages -------------------------------------------
 
+    /// `GetPhrase(n)`: level phrases are numbered below 1000, the global
+    /// ones from 1000 (the Mac Random-mission script says and announces
+    /// global phrases 1400-1470 through the same calls).
     fn phrase(&self, n: u32) -> String {
-        self.world.resource::<Texts>().level(n)
+        if n >= 1000 {
+            self.global_phrase(n)
+        } else {
+            self.world.resource::<Texts>().level(n)
+        }
     }
 
     pub fn global_phrase(&self, n: u32) -> String {
@@ -200,6 +273,16 @@ impl<'w> Script<'w> {
         self.world.resource_mut::<Dialog>().say(text, Voice::Them);
     }
 
+    /// `MessageThem_Parse(n, ...)` (Mac @ 101087d0): the other party says
+    /// phrase `n` with its C `%s`/`%d` fields filled from `args` (the Mac
+    /// formats into one of 20 heap buffers, `FlushOldMessages` @ 10108730
+    /// frees them; phrases over 400 characters are not formatted).
+    pub fn say2_fmt(&mut self, n: u32, args: &[Fmt]) {
+        let text = c_format(&self.phrase(n), args);
+        crate::autoplay::log(format_args!("says {n}: {text}"));
+        self.world.resource_mut::<Dialog>().say(text, Voice::Them);
+    }
+
     pub fn dialog_end(&mut self) {
         self.world.resource_mut::<Dialog>().end();
     }
@@ -222,14 +305,11 @@ impl<'w> Script<'w> {
         self.dialog_end();
     }
 
-    /// `ShowMessage(phrase)`: the big centre message. Level phrase numbers
-    /// below 2000; global ones (2022 complete, 2028 failed, ...) above.
+    /// `ShowMessage(phrase)` (Mac `Announce` @ 10108550): the big centre
+    /// message. Level phrase numbers below 1000; global ones (1400 "ANSWER
+    /// THE PHONE", 2022 complete, 2028 failed, ...) above.
     pub fn show_message(&mut self, n: u32) {
-        let text = if n >= 2000 {
-            self.global_phrase(n)
-        } else {
-            self.phrase(n)
-        };
+        let text = self.phrase(n);
         let money = self.money();
         crate::autoplay::log(format_args!("message {n}: {text} (money {money})"));
         self.world.resource_mut::<BigTitle>().show(text);
@@ -346,6 +426,38 @@ impl<'w> Script<'w> {
             }
         }
         None
+    }
+
+    /// The map's phones as (square x, square y, cube), in map file order
+    /// (x, then y, then cube): every scenery-14 cell, up to 100 (Mac
+    /// `LoadMap` @ 100b3a60; `GetNumAltPhones` @ 100b4270 is the count).
+    /// Flashing phones (scenery 19) count too, so the list doesn't change
+    /// while one rings.
+    pub fn alt_phones(&self) -> Vec<(usize, usize, usize)> {
+        let Some(city) = self.world.get_resource::<City>() else {
+            return Vec::new();
+        };
+        let mut v = Vec::new();
+        for x in 0..MAP_SIZE {
+            for y in 0..MAP_SIZE {
+                for (lvl, c) in city.map.square(x, y).cubes.iter().enumerate() {
+                    if matches!(c.scenery, 14 | 19) && v.len() < 100 {
+                        v.push((x, y, lvl));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Square centre and floor z of the phone in square (sx, sy), cube `lvl`.
+    pub fn phone_square_pos(&self, sx: usize, sy: usize, lvl: usize) -> IVec3 {
+        let (sx, sy, lvl) = (sx.min(MAP_SIZE - 1), sy.min(MAP_SIZE - 1), lvl.min(2));
+        let z = self
+            .world
+            .get_resource::<City>()
+            .map_or(0x4dc0, |c| z_of_h(c.square_cubes(sx, sy)[lvl].top_at(0.5, 0.5)) as i32);
+        IVec3::new((sx as i32) << 11 | 0x400, (sy as i32) << 11 | 0x400, z)
     }
 
     pub fn set_phone(&mut self, slot: usize, event: i32, phone: i32, hidden: bool) {
@@ -879,17 +991,30 @@ impl<'w> Script<'w> {
         }
     }
 
-    /// `AddEffect(x, y, z, vx, vy, vz, life)`: a Gas spray particle.
+    /// `AddEffect_Gas(x, y, z, vx, vy, vz, size, layer)`: a Gas spray
+    /// particle, `AddEffect(9, gas, ..., size, layer, 0x30000)` (Mac @
+    /// 10108310, OS4 `FUN_010d13f4`): drawn in effect list `layer` with the
+    /// tint table.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_effect(&mut self, x: i32, y: i32, z: i32, vx: i32, vy: i32, vz: i32, life: i32) {
+    pub fn add_effect(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        vx: i32,
+        vy: i32,
+        vz: i32,
+        size: i32,
+        layer: i32,
+    ) {
         self.world.resource_mut::<crate::effects::Effects>().add(
             9,
             crate::effects::Tex::Gas,
             Vec3::new(x as f32, y as f32, z as f32),
             Vec3::new(vx as f32, vy as f32, vz as f32),
-            life as f32,
-            3,
-            crate::effects::Blend::Add,
+            size as f32,
+            layer.clamp(0, 255) as u8,
+            crate::effects::Blend::Tint,
         );
     }
 
@@ -1020,13 +1145,82 @@ impl<'w> Script<'w> {
     }
 }
 
+/// An argument of [`Script::say2_fmt`].
+#[derive(Clone, Debug)]
+pub enum Fmt {
+    S(String),
+    D(i32),
+}
+
+/// `vsprintf` for the phrase fields: `%s`, `%d`/`%i` and `%%`; anything
+/// else is copied as it is. Missing arguments print nothing.
+pub fn c_format(fmt: &str, args: &[Fmt]) -> String {
+    let mut out = String::with_capacity(fmt.len() + 16);
+    let mut args = args.iter();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('%') => out.push('%'),
+            Some('s' | 'd' | 'i') => match args.next() {
+                Some(Fmt::S(s)) => out.push_str(s),
+                Some(Fmt::D(d)) => out.push_str(&d.to_string()),
+                None => {}
+            },
+            _ => {
+                out.push('%');
+                continue;
+            }
+        }
+        chars.next();
+    }
+    out
+}
+
+/// Order types: the order goes to every actor with the id, one trigger.
+pub fn order_trigger(ty: u8) -> bool {
+    use kind::*;
+    matches!(
+        ty,
+        ACTOR_BOARDS_PLAYER | ACTOR_GOTO_VANISH | ACTOR_GOTO | ACTOR_BOARDS_ACTOR | ACTOR_GOTO_15
+    )
+}
+
+/// Types the Mac keys by the script id alone (one trigger, resolved every
+/// frame; missions.md §1.1, scratch_followup/triggers.md §5).
+fn id_trigger(ty: u8) -> bool {
+    use kind::*;
+    matches!(
+        ty,
+        ENTER_ACTOR
+            | NEAR_ACTOR
+            | ACTOR_FASTER
+            | ACTOR_SLOWER
+            | ACTOR_OUTSIDE
+            | ACTOR_NEAR_PLAYER
+            | ACTOR_LOST
+            | ACTOR_SEES_PLAYER
+            | ACTOR_NEAR_ACTOR
+            | ENTER_ACTOR_QUIET
+            | ACTOR_SEES_PLAYER_QUIET
+            | ACTOR_X_LE
+            | ACTOR_X_GT
+            | ACTOR_Y_LE
+            | ACTOR_Y_GT
+            | ACTOR_INSIDE
+            | NEAR_ACTOR_1000
+    )
+}
+
 /// Trigger kinds whose `a` is an actor id (one trigger per actor).
 fn actor_trigger(ty: u8) -> bool {
     use kind::*;
     matches!(
         ty,
-        AT_ACTOR_ON_FOOT
-            | ENTER_ACTOR
+        ENTER_ACTOR
             | ACTOR_GONE
             | ACTOR_BOARDS_PLAYER
             | NEAR_ACTOR
@@ -1055,6 +1249,22 @@ fn actor_trigger(ty: u8) -> bool {
             | ACTOR_FLEES
             | ACTOR_GOTO_15
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_format_fills_fields() {
+        let f = c_format(
+            "There's %s parked in %s. %d seconds, 100%%!",
+            &[Fmt::S("a Pug".into()), Fmt::S("the North".into()), Fmt::D(42)],
+        );
+        assert_eq!(f, "There's a Pug parked in the North. 42 seconds, 100%!");
+        assert_eq!(c_format("Have %d,000 %x", &[Fmt::D(7)]), "Have 7,000 %x");
+        assert_eq!(c_format("%s left", &[]), " left");
+    }
 }
 
 fn slope_code(s: payback_formats::map::Slope) -> i32 {

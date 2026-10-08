@@ -352,7 +352,8 @@ impl Level00 {
                 mt(s, 0x2be, ENTER_ACTOR, &[WHITE_PUG]);
                 mt(s, 0x2da, ACTOR_GONE, &[GUARD_A]);
                 mt(s, 0x2da, ACTOR_GONE, &[GUARD_B]);
-                mt(s, 0x2ee, PLAYER_DOWN, &[]);
+                // `a` = 0x2ee as in the original; type 6 ignores it.
+                mt(s, 0x2ee, PLAYER_DOWN, &[0x2ee]);
                 mt(s, 0x2ef, ACTOR_GONE, &[WHITE_PUG]);
                 self.flag_b = false;
                 self.count = 0;
@@ -1130,7 +1131,7 @@ impl Level00 {
                 self.flag_b = true;
                 s.set_cube(85, 74, 2, 0x40, 0x150, ALARM_BOX_FLASH, 0x3f, 1);
                 s.set_cube(85, 77, 2, 0x40, 0x150, ALARM_BOX_FLASH, 0x3f, 1);
-                // TODO(api): `add_sound` has no range argument (20000).
+                // The 8th argument (20000) is the sound's z (`add_sound`).
                 s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2a800, 0x26000, 20000);
                 s.create_actor(RON, PEDMALE3, 0x2a84c, 0x26400, 0, 0, 0);
                 s.create_actor(TREY, PEDMALE4, 0x2a84c, 0x25c00, 0, 0, 0);

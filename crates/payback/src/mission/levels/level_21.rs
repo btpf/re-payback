@@ -124,6 +124,10 @@ impl LevelScript for Level21 {
         s.refresh_phones(); // all slots empty: adds nothing, says nothing
         s.create_actor(50, 0, 0x26400, 0x17000, 0, 0, 4); // (76,46)
         s.t(100, kind::ENTER_ACTOR, 50, 0, 0, 0);
+        // Mac only (`InitScript_21` @ 10129d20): car 50 destroyed before
+        // the player got in fails mission 1 instead of soft-locking the
+        // level (68k `0xb9aaa` has no such trigger).
+        s.t(50, kind::ACTOR_GONE, 50, 0, 0, 0);
         // Never referenced again: a static parked vehicle at (60,59).
         s.create_actor(1_000_000, 23, 0x1e2d0, 0x1db64, 0, 0x10e0, 0);
         s.show_message(0);
@@ -203,6 +207,18 @@ impl Level21 {
                 s.t(101, kind::PHONE, 4, 0, 0, 0);
                 s.t(150, kind::PLAYER_DOWN, 0, 0, 0, 0);
                 s.t(151, kind::COUNTDOWN, 30, 0, 0, 0);
+            }
+            // Car 50 destroyed before mission 1 (Mac `ProcessTrigger_21`
+            // @ 1013b2b0): "You idiot!", mission failed, and the phones
+            // of mission 1's unlock open. After ev 100 the trigger can't
+            // fire: `Actor_Release(50)` cleared the id it watches.
+            50 => {
+                s.actor_release(50);
+                s.set_cur_slot(1);
+                s.kill_all_mt();
+                s.say(2, 5);
+                s.show_message(MISSION_FAILED);
+                unlock(s);
             }
             // M2 rocket car (`0xc9d00`).
             200 => {
@@ -749,10 +765,12 @@ impl Level21 {
             for y in 64..=68 {
                 s.set_cube(x, y, 2, 0x200, 0x200, 0, 0, 0);
                 // Always true while the random table stays below 512.
+                // Arguments drawn last first (Mac case 1013d194, 68k
+                // 0xc98e6..0xc990e): z, y, x. OS4 draws x, y, z.
                 if s.random(1) == 0 {
-                    let ex = x * 0x800 + s.random(0x800);
-                    let ey = y * 0x800 + s.random(0x800);
                     let ez = 0x4268 + s.random(1500);
+                    let ey = y * 0x800 + s.random(0x800);
+                    let ex = x * 0x800 + s.random(0x800);
                     s.explosion(ex, ey, ez, 3000);
                 }
             }
@@ -919,8 +937,10 @@ fn grenades(s: &mut Script, ev: i32) {
         }
         // The phone self-destructs (cosmetic).
         830 => {
-            let x = 0x253ce + s.random(100);
+            // y offset drawn first (Mac case 1013d750, 68k; OS4 draws x
+            // first).
             let y = 0x3d3ce + s.random(100);
+            let x = 0x253ce + s.random(100);
             s.explosion(x, y, 20000, 1500);
             s.set_scenery(74, 122, 0, 0, 0x2c, 0);
         }

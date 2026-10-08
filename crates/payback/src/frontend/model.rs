@@ -28,6 +28,26 @@ pub struct CurrentModel(pub Option<ModelView>, pub Option<ModelView>);
 pub struct ModelCache {
     lib: Option<ObjectLibrary>,
     meshes: HashMap<&'static str, Option<MenuMesh>>,
+    /// The props were built from the Mac `Options/*` set
+    /// (`Settings::variants.menu_props`).
+    mac_props: bool,
+}
+
+impl ModelCache {
+    /// Follow `Settings::variants.menu_props`: switching drops the built
+    /// props so they are reloaded from the other set (the object atlas
+    /// holds both sets' textures).
+    fn follow(&mut self, settings: Option<&crate::frontend::progress::Settings>) {
+        let Some(s) = settings else { return };
+        crate::objects::set_model_variants(s.variants.scenery, s.variants.menu_props);
+        if self.mac_props != s.variants.menu_props {
+            self.mac_props = s.variants.menu_props;
+            self.meshes.clear();
+            if let Some(lib) = self.lib.as_mut() {
+                lib.forget("options/");
+            }
+        }
+    }
 }
 
 /// Every model the menus show, loaded at start-up (`crate::startup`).
@@ -69,6 +89,7 @@ pub fn preload_models(world: &mut World) {
     preload_library(world);
     let data = world.resource::<GameData>().clone();
     world.resource_scope(|world, mut cache: Mut<ModelCache>| {
+        cache.follow(world.get_resource::<crate::frontend::progress::Settings>());
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         for path in MENU_MODELS {
             cache.mesh(&data, &mut meshes, path);
@@ -161,8 +182,10 @@ pub fn sync_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<crate::objects::ObjectMaterial>>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
     mut model: Query<(Entity, &MenuModel, &Mesh3d, &mut Transform)>,
 ) {
+    cache.follow(settings.as_deref());
     for (slot, view) in [current.0, current.1].into_iter().enumerate() {
         let existing = model.iter_mut().find(|(_, m, ..)| m.0 as usize == slot);
         let Some(view) = view else {

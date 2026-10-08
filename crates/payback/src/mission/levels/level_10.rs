@@ -105,8 +105,9 @@ pub struct Level10 {
 fn unlock_phones(s: &mut Script) {
     let cur = s.cur_slot();
     s.consume_slot();
-    // Signed compare as in the original (cur is never -1 here).
-    if cur < 4 && (0..4).all(|i| s.phone_event(i) == -1) {
+    // Slots 0..3 (Mac `FinishMission_10` tests `-1 < cur && cur < 4`,
+    // 68k `0xb5230` the same unsigned; cur is never -1 here).
+    if (0..4).contains(&cur) && (0..4).all(|i| s.phone_event(i) == -1) {
         s.set_phone(4, 400, 5, false);
         s.set_phone(5, 500, 6, false);
         s.set_phone(6, 600, 7, false);
@@ -557,17 +558,17 @@ impl Level10 {
                 self.gas_sound = true;
             }
             0xcc => {
-                // Gas puff; Random calls in argument order (OS4 0x010d13f4).
-                let x = 0x27d2c + s.random(200);
-                let y = 0x21b9c + s.random(200);
-                let z = 20000 - s.random(200);
-                let vx = 0x1e + s.random(80);
-                let vy = s.random(80) - 0x28;
-                let vz = -s.random(100);
+                // Gas puff, `AddEffect_Gas(x, y, z, vx, vy, vz, size, 1)`;
+                // the Random arguments are drawn last first (Mac case
+                // 10135cd8, 68k; OS4 0x010d13f4 draws them in order).
                 let life = 400 + s.random(500);
-                // TODO(api): the 8th AddGas argument (1) has no parameter
-                // in `Script::add_effect`.
-                s.add_effect(x, y, z, vx, vy, vz, life);
+                let vz = -s.random(100);
+                let vy = s.random(80) - 0x28;
+                let vx = 0x1e + s.random(80);
+                let z = 20000 - s.random(200);
+                let y = 0x21b9c + s.random(200);
+                let x = 0x27d2c + s.random(200);
+                s.add_effect(x, y, z, vx, vy, vz, life, 1);
                 s.t(0xcc, TIMER_TICKS, 5, -1, -1, -1);
             }
             0xcd => {

@@ -42,7 +42,10 @@ INFERRED. Scratch notes with more line references are in
 - **Offsets.** 68k offsets are given first. **OS4 = 68k + 2 for fields from about +0x300 up**, and
   +4 for the crime counters. [C]
 - **Random.** `rand(n)` = 68k `FUN_0003fc8c` / OS4 `FUN_0103ac94`, giving 0..n−1. It is
-  table-driven: `n·tbl[++k] >> 9`. [C]
+  table-driven: `n·tbl[++k] >> 9`. [C] A second counter over the same table, `random3` (68k
+  `FUN_0003fce6`, OS4 `FUN_0103acc4`, Mac `random3__Fi` @ 10083530), feeds every cosmetic draw:
+  effect updates, chimney smoke, the weather spawn, effect lights, text wobble. The port's
+  `sim::VisualRng` is that stream; render code never draws from the game's `sim::Rng`. [C]
 - **PlaySound.** 68k `FUN_000170ce` / OS4 `FUN_0100815c` take (id, loop, volume, rateHz, x, y, z).
   z = −1 means non-positional. There are 500 slots. [C]
 - **Sound ids.** These follow the load order in OS4 `FUN_01005864`. [C]
@@ -349,7 +352,10 @@ ambient. None of the shipped scripts gives 0x43/0x44 to a police car (their only
   countdown `target+0x3c0` is 0, which then resets it to 20. The countdown drops 1 per object
   update (per frame).
 - The steer target is `node.xy << 3`.
-- The node is reached when |dx| and |dy| < 300 + |5·speed|.
+- The node is reached when |dx| and |dy| < 300 + |5·speed|. The **Mac** (`do_Other` @ 10146280) uses
+  `300 + (speed² >> 7)` for pursuit (states 8/10) and keeps `300 + |5·speed|` for flee (0x14); at speed
+  100/300/600 that is 378/1003/3112 against the Amiga's 800/1800/3300. The port follows the Mac
+  (`vehicle_ai.rs` `follow_route`). CONFIRMED.
 - On arrival: if own node == target's node, state 8→9 / 10→11 (**leave the graph and drive
   straight at the target**). Otherwise own node = `NextHop(own, targetNode)`.
 - There is **no transition back** from 9/11 to the graph.
@@ -425,8 +431,9 @@ out of a carjacked police car (+0x490 = 50 ticks before acting). They are never 
 if wanted < 3 or cop.stun or player.stun or cop.hp < 1 or player.hp < 1: idle drone
 else:
   target = player; move = 1
-  door = player.pos + rot(model.48f8 forward, -(cop.48c4 + player.48f4) sideways)   // driver door
-  d2   = (dx>>4)^2 + (dy>>4)^2
+  door = player.pos + rot(player.48f8 forward, player.48f4 sideways)   // the door point itself:
+                                     // no lead, no cop radius; (0, 0) for a player on foot
+  d2   = ((cop - door).x>>4)^2 + ((cop - door).y>>4)^2
   reach = player in vehicle ? cop.48c4 >> 3 : (cop.48c4 + player.48c4)*3 >> 5
   if d2 < reach^2 and |player.speed| < 0x1e and same cube level:
       on foot   -> BUSTED
@@ -436,6 +443,10 @@ else:
     :            (wanted > 3 ? (7-wanted)*10 : none)
   fire this frame if rand(p) < ticks
 ```
+- The arrest point and reach are CONFIRMED in Mac `do_Person` @ 1013fbd0 and 68k ~121940
+  (`-*(int*)(model+0x48f4)`, no cop radius). The `-(cop.48c4 + player.48f4)` form belongs to the
+  guard range test (state 0x10) and the steering target. Port: `police::cops` uses the real radii
+  and the target's door offsets, and skips cops while the player is stunned (+0x490).
 - Firing has **no range or line-of-sight test**.
 - The cop turns toward `player.pos + player.v·(5−aggr)·3` and walks straight at it. Cops on foot
   never use route nodes.
@@ -567,7 +578,10 @@ ones. The fist is always valid.
 - Bazooka, bomb and tank cannon fire only on a **press edge**.
 
 **Every person's shot also:**
-- increments the firearms counter;
+- increments the firearms counter (+0x470), **but only for a grenade throw, a bomb drop, a bazooka
+  shot and a shotgun shot** (plus the tank cannon in `DoVehicleFire` @ 10070c20); pistol, minigun
+  and flamethrower do not count [C: Mac `do_Person` @ 1013fbd0, 68k `FUN_000e3a58` ~123180,
+  ~123300, ~124022]. Port: `combat::fire_weapons`, `vehicle_ai::tank_cannon` (the player's shots);
 - makes civilian peds in state 3 within 3D distance 10000 units (`(d>>3)² < 0x17d784`, ≈ 4.9
   squares) scream (37+rand3) and flee for 100 ticks (68k `FUN_000ccabe`, OS4 `FUN_010435f4`).
 
@@ -602,7 +616,10 @@ Muzzle lights (when the lighting option is on): pistol (40e6, 40e6, 10e6), minig
 - On drop, the bomb's id is stored. The next press detonates `Destroy(bomb, 50000)` (§5.2,
   P = 1e9) and points the camera at it.
 - It notifies the script (`FUN_000a653a`).
-- If the bomb is destroyed by damage it goes off as a small explosion instead.
+- If the bomb is destroyed by damage (health ≤ 0, e.g. a script `ExplodeObject`) it still goes off in
+  full, `Destroy(bomb, 50000)`, and its owner's bomb slot (+0x860) is cleared [C: Mac `DoCollideStuff`
+  @ 10067b50]. The Amiga (68k `FUN_000dc5ac`, OS4 `FUN_010542b8`) leaves the slot pointing at the
+  dead bomb. Port: `sim/combat.rs` `move_projectiles` follows the Mac.
 
 **Tank cannon** (68k `FUN_000e2a50`, OS4 `FUN_0105e02c`).
 - Applies to vehicles whose model +0x4908 == 0 (only `tank.obj`). Fires on a press edge, with
@@ -621,8 +638,8 @@ bombs do.
 
 | Projectile | Lifetime (+0x34a from 100) | Range | On wall / ground / timeout |
 |---|---|---|---|
-| bullet | −1/tick → 100 ticks | ≈ 25600 units ≈ 12.5 squares | back off 1 tick; 29 Ricochet (vol 4e6+rand 2e6, 11500+rand 1000 Hz); 2 Flare sparks (effect type 9); removed |
-| pellet | −2/tick → 50 ticks | ≈ 6 squares | same as bullet |
+| bullet | −1/tick → 100 ticks | ≈ 25600 units ≈ 12.5 squares | back off 1 tick; 29 Ricochet (pitch 11500+rand 1000 drawn first, then vol 4e6+rand 2e6); 2 Flare sparks (effect type 9) of size rand(150)+150 at pos ± 100, v = rand(80) − 40 − v/8 per axis; removed |
+| pellet | −2/tick → 50 ticks | ≈ 6 squares | as the bullet, but **3** sparks of size rand(150)+**250** [C: Mac `do_Weapon` @ 1013e390, 68k ~121790; sim `random`] |
 | petrol | −5/tick → 20 ticks | ≈ 2.5 squares | ground-fire effect (type 0xf, life 800, looping Flames). Each tick a random orange light and a type 1 flame |
 | missile | none | until impact | wall/ground: fire effect, then **Ignite-explosion** of itself (§5.2, P = 1000·25000 = 2.5e7) |
 | grenade | fuse −1/tick from 80 | thrown | walls reflect vx/vy with 18 GrenadeBounce (4e6, 8000); ground: vz = −vz/4 (sound if vz > 500); friction 8·ticks on ground, 1·ticks in air; trailing smoke; fuse < 2 → `Destroy(self, 3000)` (P = 6e7) |
@@ -631,7 +648,7 @@ bombs do.
 **Hits on objects.** The object pair loop is 68k `FUN_000de0b6` / OS4 `FUN_01056c58`. A projectile
 never hits its own shooter.
 - **Minigun bullet:** health −= **10000 / T** (filter +0x3ca ∈ {−1, 4}).
-- **Pistol bullet:** health −= **5000 / T** (68k filter {−1, 7}; OS4 only −1).
+- **Pistol bullet:** health −= **5000 / T** (filter {−1, 7}; Mac `CheckForCollisions` @ 1006a150 and 68k. The OS4 "only −1" reading is a decompiler rendering of the same mask test [I]).
 - **Shotgun pellet:** health −= **20000 / T**, only if `LOS(shooter, target)` (filter {−1, 5}).
 - Worked examples: pedestrians have T = 90 (pedmale3 120, pedmale4/5 100, pedmale7 95), so
   minigun 111, pistol 55, pellet 222 against 100 health. A default car (T 1400) takes 7 / 3 / 14.
@@ -672,8 +689,11 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 - Only model types 1..99 qualify. Radar (100), briefcase (23, no type) and phones are not pickups
   in this code. Phones are script triggers 0x01/0x07; nothing in either exe tests radar
   (`+0x4908 == 100`). [C; briefcase not traced further]
-- Effects of a pickup: 2 sparkle particles; for types < 0x50, PlaySound(20 PickupWeapon, 0, 1e6,
-  14000).
+- Effects of a pickup: 2 type-3 Dust puffs at (square·2048 + 0x270 + r(800), same for y,
+  z + r(300) − 150), v = r(500) − 250 per axis, size 1500 + r(1000), from the **gameplay**
+  `random` (7 draws each in the order size, vz, vy, vx, z, y, x: 14 per pickup) [C: Mac
+  `CheckForWeapon` @ 100597e0, 68k `FUN_000d0988`]; then for types < 0x50, PlaySound(20
+  PickupWeapon, 0, 1e6, 14000).
 - A floating message at the square centre shows phrase `0x834 + type − 1`.
 - The square's scenery is then set to 0.
 
@@ -692,14 +712,22 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 **Respawn.**
 - Each collection queues (sx, sy, layer, clock + **1200 ticks** = 40 s) in a 1000-entry ring
   buffer.
-- When due, the square's scenery becomes **6 (crate)** with its special byte unchanged, plus 2
-  sparkles and PlaySound(47 ObjectAppear, 0, 20e6, 8000).
+- When due, the square's scenery becomes **6 (crate)** with its special byte unchanged, plus the
+  same 2 Dust puffs (14 gameplay draws) at the fixed height z = 0x4d8a + r(300), layer
+  min(layer+1, 3), and PlaySound(47 ObjectAppear, 0, 20e6, 8000) [C: Mac `RespawnWeapons`
+  @ 100595c0, 68k `FUN_000d079e`].
 - So every collected pickup returns as a crate. A weapon placed directly with special 0 returns as
   an empty crate [C logic].
 
 **Crates** (scenery 6).
 - Break triggers: a punch, bullets, pellets, missiles, petrol, or a vehicle entering the square.
-- On break: crate.obj fragments plus Dust clouds (effect type 3, size 1500+rand1000).
+- On break: `Bang(crate, layer+1, centre, z, angle, 5)` (Mac `Bang` @ 100a6dd0, 68k
+  `FUN_000384e8`): `Split` (the crate.obj fragments), then max(2, min(6, 5>>1)) = **2** Dust puffs
+  at centre ± 400 (z ± 150), v = r(500) − 250 per axis (÷3), size 1500 + r(1000). All draws come
+  from the cosmetic **`random3`** stream (port: `VisualRng`), so a crate break does not move the
+  game's sequence [C]. The port does not draw the fragments yet.
+- Weapon selection by number key needs health > 0 **and** the stun timer at 0 [C: Mac
+  `UpdateInputStatus` @ 100f8490; the Amiga agrees].
 - The scenery then becomes the contents given by the square's 5-bit `special`: 1→9 bazooka,
   2→10 flamethrower, 3→11 grenade, 4→12 minigun, 5→13 shotgun, 6→27 pistol, 7→28 bigbomb, anything
   else → empty.
@@ -786,14 +814,26 @@ for each object o != src (class 2 skipped except barrier/cone/dummy/bullet):
    r2 = |d|^2 ; u = (r2>>4) * isqrt(r2)  // ~ |d|^3 / 16
    k  = person ? (u ? 5u : 1) : max(u>>1, 1)
    q  = (P>>4) / T(o)
-   o.v += clamp(q*d/k, ±1000)            // knock-back, per axis
-   if o.filter in {-1,1,3}: o.health -= person ? q/k : (q>>4)/k
-   score/crime if player-caused (§7)
+   if class(o) != 2: o.v += clamp(q*d/k, ±1000)   // knock-back, per axis; none for props
+   if o.filter in {-1,1,3}:
+       o.health -= class(o) == 2 ? (q>>4)/k : q/k  // people AND vehicles take q/k
+       single player, src owner >= 0, o owner == -1:
+           player.score += mult * (k>>5 < 1 ? 6000 : min(6000, q/(k>>5)));  Crime(o, 1)
 flash DAT_0114c748 += P/250000 (decays ×3/4 per tick; brightens the palette; no camera shake)
 AddEffect(8,  Dust2, x,y,z, 0,0,0, P>=120e6 ? 6000 : max(P/20000,1000), layer, 0x10000)  // scorch
 AddEffect(10, -,     x,y,z, 0,0,0, 300, layer, 0)                                      // shockwave
 AddEffect(11, Blood, x±200, y±200, 21000, 0,0,0, 1000, layer, 0)                       // flash
 ```
+- **Class split** [C: Mac `Shockwave` @ 10054ac0, 68k `FUN_000cd22e` ~110460, OS4 `FUN_0104405c`]:
+  only class-2 props (barrier, cone, dummy, `model+0x8165 == 2`) take the extra >>4 and get no
+  knock-back; people and vehicles take q/k. An earlier reading gave vehicles (q>>4)/k as well, so
+  vehicles took 1/16 of the real damage and chain reactions were rare. Port: `sim/combat.rs`
+  `explosions` (class 2 = `Class::Projectile` objects without a `Projectile`, i.e. roadblock props).
+- **Score** [C, same functions]: in single player only. The original pays whenever the exploding
+  object has an owner (`+0x824 >= 0`, AI weapons included) and the victim has none; the port's
+  `Explode` carries `by_player`, so it pays the player's own blasts. `Crime(o, 1)` is called for
+  every such object; the port reports `Hurt` only when the damage is > 0 [I: keeps far-away
+  objects out of the crime table].
 - There is no hard radius: damage falls off as ~1/d³.
 - Distances at which a person (T 90) takes ≥ 100 damage [I, computed]: missile (2.5e7) ≈ 1 square;
   grenade (6e7) ≈ 1.4 squares; remote bomb (1e9) ≈ 3.5 squares; exploding car (1400·25000 =
@@ -839,8 +879,11 @@ destruction (power 0 → T/2).
 ## 6. Health, damage and hit detection [C]
 
 **Health.**
-- Every object starts with **100** health. There is **no regeneration** and **no max clamp** on
-  the script's `AddHealth` (OS4 `FUN_01040f70`).
+- Every object starts with **100** health. There is **no max clamp** on the script's `AddHealth`
+  (OS4 `FUN_01040f70`).
+- Players regenerate **+1 health every 250 ticks** while 0 < hp < 100 (the on-foot value, also
+  while driving) [C: Mac `MainLoop` @ 1014a920, 68k tail of `FUN_000e3a58` ~125945]. Port:
+  `sim/people.rs` `regen_and_respawn`.
 - While driving, the player's on-foot health is kept in OS4 `DAT_012a6304[player]` and restored on
   exit.
 
@@ -926,10 +969,10 @@ player-owned object, i.e. attacker `+0x344 >= 0` and victim `+0x344 == -1`;
 |---|---|
 | Kill a civilian (person, or occupied civilian vehicle destroyed) | 1500 |
 | Kill a police officer / police vehicle (`model+0x490a == 1`) | 2500 |
-| Copkiller bonus: every 11th cop kill (counter `DAT_0114c6a4` > 10, then reset to 0), single player only | +100000, message 2037 "Copkiller bonus!" |
+| Copkiller bonus: every 11th cop kill (counter `DAT_0114c6a4` > 10, then reset to 0), single player only | 100000 (× multiplier like the rest), message 2037 "Copkiller bonus!", no sound [C: Mac `CheckHitObject` @ 100542d0, OS4 `FUN_01043924`] |
 | Carjack a civilian car (occupied) | 1000 |
 | Carjack a police car | 1500 |
-| Explosion damage to an object | min(6000, q / (k>>5)) with q, k from §5.2 (6000 when k>>5 < 1) |
+| Explosion damage to an object (single player) | min(6000, q / (k>>5)) with q, k from §5.2 (6000 when k>>5 < 1), per object [C: Mac `Shockwave` @ 10054ac0] |
 | Punch an NPC | 500 |
 | Run someone over / ram (vehicle collision) | min(6000, vmax²>>9), vmax = max of abs(vx), abs(vy) of the impact velocity scaled by mass ratio |
 | Burning (flamethrower/fire contact): per tick damage = min(health+0x47, ticks·3000/mass), ≥1 | damage × 32 (OS4 `FUN_01056c58` ~l.46400) |

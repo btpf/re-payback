@@ -103,7 +103,9 @@ used when Gouraud is on, read in `FUN_010766c8`; the editor's "Select image
 (gouraud)"), then 4096 bytes (64×64). Slot i = texture index 2000 + i. At night
 only names starting with `$` are exempt from the remap. The in-memory field
 `+0x30` is never read (open). The editor guide also mentions `.objects`; the
-game never loads it.
+game never loads it. Parser: `payback_formats::texture::CustomTextures`; 12 of the Mac
+release's user maps use it (a 4-byte file is an empty set; the largest,
+`Amirace`, has the full 112 slots).
 
 ## Scenery table (confirmed)
 

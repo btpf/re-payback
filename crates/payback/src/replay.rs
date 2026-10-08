@@ -4,8 +4,9 @@
 //! The original records one input word per player per frame, with the
 //! number of 30 Hz ticks the frame took, plus the random seed at level
 //! start; playback restores the seed and feeds the words back in place of
-//! the controls. Here the simulation runs at a fixed 25 Hz, so every game
-//! tick is one record with `ticks = 1` (durations are in 25 Hz ticks).
+//! the controls. Here the simulation runs at a fixed 30 Hz, the original's
+//! tick, so every game tick is one record with `ticks = 1` (durations are in
+//! 30 Hz ticks, as in the original files).
 //!
 //! The random generator's whole state is its table index ([`Rng::seed`]),
 //! which is the stored seed. For the replay to reproduce the game, every
@@ -57,6 +58,8 @@ pub struct ReplayState {
     pub cursor: usize,
     /// Game ticks left of the current record (records may span 1..5).
     left: u8,
+    /// Playback: each player's in/out bit in the previous record.
+    held: [bool; 4],
     /// Game ticks since the level started.
     pub tick: u32,
     /// Playback ran out of records or was stopped with Esc.
@@ -78,6 +81,14 @@ pub struct LastReplay(pub Option<Replay>);
 /// recording.
 #[derive(Resource, Default)]
 pub struct PlayRequest(pub Option<Replay>);
+
+/// Random phone missions are on in this level (Rampage with the "Random
+/// missions" setting, `Variants::random_missions`; the Mac always plays
+/// them, `ProcessTrigger_Random`). Set at level start by [`begin`], before
+/// `LevelLoaded`: from the settings when recording, from the replay header
+/// when playing back, since the missions change the simulation.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RandomMissions(pub bool);
 
 /// `--again`: re-enter the level once the menus have been entered.
 #[derive(Resource)]
@@ -115,6 +126,7 @@ impl Plugin for ReplayPlugin {
         }
         app.init_resource::<ReplayState>()
             .init_resource::<LastReplay>()
+            .init_resource::<RandomMissions>()
             .add_systems(OnEnter(AppState::Playing), begin.before(LevelLoaded))
             .add_systems(OnExit(AppState::Playing), end)
             .configure_sets(FixedUpdate, ReplayInput.before(PeopleThink))
@@ -144,13 +156,29 @@ pub fn load_file(path: &std::path::Path) -> Result<Replay, String> {
     Replay::parse(&b).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The level a replay was recorded on: `PROGDIR:Maps/<n>`, level within
-/// the city, and Rampage with its police aggressiveness.
+/// The level a replay was recorded on: `PROGDIR:Maps/<n>` or
+/// `PROGDIR:UserMaps/<name>` (taken as `UserMaps/<name>` in the game
+/// data), level within the city, and Rampage with its police
+/// aggressiveness.
 pub fn launch_of(r: &Replay) -> Option<(LevelSpec, GameMode)> {
-    let map = r.header.map.strip_prefix("PROGDIR:Maps/")?.to_string();
-    let spec = LevelSpec {
-        map,
-        level: (r.header.level & 1) as u8,
+    launch_with(r, |_| None)
+}
+
+/// [`launch_of`], finding user maps with `user_map(name)` first (the Mac's
+/// `GetCityNumFromFilename` @ 10084d20 looks the path up in the user-map
+/// list).
+pub fn launch_with(r: &Replay, user_map: impl Fn(&str) -> Option<LevelSpec>) -> Option<(LevelSpec, GameMode)> {
+    let level = (r.header.level & 1) as u8;
+    let spec = match r.user_map() {
+        Some(name) => LevelSpec {
+            level,
+            ..user_map(name).unwrap_or_else(|| LevelSpec { map: format!("UserMaps/{name}"), level })
+        },
+        // Older files of ours put a user map's path after `PROGDIR:Maps/`.
+        None => LevelSpec {
+            map: r.header.map.strip_prefix("PROGDIR:Maps/")?.to_string(),
+            level,
+        },
     };
     let mode = if r.header.players > 1 {
         GameMode::Multiplayer {
@@ -165,6 +193,19 @@ pub fn launch_of(r: &Replay) -> Option<(LevelSpec, GameMode)> {
         GameMode::Story
     };
     Some((spec, mode))
+}
+
+/// The map path stored in a replay (`GetCityFilename` @ 10084c90):
+/// `PROGDIR:Maps/<n>` for a city, `PROGDIR:UserMaps/<name>` for a user map.
+pub fn map_path(spec: &LevelSpec) -> String {
+    match spec.city() {
+        Some(c) => format!("PROGDIR:Maps/{c}"),
+        None if spec.is_user_map() => {
+            let name = spec.map.rsplit(['/', '\\']).next().unwrap_or(&spec.map);
+            format!("PROGDIR:UserMaps/{name}")
+        }
+        None => format!("PROGDIR:Maps/{}", spec.map),
+    }
 }
 
 /// Saved replays (`Saves/Replays/`; the original writes
@@ -193,6 +234,8 @@ fn begin(
     spec: Res<LevelSpec>,
     mode: Res<GameMode>,
     devices: Res<crate::multiplayer::MpDevices>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    mut random_missions: ResMut<RandomMissions>,
 ) {
     *inputs = PlayerInputs::default();
     *st = ReplayState::default();
@@ -202,6 +245,8 @@ fn begin(
     commands.insert_resource(crate::sim::combat::PickupRespawns::default());
     if let Some(r) = req.0.take() {
         rng.seed(r.header.seed as u16);
+        // Played back as recorded, whatever the setting is now.
+        random_missions.0 = r.header.rampage && r.header.random_missions;
         info!(
             "replay: playing {} records on {} level {}, seed {}",
             r.records.len(),
@@ -219,6 +264,7 @@ fn begin(
         GameMode::Rampage { police } => (true, police as i32),
         _ => (false, 2),
     };
+    random_missions.0 = rampage && settings.as_ref().is_none_or(|s| s.variants.random_missions);
     let (players, controllers, required_kills) = match *mode {
         GameMode::Multiplayer { players, kills } => {
             let mut c = [-1; 4];
@@ -244,8 +290,9 @@ fn begin(
             seed: seed as i32,
             rampage,
             police,
-            map: format!("PROGDIR:Maps/{}", spec.map),
+            map: map_path(&spec),
             level: spec.level as i32,
+            random_missions: random_missions.0,
         },
         records: Vec::new(),
     });
@@ -312,8 +359,15 @@ fn feed(mut st: ResMut<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
                 };
                 st.cursor += players;
                 st.left = frame[0].input.ticks.max(1);
-                for (input, rec) in inputs.iter_mut().zip(frame) {
+                for ((input, rec), held) in inputs.iter_mut().zip(frame).zip(&mut st.held) {
                     let i = rec.input;
+                    // Bit 9 is the in/out key's held state in the
+                    // originals' files (`FUN_01051a10`, Mac `ReadInput` @
+                    // 10064bf0; `GetInOutVehicles` @ 10066140 takes the
+                    // edge): a press is a rising edge. Ours hold one-tick
+                    // presses, which read the same.
+                    let use_pressed = i.use_vehicle && !*held;
+                    *held = i.use_vehicle;
                     *input = PlayerInput {
                         left: i.left,
                         right: i.right,
@@ -321,7 +375,7 @@ fn feed(mut st: ResMut<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
                         reverse: i.reverse,
                         fire: i.shoot,
                         brake: i.brake,
-                        use_pressed: i.use_vehicle,
+                        use_pressed,
                         weapon_pressed: (i.weapon < 8).then_some(i.weapon),
                     };
                 }
@@ -337,9 +391,11 @@ fn feed(mut st: ResMut<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
     }
 }
 
-/// Esc stops playback (instead of opening the pause menu).
+/// Esc or P stops playback (instead of opening the pause menu; Mac
+/// `ReadPlaybackInput` @ 10064ad0 ends on status 5, set by both keys, as
+/// OS4 `FUN_0103f3d0` does).
 fn stop_on_escape(keys: Res<ButtonInput<KeyCode>>, mut st: ResMut<ReplayState>) {
-    if st.playing() && keys.just_pressed(KeyCode::Escape) {
+    if st.playing() && keys.any_just_pressed([KeyCode::Escape, KeyCode::KeyP]) {
         st.finished = true;
     }
 }
@@ -497,11 +553,40 @@ mod tests {
                 police: 4,
                 map: "PROGDIR:Maps/2".into(),
                 level: 1,
+                random_missions: true,
             },
             records: vec![],
         };
         let (spec, mode) = launch_of(&r).unwrap();
         assert_eq!((spec.map.as_str(), spec.level), ("2", 1));
         assert_eq!(mode, GameMode::Rampage { police: 4 });
+    }
+
+    #[test]
+    fn map_paths() {
+        let city = LevelSpec { map: "1".into(), level: 0 };
+        assert_eq!(map_path(&city), "PROGDIR:Maps/1");
+        let user = LevelSpec::user_map(std::path::Path::new("UserMaps/House Park.map"));
+        assert_eq!(map_path(&user), "PROGDIR:UserMaps/House Park");
+        let mut r = Replay {
+            header: Header {
+                version: VERSION,
+                players: 1,
+                controllers: [KEYBOARD, -1, -1, -1],
+                required_kills: 5,
+                duration: 0,
+                seed: 9,
+                rampage: false,
+                police: 2,
+                map: map_path(&user),
+                level: 1,
+                random_missions: false,
+            },
+            records: vec![],
+        };
+        let (spec, _) = launch_of(&r).unwrap();
+        assert_eq!((spec.map.as_str(), spec.level), ("UserMaps/House Park", 1));
+        r.header.map = "PROGDIR:Maps/UserMaps/Old".into();
+        assert_eq!(launch_of(&r).unwrap().0.map, "UserMaps/Old");
     }
 }

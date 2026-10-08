@@ -1,13 +1,23 @@
-//! Rampage setup (`FUN_0102a428`): city with its thumbnail spinning
-//! behind the text, police aggressiveness, the top-5 table for that
-//! city and aggressiveness, Play / Cancel.
+//! Rampage setup (`FUN_0102a428`, Mac `DoRampageSetup` @ 1009ebc0): city
+//! with its thumbnail spinning behind the text, police aggressiveness
+//! ("Difficulty:" in the Mac phrases, 2055), the top-5 table for that city
+//! and aggressiveness, Play / Cancel.
+//!
+//! Added row: "Random missions" (`Variants::random_missions`, decision 8 in
+//! docs/re/mac_version.md): the Mac's random phone missions in Rampage
+//! (`ProcessTrigger_Random`), on by default. Play and Cancel move down
+//! one row to make room. The choice changes the simulation, so replays
+//! record it (`crate::replay::RandomMissions`).
 
 use super::ui::*;
 use super::usermaps::{city_name, city_thumb, initial_city, load_scores, step_city};
 use payback_formats::scores::HighScores;
 
-/// Rows: city, police aggressiveness, Play, Cancel.
-const ROWS: usize = 4;
+/// Rows: city, police aggressiveness, random missions, Play, Cancel.
+const ROWS: usize = 5;
+const RANDOM: usize = 2;
+const PLAY: usize = 3;
+const CANCEL: usize = 4;
 
 pub struct RampageSetup {
     sel: usize,
@@ -30,7 +40,7 @@ impl RampageSetup {
     pub fn new(cx: &Ctx) -> RampageSetup {
         let city = initial_city(cx);
         RampageSetup {
-            sel: 2,
+            sel: PLAY,
             city,
             police: cx.settings.police.min(5),
             scores: load_scores(cx, city),
@@ -66,6 +76,7 @@ impl Screen for RampageSetup {
             match self.sel {
                 0 => self.set_city(cx, d),
                 1 => self.police = (self.police as i32 + d).rem_euclid(6) as u8,
+                RANDOM => cx.settings.variants.random_missions ^= true,
                 _ => {}
             }
             cx.settings.rampage_city = self.city as u8;
@@ -75,11 +86,12 @@ impl Screen for RampageSetup {
         if input.fire {
             cx.sound(Sfx::Select);
             match self.sel {
-                2 => {
+                RANDOM => cx.settings.variants.random_missions ^= true,
+                PLAY => {
                     cx.settings.save();
                     return Step::Pop(Outcome::Rampage(self.city as u8, self.police));
                 }
-                3 => return Step::Pop(Outcome::Cancel),
+                CANCEL => return Step::Pop(Outcome::Cancel),
                 _ => {}
             }
         }
@@ -113,13 +125,17 @@ impl Screen for RampageSetup {
         let on = self.flash > 1;
         let city = format!("{} {}", cx.g(2124), city_name(cx, self.city));
         let police = format!("{} {}", cx.g(2055), cx.g(2491 + self.police as u32));
-        let rows = [(city, 0x82), (police, 0x91), (cx.g(2095), 0xa5), (cx.g(2114), 0xb4)];
+        // No phrase for the added row.
+        let on_off = cx.g(if cx.settings.variants.random_missions { 2081 } else { 2080 });
+        let random = format!("Random missions: {on_off}");
+        let rows = [(city, 0x82), (police, 0x91), (random, 0xa0), (cx.g(2095), 0xb0), (cx.g(2114), 0xbf)];
         for (i, (s, y)) in rows.iter().enumerate() {
             let c = if i == self.sel && on { 2 } else { 1 };
             ui.centred(s, ui.hy(*y), c);
         }
-        // Arrows round the selected city / police row, off while flashing.
-        if self.sel < 2 && !on {
+        // Arrows round the selected city / police / missions row, off while
+        // flashing.
+        if self.sel < PLAY && !on {
             let y = ui.hy(rows[self.sel].1);
             let (l, r) = (ui.vx(-0x8c), ui.vx(0x7e));
             ui.icon(&fe.left_arrow, ui.cx() + l, y);

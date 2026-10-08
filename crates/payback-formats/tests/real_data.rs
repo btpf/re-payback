@@ -216,3 +216,62 @@ fn mac_app_icon_decodes() {
     let c = ((64 * 128 + 64) * 4 + 3) as usize;
     assert!(big.pixels[c] > 0);
 }
+
+/// The Mac release's `Payback` folder (`tools/extract_mac.py`), if present.
+fn mac_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("PAYBACK_MAC_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extracted/mac/Payback"));
+    dir.is_dir().then_some(dir)
+}
+
+#[test]
+fn mac_texture_lists_match_amiga() {
+    let (Some(dir), Some(mac)) = (data_dir(), mac_dir()) else { return };
+    for name in ["CubeTextureList", "CubeTextureRemapList"] {
+        let amiga = std::fs::read(dir.join(format!("CubeTextures/.{name}"))).unwrap();
+        let txt = std::fs::read(mac.join(format!("CubeTextures/{name}.txt"))).unwrap();
+        assert_eq!(amiga, txt, "{name}");
+    }
+    let list =
+        CubeTextureList::parse(&std::fs::read(mac.join("CubeTextures/CubeTextureList.txt")).unwrap())
+            .unwrap();
+    let mut short = Vec::new();
+    for e in &list.entries {
+        let data = std::fs::read(mac.join("CubeTextures").join(&e.file))
+            .unwrap_or_else(|_| panic!("{}", e.file));
+        if data.len() < 64 * 64 {
+            short.push(e.file.clone());
+        }
+        assert_eq!(IndexedImage::cube_texture_padded(&data).pixels.len(), 64 * 64);
+    }
+    assert_eq!(short, ["TentRoof.chunky"]);
+}
+
+#[test]
+fn mac_user_map_textures() {
+    let Some(mac) = mac_dir() else { return };
+    let maps = files(&mac.join("UserMaps"), &|p| ext_is(p, "map"));
+    assert_eq!(maps.len(), 32);
+    let mut with_custom = 0;
+    for p in maps {
+        let m = Map::parse(&std::fs::read(&p).unwrap()).unwrap();
+        let custom = std::fs::read(p.with_extension("textures"))
+            .map(|b| {
+                payback_formats::CustomTextures::parse(&b)
+                    .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+            })
+            .unwrap_or_default();
+        let mut uses = false;
+        for sq in &m.squares {
+            for c in &sq.cubes {
+                for f in c.faces.iter().filter(|f| f.visible() && f.texture >= 2000) {
+                    uses = true;
+                    assert!(custom.get(f.texture).is_some(), "{}: {}", p.display(), f.texture);
+                }
+            }
+        }
+        with_custom += uses as usize;
+    }
+    assert_eq!(with_custom, 12);
+}

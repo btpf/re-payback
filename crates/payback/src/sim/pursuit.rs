@@ -225,7 +225,7 @@ fn pursue(
                 } else {
                     nav.refresh -= 1;
                 }
-                if vehicle_ai::follow_route(&route, &mut nav, &obj) {
+                if vehicle_ai::follow_route(&route, &mut nav, &obj, true) {
                     info!("police {e:?}: on the player's node, direct chase");
                     obj.state = State::Pursuit;
                 }
@@ -255,12 +255,13 @@ fn pursue(
             *stick = Stick::default();
             commands.entity(e).remove::<Pursuit>();
             let info = library.model(obj.model).info.clone();
-            // Driver's door, as the exit spawner places it.
-            let (s, c) = (trig.sin(obj.heading), trig.cos(obj.heading));
-            let lat = -(info.radius + 192 * 6 / 5);
-            let lon = info.max_y / 2;
-            let at = obj.pos + IVec3::new((c * lat + s * lon) >> 8, (-s * lat + c * lon) >> 8, 0);
-            spawn_cop(
+            // `GetOutOfVehicle` @ 10065c90 with the side toggle set to 1:
+            // the driver's door, 1.2·(192 + maxX) out at `door_y`, starting
+            // the collision step from the car centre.
+            let door_y = super::boarding::door_y(veh.kind, info.max_y);
+            let at = super::boarding::side_point(&trig, &obj, info.radius, door_y, 6);
+            let centre = obj.pos;
+            let cop = spawn_cop(
                 &mut commands,
                 &data,
                 &mut library,
@@ -269,6 +270,13 @@ fn pursue(
                 wrap(obj.heading - 0x5a0),
                 obj.level,
             );
+            if let Some(cop) = cop {
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut o) = world.get_mut::<Obj>(cop) {
+                        o.prev_pos = centre;
+                    }
+                });
+            }
         }
     }
 }

@@ -165,7 +165,9 @@ floor level). `floor`/`z` arguments are the cube level 0–2 the actor stands on
 **30 ticks = 1 "second"** (`*0x1e` in timer setup, `/0x1e` in the HUD, 1800 ticks = 1 trophy
 minute), but the **68k game actually runs at 25 ticks/s** (frame loop `0xef13a`: DOS DateStamp
 50 Hz ticks halved, clamped 1..5 per frame in `0x348090`), so one script second = 1.2 s real
-time on 68k. The OS4 port runs at 30 ticks/s (`0x0106a058`). CONFIRMED.
+time on 68k. The OS4 port runs at 30 ticks/s (`0x0106a058`), and so does the Mac
+(`amiga_levelloop` @ 10100f50, `TickCount()` halved). CONFIRMED. The Bevy port runs at 30 ticks/s,
+so script seconds are real seconds.
 
 "Player" below = the actor the player currently controls (`actors[0x30c3a0]`); when he
 drives, that is the **vehicle actor**. "On foot" = player model flag `+0x4909 == 1`.
@@ -249,6 +251,50 @@ removed (`0xa653a`). `0xa653a` takes a **script id** and is called only from the
 | 0x42 | – | `0xa6d26` (`0xe9644`): fires each frame the player presses throttle (bit 0x1000 of `0x34c158`) while remote-controlling a model with `+0x4904 != 0` (RC car); evaluated only when such triggers exist (`0x1196f0`). Fire in the same branch self-destructs the RC car. This is the only call site (68k decompile ~124072), so level 21 M2's 0x42 on the rocket car (no `+0x4904`) never fires. CONFIRMED. | – |
 | 0x43 | a = actor id | as 0x19 (actor escaped beyond ±33000); Add also sets actor `+0x342=-1`, state 0x14 (flee). | – |
 | 0x44 | a = id; b,c = x,y | as 0x17 but AI state 0x15. The arrival routine `0xa6640` fires the actor's 0x17 **and** 0x44 triggers alike. Unlike 0xf, state 0x15 is in the police pursuit-selection list (vehicles.md §6.1): a police car given 0x44 drops the order and goes to traffic (wanted < 3) or pursuit (wanted ≥ 3). CONFIRMED (68k `FUN_000e3a58` ~124171). | – |
+
+### 3.3 Mac release: what changed in the trigger engine (CONFIRMED, Mac OS X build)
+
+* **Actor triggers bind by script id.** `SetTrigger_Long` @ 10106e50 adds one trigger that
+  keeps the actor's script id (68k `0xb2b12` added one per matching actor with the actor
+  pointer). `CheckForTriggers` @ 100f4a50 looks the actor up every frame with `GetObject`
+  @ 100530e0 (first object whose id `+0x968` matches), and `ObjectDead` @ 100f6c40
+  compares ids. An actor whose id was cleared (`RemoveObjectAtWill`/`MakeDrone` =
+  Actor_Release/ReleaseIdle set it to −1) or that is gone no longer matches; the trigger
+  stays armed but dormant. The port keeps one trigger per actor bound to the entity, and
+  skips (keeps, doesn't evaluate) a trigger whose actor no longer carries the id
+  (`mission/eval.rs`). With several live actors sharing an id the Mac watches only the
+  first; the shipped scripts never do that (INFERRED), so the port keeps the fan-out.
+* **Add time (`SetTrigger_Long`, all 69 cases; the Amiga agrees unless marked).** The
+  port follows these (scratch_followup/triggers.md):
+  * 0x33–0x36 with a = −1 become 0x1e–0x21 **and** move the threshold b into a
+    (cases 101075b4, 101074f4, 10107494, 10107554).
+  * 0x02 records each matching actor's x, y and floor once; the trigger then tests that
+    fixed point like a phone (±0x400, on foot, same floor) and never looks at the actor again
+    (case 1010704c).
+  * 0x3d adds nothing, and orders nothing, if the target vehicle id has no actor (case 10107a38).
+  * Orders 0x0c, 0x12, 0x17, 0x32, 0x3d, 0x44 go to every actor with the id, but **one**
+    trigger is added (only if an actor matched); the first completion fires it. 0x17's arrival
+    radius is always 1000, 0x32's is the script's value (cases 10107bf0, 10107dd0).
+  * **Mac change:** types 8, 0x0d, 0x13, 0x14, 0x16, 0x18, 0x19, 0x1b, 0x1d, 0x2d, 0x31,
+    0x33–0x36, 0x3b, 0x3c add one trigger keyed by the id, even when no actor has the id yet;
+    it comes alive when one appears (also a re-created one). The Amiga added one per actor and
+    none without an actor. The port binds such a trigger to the first actor with the id and
+    rebinds it when that actor goes or loses the id.
+* **Triggers run in Rampage on maps with phones.** `amiga_levelloop` @ 10100f50 calls
+  `CheckForTriggers` when `GetNumAltPhones() > 0` (@ 100b4270, the scenery-14 cells
+  `LoadMap` @ 100b3a60 collected, up to 100) and not in multiplayer, instead of "not
+  Rampage". It exists for the Random missions (missions_random.md). On `r == 2` in Rampage
+  the Mac shows phrase 1799 (0x707), which no phrase file has; the port keeps 2023
+  "Level complete!" (decision 12 in mac_version.md).
+* **Random phone.** `GetPhoneCoords(-1)` @ 100b4540 returns a random one of those cells
+  (`random(count)`); type 1/7 triggers store the phone's square, so `SetTrigger(ev, 1, -1)`
+  rings a random phone.
+* **Formatted say.** `MessageThem_Parse(n, ...)` @ 101087d0 `vsprintf`s phrase `n` (at most
+  400 characters) into one of 20 buffers and says it as the other party; `FlushOldMessages`
+  @ 10108730 frees them from `Script_reset` @ 10104990 and `Script_close` @ 10104a10.
+  Only the Random missions use it (`Script::say2_fmt` in the port).
+* `GetPhrase` serves level phrases (< 1000) and global ones alike, so `Announce(1400)` and
+  `MessageThem(1460)` show global phrases (the port's `Script::phrase`).
 
 ## 4. Phones, missions and progression
 
@@ -420,7 +466,7 @@ Best time and trophy are written together only if t < best or best == −1; t �
 ignored. Overall rating = minimum trophy over the 6 levels; when it rises the GAME COMPLETE
 screen `0x2a842` shows 2047/2048, 2072+r (rating) and 2075+r (hint / "Well done! You got
 gold!"). 2159 "View outro" is unreferenced (INFERRED: outro unused). A game minute is
-1800 ticks = 72 s real time on 68k (25 ticks/s).
+1800 ticks = 72 s real time on 68k (25 ticks/s), 60 s on OS4, the Mac and the port.
 
 **Pause-menu goal** (`0x2550a`, single player): goal `0x34c440` ≤ 0 → 2056 "Goal: Escape from
 jail" (level 20), else "Goal: Get " + amount + " points" (2058/2057).

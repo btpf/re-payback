@@ -103,10 +103,13 @@ Loader for Big: `FUN_0100e088(prefix, font, w, h, size)`; for You/Them:
 * Named suffixes: `FullStop` . , `Comma` , , `Colon` : , `SemiColon` ; , `Hyphen` - ,
   `Quotes` " , `Apostrophe` ' , `OpenBracket` ( , `CloseBracket` ) ,
   `ExclamationMark` ! , `QuestionMark` ? , `GreaterThan` > , `LessThan` < , `Slash` / ,
-  `Underscore` _ , `Plus` + , `Dollar` $ , `Percent` % , `Pound` £ (0xA3);
+  `Underscore` _ , `Plus` + ;
   `ae` Æ(0xC6)/æ(0xE6), `o_line` Ø/ø (0xD8/0xF8), `a_circle` Å/å (0xC5/0xE5),
   `a_dots` Ä/ä (0xC4/0xE4), `o_dots` Ö/ö (0xD6/0xF6), `n_tilde` Ñ/ñ (0xD1/0xF1)
   (little_ variants for the lower-case codes in You/Them).
+* `Dollar`, `Percent` and `Pound` files exist in `Icons/` but **no build loads them**
+  (OS4, 68k and Mac `LoadFont` @ 10089380 / `LoadFontPartial` @ 10087d80), so `$`, `%`
+  and `£` (0xA3) are drawn with the `?` glyph. The port (`hud/icons.rs`) does the same.
 * `You.c0`..`You.c11` → control codes **1..12**: controller-button symbols for control
   hints — c0–c3 arrows left/up/right/down, c4–c7 PlayStation-style ✕ □ ○ △, c8–c11 CD32
   red/yellow/blue/green buttons (`analysis/img/icons/sheet_you_c.png`). CONFIRMED by the key-name
@@ -142,6 +145,25 @@ Main routine `FUN_01019bd8` (68k `FUN_00024a3e`), called from the frame renderer
 * The HUD is anchored with constant offsets to the left/top, `xmax`/`ymax` or `cx`; it is
   **not scaled** except by the hi-res flag `DAT_01174e88` (W ≥ 640 and H ≥ 400), which
   doubles every offset and pitch (7→14, 10→20) and uses pre-doubled icons. (C)
+  Several hi-res offsets are not exactly 2× (score at xmax−145, ammo at y 47, timer
+  digits at y+30, message lines 22 apart with an undoubled scroll; the table below and
+  the Mac `DrawGraphics__FiP6Objectisi` @ 100929e0 and its callees). The Mac only offers
+  640×480 and up, so it **always** shows the hi-res HUD. CONFIRMED (Mac `InitGraphics`
+  @ 1008d110, `AreIconsScaled__Fv` @ 10085eb0).
+* Icon doubling (C): software `LoadIcon__FPciii` @ 10086f80 (Amiga `FUN_0100d3c4`)
+  turns each pixel P into a 2×2 block P, avg(P, right), avg(P, below), avg(P, below
+  right), edges clamped (`GetPointCol`), avg = Alpha table 4 unless equal
+  (`AverageVals__FUcUc` @ 10086ef0), colour 0 included. Hardware keeps the icons small
+  and draws 2× quads (`DrawIcon__FP4Iconii` @ 10085300), bilinear on the Mac's OpenGL
+  (`W3D_SetFilter` @ 10154650 sets `GL_LINEAR`, I). The wanted-star pitch is icon
+  width + 2, doubled again in hardware hi-res (`DisplayWanted__Fiii` @ 10091270): 20 in
+  software, 22 in hardware. The minimap image is not doubled in software; hardware draws
+  it 2× and plots at >> 11.
+* **Port:** `hud/mod.rs` draws the hi-res layout by default whenever the window is at
+  least 640×400, on a canvas of window/s (s the largest whole factor keeping it ≥
+  640×400), with the software doubling or a bilinear 2× blit in hardware mode;
+  `Settings::hires_hud` off ("HUD: Lo-res") or a smaller window gives the 256-line
+  lo-res canvas. Banner and big-title centring use `realstrlen` (skips `^`).
 * The view-size option `DAT_0114c310` (/256) shrinks the 3-D view, centred; the HUD is
   drawn relative to that view (framebuffer pointer moved by `FUN_0101168c`). (C)
 * Blitters: `FUN_0100a53c(icon,x,y)` plain (0 transparent, clipped); `FUN_0100b3c8`
@@ -177,7 +199,7 @@ Main routine `FUN_01019bd8` (68k `FUN_00024a3e`), called from the frame renderer
 | Lap counter | "Lap %d of %d", font 1, (5,45) | (10,90) | if lap `0114a910` > 0; lap ≥ 2 plays Beep3 (`FUN_01017fdc`) |
 | Level-end blink | (5,40) | (10,80) | phrases 2023 "Level complete!" / 2049 "Press F1 to continue" alternate every 31 ticks; font flips 1↔2 every frame |
 | Vehicle-name banner `FUN_01016224` | FadeDarken2 band (cx−80,0)–(cx+80,h); text x = cx−7·len/2 | ±160, h 32 | name phrase of the controlled object (+0x493c), set when switching object (`FUN_010168f0`). t<20: h=16t/20, text y=h−14; 20–129: h=16, y=2; 130–149 slides up; >149 hidden |
-| Minimap | 64×64 at (xmax−70, 34) | (xmax−142, 66) | §2.4 |
+| Minimap | 64×64 at (xmax−70, 34) | (xmax−141, 67); call args (xmax−142, 66) | §2.4 |
 | Checkpoint marker | projected target, centred (−27) | −54 | §2.5 |
 
 The money display *is* the score (player +0x384).
@@ -682,6 +704,50 @@ thread fails). **No music volume**; FX volume `DAT_0114c2a0` 0..100 step 10 (def
 100) scales hardware volume. `extracted/iso` is data-only, so track contents are unknown.
 
 
+### 4.7 Mac release: what the port follows (C; analysis/mac/audio_platform.md §1–§2)
+
+The Mac keeps the game-side sound code (`DoAudio__Fiiii` @ 100f32f0 is a line-for-line port of
+`FUN_01007290`; `AddSound__Ficiiiii` @ 100f4000 = `FUN_0100815c`) and hands mixing to the Sound
+Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_version.md`):
+
+* **Pitch**: every sound plays at its rate byte × 200 (200 Hz steps), Global and first-frame
+  sounds included; Doppler as §4.3 (C, `AddSound`, `DoAudio` lines 300–345).
+* **Pan**: `r = dx/|dy|` is a **float** division of the `>>4` coordinate differences; far side
+  `min(A/(|r|+1), 255)` with the **unclamped** A, near side `min(A, 255)` (C, both builds:
+  `DoAudio` lines 211–262, OS4 from 0x01007590); the port used to divide in integers.
+* **Level**: per side `FX · min(L,255) · 65536 / 1e7` in Sound Manager units (0x100 = unity),
+  i.e. `FX · L · 2.56e-5`, 0.653 at FX 100 (C, `DoAudio` lines 435–445). Default FX **50**
+  (C, `ClearPreference` @ 100508c0), which matches the Amiga at 100. The voices are summed and
+  clipped. The quiet-voice doubling the Mac leaves uncompensated (+6 dB) is **not reproduced**
+  (decision 3).
+* **One-shot cut** (setting `variants.oneshot_cut`, default off; decision 2): the slot clock
+  `pos += (735t + 399)·200·rate/22050` (§4.2 quirk) deletes a one-shot after ≈ 735/1134 = 65 %
+  of its length on the Mac, where playback is continuous (C, `DoAudio` lines 486–497 →
+  `DeleteSound` @ 100f42a0 → `CMSQuietSound` @ 10155b10). The port advances the clock once per
+  game tick (`FixedPostUpdate`), so replays cut the same.
+* **Menu sounds**: `PlaySound__Fii` @ 100f1960, Hz = `1/(2.79365e-7 · period)` = 3,579,545/period
+  (**NTSC** clock: 15,232 / 13,257 / 22,372 / 7,990 Hz), volume `FX·256/100` (unity at 100),
+  centred, mixed with the game voices (C).
+* **Pause menu**: `ShowOptions` @ 10093240 calls `PauseAllSounds` @ 100f1810 and on leaving
+  `ResumeAllSounds` @ 100f1880; game voices hold their place, the menu sound plays (C). The
+  port holds every game voice while virtual time is paused.
+* **Music volume**: one slider; `SetSoundVolume` @ 100f24f0 sets the CD volume to 200 for
+  FX ≤ 50, else `200 − 4·(FX − 50)` (of 256): music fades out as the effects get louder (C).
+  `CD_SetVolume` @ 100fb100 is an empty stub, so there is no "under cover" duck (C).
+* **Music logic** (`music.rs`): `CD_CheckForTrackEnd(n)` @ 100fb000: n > 0 plays n if nothing
+  plays (so menu tracks loop), 0 → `UCDAudio::Next` if nothing plays, −1 stops (C). Menus 13,
+  Game Over 16, Level/Game complete 8, pause menu 0, only when the mode ≠ 0 (C). `InitProgress`
+  @ 10053510 and `amiga_finishlevel` @ 10101ab0 stop the music (mode ≠ 3) (C). Continuous:
+  `amiga_levelloop` @ 10100f50 requests 0 each frame; `Next` advances without wrapping and
+  without a random start, so the music stops after the last track (C; decision 1). Radio:
+  `GetInOutVehicles__Fi` @ 10066140 stops the CD and plays the type's track (+0x8194) if > 0 on
+  entering, and stops it on getting out (C); `do_Other__Fv` @ 10146280 / `do_Person__Fv`
+  @ 1013fbd0 request player 1's type track every frame in mode 1, so it loops (C); on foot the
+  person type's field is taken as −1 (stop) (I). The setup menu cycles Off → Radio →
+  Continuous → Off and leaves Disabled alone (C, `DoCDAudioSetup` @ 100a1500). Default mode
+  Radio. The port reads ripped tracks from `Music/` (working directory, data root or Mac
+  folder), numbered by CD track; with none the mode is Disabled.
+
 ## 5. Intro video — `Videos/intro.video` + `intro.audio`
 
 Decoder: `analysis/intro_video.py` (`python intro_video.py --all` from `analysis/`) →
@@ -745,6 +811,27 @@ and the last 68 bytes are never played. Paula period **163**, volume **63**, one
 21,760 Hz PAL / 21,961 Hz NTSC; nominal rate **22,050 Hz** = 1470 × 15 fps (INFERRED).
 The reimplementation should play the file at 22,050 Hz in sync with a 15 fps video.
 
+### 5.3 Mac release: MPEG-1 film (CONFIRMED; analysis/mac/audio_platform.md §3)
+
+The Mac plays a different, longer film through QuickTime. `OpenAnimation` @ `100fb130`
+ignores its argument (`"intro"`); `GetPaybackMovie` @ `100fcbc0` opens the hard-coded
+`:Videos:payback_high_mpeg1.mpg` (data `0x1018fac0`): MPEG-1 system stream, 640×480,
+25 fps, 1800 pictures, MP2 192 kbit/s 48 kHz mono, 71.98 s. The low-quality and MPEG-2
+copies next to it are never used. `PlayAnimation` @ `100fb1d0` scales the movie to fit
+the window keeping 4:3 (`ScaleRectToFit`) on black, never sets the movie volume (full
+volume, independent of FX) and skips on `Button()` or `ALAnyKeyPressed()` (held keys,
+polled). It is called from the same places as on the Amiga: `InitAll` @ `100632a0` at the
+end of loading and `DoGameMenu` @ `100a05e0` option 7 ("View intro").
+
+Port (`intro.rs`): with the "Mac intro" setting (`Settings.variants.intro`, default on)
+and the film present in the Mac data, the film is decoded at run time by the vendored
+pl_mpeg (`crates/payback-mpeg`, built with `cc`; no ffmpeg). The whole MP2 track is
+decoded up front (under 0.1 s) and played as one 48 kHz source; video frames are decoded
+on demand at 25 fps, clocked by the samples the audio output has consumed (real time
+before the sound starts or without an audio device). pl_mpeg yields 1799 frames.
+`--intro-at <s>` starts part-way in (testing aid). Otherwise, or when
+the film cannot be opened, the FLC plays. Both skip only on new presses (not the held-key
+polling or key repeat), and both are fitted to the window at 4:3.
 ## 6. `.mini`, `.thumb` and progress bar
 
 ### 6.1 `<map>.thumb` — level-select preview (CONFIRMED)
@@ -798,6 +885,9 @@ draws `Loading` at `(cx-46, cy-17)` (`cx,cy` = screen centre `DAT_0114c338/334`)
 differs from the file value it **rewrites the .size file** ("Wrote updated file sizes").
 Loaders call `DrawProgress(2000)` per icon, `(50000)` per texture, `(30000)` for phrases,
 etc. — units are arbitrary "work" counts, self-calibrating.
+`Loading` and its pieces are **never doubled** (Mac `DrawProgress__Fi` @ 100538c0, C), so
+on a hi-res screen the box is half its lo-res size. The port draws it as its own overlay
+at the HUD canvas scale (`hud/loading.rs`): native size with the hi-res HUD.
 
 
 ## 7. Open questions

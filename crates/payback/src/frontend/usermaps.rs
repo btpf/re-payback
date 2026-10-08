@@ -8,8 +8,9 @@
 //! `<map>.scores` (`FUN_01029b3c`).
 //!
 //! Directories searched, in order (a name found twice is kept once):
-//! `UserMaps/` in the game data, next to the executable, and in the
-//! working directory. Lists are sorted by name (the original keeps the
+//! `UserMaps/` in the game data, in the Mac data (its 31 bundled maps, 12
+//! with custom `.textures`), next to the executable, and in the working
+//! directory. Junk files (`.DS_Store`, `*.rsrc`) are skipped. Lists are sorted by name (the original keeps the
 //! directory order).
 //!
 //! High scores: read from `Saves/UserMaps/<name>.scores`, else next to the
@@ -47,6 +48,11 @@ pub struct UserMaps(pub Vec<UserMap>);
 impl UserMaps {
     pub fn scan(data: &GameData) -> UserMaps {
         let mut dirs: Vec<(PathBuf, bool)> = vec![(data.root.join("UserMaps"), true)];
+        // The 31 community maps bundled with the Mac release (read by
+        // absolute path; their scores go to `Saves/UserMaps/`).
+        if let Some(mac) = &data.mac {
+            dirs.push((mac.join("UserMaps"), true));
+        }
         if let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
             dirs.push((exe.join("UserMaps"), false));
         }
@@ -76,7 +82,7 @@ impl UserMaps {
                     warn!("AddUserMap(): Too many user maps...");
                     break;
                 }
-                let path = if in_data {
+                let path = if in_data && dir == data.root.join("UserMaps") {
                     Path::new("UserMaps").join(&file)
                 } else {
                     std::path::absolute(dir.join(&file)).unwrap_or_else(|_| dir.join(&file))

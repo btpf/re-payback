@@ -102,6 +102,10 @@ pub trait LevelScript: Send + Sync + 'static {
 #[derive(Resource)]
 pub struct ActiveLevel(pub Option<Box<dyn LevelScript>>);
 
+/// Random missions in Rampage (Mac only, [`levels::random`]), set at level
+/// start by the replay module from the settings or the replay header.
+pub use crate::replay::RandomMissions;
+
 /// Outcome signalled to the game loop.
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LevelOutcome {
@@ -113,13 +117,13 @@ pub enum LevelOutcome {
     MatchOver,
 }
 
-/// Game ticks since the level started (`DAT_0114c738`; the original counts
-/// 30 Hz ticks, ours are 25 Hz). Paused with virtual time.
+/// Game ticks since the level started (`DAT_0114c738`; 30 Hz ticks, 1800
+/// per minute in the trophy check, as in the port). Paused with virtual time.
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct LevelClock(pub u32);
 
 impl LevelClock {
-    pub const TICKS_PER_SECOND: u32 = 25;
+    pub const TICKS_PER_SECOND: u32 = 30;
 
     /// Whole minutes elapsed (what the trophy table compares against).
     pub fn minutes(&self) -> u32 {
@@ -132,6 +136,7 @@ pub struct MissionPlugin;
 impl Plugin for MissionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Triggers>()
+            .init_resource::<RandomMissions>()
             .init_resource::<LevelClock>()
             .init_resource::<MissionState>()
             .insert_resource(ActiveLevel(None))
@@ -158,17 +163,29 @@ impl Plugin for MissionPlugin {
     }
 }
 
-/// `Mission_Init(city, level)` at level start (single-player story only).
+/// `Mission_Init(city, level)` at level start (single-player story), or
+/// the Random missions in Rampage.
 fn start_level(world: &mut World) {
     let spec = world.resource::<crate::level::LevelSpec>().clone();
+    if std::env::args().any(|a| a == "--no-script") {
+        return;
+    }
+    // Multiplayer runs the city with no level script (and no level phrases
+    // in the original's LoadMap); so does Rampage, apart from the Mac's
+    // Random missions.
+    match *world.resource::<crate::level::GameMode>() {
+        crate::level::GameMode::Story => {}
+        crate::level::GameMode::Rampage { police } => {
+            if world.get_resource::<RandomMissions>().is_none_or(|r| r.0) {
+                start_random(world, &spec, police);
+            }
+            return;
+        }
+        _ => return,
+    }
     let Ok(city) = spec.map.parse::<u8>() else {
         return;
     };
-    // Rampage and multiplayer run the city with no level script (and no
-    // level phrases in the original's LoadMap).
-    if std::env::args().any(|a| a == "--no-script") || *world.resource::<crate::level::GameMode>() != crate::level::GameMode::Story {
-        return;
-    }
     let Some(mut script) = levels::for_level(city, spec.level) else {
         return;
     };
@@ -182,6 +199,52 @@ fn start_level(world: &mut World) {
     }
     script.init(&mut Script::new(world));
     world.resource_mut::<ActiveLevel>().0 = Some(script);
+}
+
+/// `InitScript_Random` (Mac @ 10129e50), called from `amiga_startlevel`
+/// @ 100fff40 in Rampage when the map has phones (`GetNumAltPhones() > 0`).
+/// The trigger loop then runs in Rampage too (`amiga_levelloop` @
+/// 10100f50 gates it on the phone count instead of the Rampage flag).
+fn start_random(world: &mut World, spec: &crate::level::LevelSpec, police: u8) {
+    if Script::new(world).alt_phones().is_empty() {
+        return;
+    }
+    let p = police.min(5) as usize;
+    let user_maps = world.get_resource::<crate::frontend::usermaps::UserMaps>();
+    let city = user_maps.and_then(|m| crate::frontend::usermaps::city_of(&m.0, spec));
+    let user = city
+        .and_then(|c| c.checked_sub(crate::frontend::usermaps::BUILT_IN))
+        .and_then(|i| user_maps.and_then(|m| m.0.get(i)));
+    let data = world.resource::<crate::data::GameData>();
+    // `GetHighestScore` @ 100a05a0: the top of the Rampage table for P.
+    let scores = match (user, city) {
+        (Some(m), _) => Some(m.load_scores(data)),
+        (None, Some(c)) => Some(crate::rampage::load_scores(data, c)),
+        _ => None,
+    };
+    let goal = scores.map_or(0, |s| s.tables[p][0].score);
+    // `GetJustCityName` @ 10084e40: phrases 1840-1842 (Mac), else the
+    // user map's name.
+    let texts = world.resource::<crate::hud::Texts>();
+    let city_name = match (user, city) {
+        (Some(m), _) => m.name.clone(),
+        (None, Some(c)) => {
+            let n = texts.global(1840 + c as u32);
+            if n.is_empty() { texts.global(2170 + c as u32) } else { n }
+        }
+        _ => spec.map.clone(),
+    };
+    // `GetHighestLevelCompleted` @ 1009b580: story levels done in order.
+    let progress = world
+        .get_resource::<crate::frontend::progress::Profile>()
+        .map_or(0, |p| p.cups.iter().position(|&c| c == 0).unwrap_or(6) as i32);
+    *world.resource_mut::<MissionState>() = MissionState {
+        city: 3,
+        ..default()
+    };
+    let mut script = levels::random::Random::new(police as i32, goal, city_name, progress);
+    script.init(&mut Script::new(world));
+    world.resource_mut::<ActiveLevel>().0 = Some(Box::new(script));
 }
 
 /// Clear the level script and every trigger when the level is left.

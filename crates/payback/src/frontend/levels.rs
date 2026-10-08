@@ -206,6 +206,11 @@ impl LevelComplete {
 }
 
 impl Screen for LevelComplete {
+    /// Level complete: track 8 (Mac `CD_CheckForTrackEnd(8)`).
+    fn cd_track(&self) -> i32 {
+        8
+    }
+
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         if !self.res.tick(cx, input) {
             return Step::Stay;
@@ -251,6 +256,11 @@ impl GameOver {
 }
 
 impl Screen for GameOver {
+    /// Game Over: track 16 (Mac `CD_CheckForTrackEnd(0x10)`).
+    fn cd_track(&self) -> i32 {
+        16
+    }
+
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         if self.res.tick(cx, input) {
             Step::Pop(Outcome::Done)
@@ -294,6 +304,11 @@ impl GameComplete {
 }
 
 impl Screen for GameComplete {
+    /// Game complete: track 8.
+    fn cd_track(&self) -> i32 {
+        8
+    }
+
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         if let Some(s) = &mut self.slide {
             return if s.tick() { Step::Pop(Outcome::Done) } else { Step::Stay };

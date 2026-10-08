@@ -208,23 +208,29 @@ Type 5 (animated door, set at runtime) moves the bottom edge up by
 ### Alpha.256 (from `FUN_0103c408` / generator `FUN_0103b540`)
 
 0xB0000 bytes = 11 tables `T[k][dst*256 + src]` (dst = framebuffer pixel, src =
-texel), each entry = nearest palette colour (metric `25|ΔR|+36|ΔG|+16|ΔB|`, first
-best wins, result 0 replaced by 8). Fitted against the palette (≥ 99 % match):
+texel), each entry = nearest palette colour (`ClosestMatch`, Mac @ 10083dc0: metric
+`25|ΔR|+36|ΔG|+16|ΔB|`, first best wins, result 0 replaced by 8) of the per-channel
+result clamped to 0…255. Exact formulas (CONFIRMED, Mac `CalcAlpha__Fv` @ 10083ec0,
+called by `GetAlpha__Fv` @ 10084710 when the file is missing; OS4 `FUN_0103b540`):
 
 | k | offset | op (per channel) | used by |
 |---|---|---|---|
 | 0 | 0x00000 | min(d+s,255) additive | flares, flames, dust |
 | 1 | 0x10000 | max(d−s,0) subtract | shadows, smoke, night remap (T1[c][0x67]) |
-| 2 | 0x20000 | d−16 where s≠0 | |
-| 3 | 0x30000 | s + d·(255−max(s))/256 | blood, dirt |
-| 4 | 0x40000 | (d+s)/2 | **cube Alpha faces** |
+| 2 | 0x20000 | max(d−16,0) where s (index) ≠ 0, else d | |
+| 3 | 0x30000 | (s·255 + (255 − max(sR,sG,sB))·d) >> 8 | blood, dirt |
+| 4 | 0x40000 | s if s = d (index), else (d+s) >> 1 | **cube Alpha faces** |
 | 5–8 | | add R / R+G / G / B only | coloured flares |
 | 9 | | d+s−32 | |
-| 10 | | pal[s] + d − 128 (d = intensity) | |
+| 10 | | pal[s] + d − 128 (d = the index itself) | |
 
-Night remap check: `General/Alpha.256` ships with the game; recomputing tables 0, 1,
-4 and 9 from the palette with the metric above matches 99.2–99.5 % of random
-entries. The port reads table 1 directly for the night remap (§4).
+The Mac's shipped `Alpha.256` is exactly this computation on the current palette (all
+11 tables). The Amiga Update 7 file was built from the CD palette (colour 8 = 7,7,7)
+and differs in 0.2–0.8 % of entries; the OS4 generator also lacks the table 4 `s = d`
+shortcut (7 diagonal entries between duplicate colours). Port (`postfx.rs`
+`alpha_tables`, `night_remap`): computes the tables with these formulas and ignores
+the file (the night remap is `T1[c][0x67]`, §4). `Gouraud.256` is computed too (the
+Mac's shipped one is stale, built from the CD palette).
 
 ### Palette output and motion blur (port: `crates/payback/src/postfx.rs`)
 
@@ -249,9 +255,13 @@ every pixel writes `T[a·256 + b]` with the table pointer `DAT_0114c440 + 0x4000
 `DAT_0114c7b0` (`lhz`/`rlwimi`/`lbzx`, 32 pixels per iteration, `(W·H >> 5) − 1`
 iterations); then `DAT_0114c6bc` flips and the next frame renders into the other
 buffer. So the visible frame is `T4[previous][current]`, the nearest palette colour to
-the average of the last two rendered frames (no feedback). The port does the same in
-the final pass (it keeps each pixel's palette index of the previous frame); in the
-hardware render mode (§11) neither the snap nor the blur runs.
+the average of the last two rendered frames (no feedback). Switching blur on: the Mac
+`ToggleMotionBlur__Fv` @ 10053210 blanks both render buffers (`BlankChunky`), so the
+first blended frame averages with black (CONFIRMED); OS4 `FUN_01042308` does not, and
+shows a stale frame from the last time blur was on. The port does the same in the
+final pass (it keeps each pixel's palette index of the previous frame and clears it to
+index 0 when blur turns on); in the hardware render mode (§11) neither the snap nor
+the blur runs.
 
 Cube Alpha tops: `FUN_01036044(tex, x0,y0,x1,y1, 0x40000)` temporarily adds 0x40000
 to the current table pointer `DAT_0114c440` and draws with `FUN_0112bfdc`
@@ -402,6 +412,13 @@ after LoadMap:
    | missile (`DAT_012a6750`) | (100M, 90M, 80M), z − 500 | `AddCollideObj` (decompiled.c ~36294) |
    | petrol bomb (`DAT_012a6754`) | (30M + rnd 10M, 15M + rnd 5M, 5M + rnd 2M), z − 500 | decompiled.c ~47200 |
    | police car / van siren | red model (200M, 20M, 20M), blue model (20M, 20M, 200M), z − 500 | decompiled.c ~48831 |
+   | muzzle flash, the tick a person fires | minigun (60M, 60M, 8M), pistol (40M, 40M, 10M), shotgun (60M, 60M, 20M), z − 500 | Mac `do_Person` @ 1013fbd0, next to the fire sounds |
+
+   The effect-light jitter (`DoEffectsLighting` @ 100a82b0 on the Mac) is drawn from the
+   cosmetic generator `random3`, B first, then G, then R (the Mac and 68k builds evaluate
+   arguments last first; OS4 first to last, the odd one out; analysis/mac/followup.md). The burning-object and petrol-bomb jitter is drawn from the game's
+   generator inside the object update in both builds; the port draws it from the
+   cosmetic generator as well (spread, B, G, R, then the z, y, x offsets).
 
    Traffic lights and beacons sit at the square centre plus the model's `+0x4910 /
    +0x4914` (mean x / y of the ground vertices) rotated by the cube rotation
@@ -418,8 +435,21 @@ first test after the per-cube setup): the square loop runs x, y = 1…126 (grid 
 `local_74 = −0xa3c + 0x1400·(x−1)`, `+0x14` per y); the first cell read is
 `local_74 + 0x1446 + z` = cell `(2x − 1, 2y − 1, z0 + 1)` for the corner at half-grid
 `(2x, 2y)`, the next `(2x − 2, 2y − 2, z0 + 2)` (offset −0xa09 per step), unrolled
-while z ≤ 9; `z0 = clamp((base + h) >> 7, 0, 9)`. The other corners use further
-unrolled copies whose offsets were not all decoded (INFERRED: the same diagonal).
+while z ≤ 9; `z0 = clamp((base + h) >> 7, 0, 9)`.
+
+**Paired rays** (CONFIRMED, Mac `DoLightSourcing__FP3Map` @ 1015b840 calling
+`CheckVoxels__Fiii` @ 100b3960, which returns 0 = shadow if any cell `(px−k, py−k,
+z+k)`, z+k ≤ 9, is marked; OS4 `FUN_010766c8` has the same pairs inlined): NW tests
+`(2x, 2y)`; NE is shadowed only if both `(2x+1, 2y)` and `(2x+2, 2y)` are blocked, SW
+both `(2x, 2y+1)` and `(2x, 2y+2)`, SE both `(2x+1, 2y+1)` and `(2x+2, 2y+2)`; the
+bottom corners repeat the four tests at `z = base >> 7`. A corner is lit if either of
+two parallel rays (from the corner and from the half-square point beside it) is clear.
+The port follows this.
+
+**Vert height quirk** (CONFIRMED, not reproduced by decision): for a Vert (slope 2) cube
+the shadow test adds h1 twice (Mac 1015bd18, OS4 ~0x01076cf4): corner z NW/SW =
+base + 2·h1, NE/SE = base + h1 + h2, and the running base of later cubes in that square
+is h1 too high. The port uses the correct heights (docs/re/mac_version.md, Decisions).
 
 Port (`crates/payback/src/lighting.rs`, `shaders/city.wgsl`): static light per cube
 corner computed at load or on toggle (items 1–5; the lamp intensities come from a
@@ -446,7 +476,10 @@ All header values verified in the files: `Maps/0.map` 0, `1.map` 1, `2.map` 2 (n
 `UserMaps/*.map` 0. Weather runs only in single player (`DAT_0114c7c8 == 0`).
 
 **Level start** (main loop `FUN_010692bc`, ~0x1069390, after the cameras are placed;
-random numbers from `FUN_0103ac94`, call order x, y, z, vx, vy, vz, size):
+random numbers from `FUN_0103ac94`, call order x, y, z, vx, vy, vz, size. The Mac
+`amiga_startlevel` @ 100fff40 draws them from the cosmetic generator `random3` in
+last-first order (size, vz, vy, vx, z, y, x; the 68k order too), except the y of a raindrop, which is the
+game's `random(0x5000)`, so the rain spawn still takes 250 game numbers):
 
 ```
 cam = (camX >> 5, camY >> 5)                     # object units
@@ -467,9 +500,14 @@ rain: PlaySound(61 Rain, loop, vol 0xff, 14000 Hz, non-positional)
 * View rectangle (non-rotating view), in object units, with W×H = screen size
   (320×256): `half = ((camH·16 + 0x2af2)·W + 0x800) >> 9` around `camX >> 5` (likewise
   y with H). A record outside it is **wrapped** by one rectangle width/height (once
-  per update, x then y) instead of being deleted as other types are.
+  per update, x then y) instead of being deleted as other types are. The Mac
+  (`UpdateEffects__Fiiiii` @ 100aa1f0, CONFIRMED) uses the drawn square range instead,
+  `cx·(camH + 1500)/(fx << 12) + 1` squares (y with cy, fy) × 0x800, which does not
+  grow with the screen width; rotating view `cx·(camH + 1500)/(fx << 10) + 1` both ways,
+  rotating split screen `·3/(fx << 11)`.
 * Removal at z > 24000 (H = 0, i.e. *below* the street level of 256; drops fall through
-  roofs and streets alike):
+  roofs and streets alike). The Mac removes snow at street level, z > 0x4dc0 (19904),
+  and puts the mark there (CONFIRMED, `UpdateEffects` @ 100aa1f0):
   * snow: a **mark** `AddEffect(8, Dust, x, y, 0x57e4, 0,0,0, 200+rand(50), list 0,
     blend 0)` (additive, lives ~225 ticks) and a new flake in list 3 at
     `x = cam.x + rand(0x10000) − 0x8000` (±16 squares), `y = cam.y + rand(0xa000) −
@@ -477,7 +515,11 @@ rain: PlaySound(61 Rain, loop, vol 0xff, 14000 Hz, non-positional)
     at level start;
   * rain: a new drop (±8 × ±5 squares, z = 0x100 − camH·16) and **3 splashes**
     `AddEffect(0xE, Dust, x, y, 0x5780, rand(100)−50, rand(100)−50, −200−rand(200), 1,
-    list 3)` at the old drop's x, y. These random numbers come from `FUN_0103acc4`.
+    list 3)` at the old drop's x, y. These random numbers come from `FUN_0103acc4`
+    (`random3`). Argument order: the Mac and the 68k evaluate a call's random arguments
+    last first, OS4 first to last (so OS4's order is the exception, not a Mac change;
+    analysis/mac/followup.md). `AddEffect` arguments 9-11 match OS4 at all 112 call
+    sites. The port draws last first everywhere.
 * Drawing (software): type 0xC is an ordinary sprite (Dust through table 0, mirrored);
   type 0xD is a **1-pixel line** (`FUN_010360fc`) from the projection of `pos − v` to
   that of `pos`, coloured through `T0 + 0x6700` (= adds palette colour 0x67 to the
@@ -496,9 +538,15 @@ if counter == 0 and rand(1000) < ticks:
     2: PlaySound(62 Lightning, vol 0xf0, 7500 + rand(500) Hz)
     6: PlaySound(62 Lightning, vol 0xa0, 8000 + rand(500) Hz)      # all non-positional
 if counter > 0:
-    if counter even: flash += 100 + rand(150)
+    if counter even: flash += 100 + rand(150)     # Mac: flash = 100 + rand(150)
     counter -= 1                                   # per frame, not per tick
 ```
+
+The Mac (`amiga_levelloop` @ 10100f50, CONFIRMED) **sets** the flash instead of adding,
+so a multi-flash strike does not build up. The draws are the game's `random` in both.
+Rain volume (Mac `SetHighestCube__Fi` @ 10106d90, CONFIRMED): when the visible-layer
+limit changes, the `Rain` loop is set to volume 0xff if the limit is 3, else 0x7f
+(quieter indoors).
 
 So a strike is 1–3 flashes on alternate frames, with thunder at the strike (no delay).
 
@@ -518,10 +566,13 @@ all in multiplayer, in any view.
 Rotating view: the wrap rectangle is a fixed `±0xf00000 >> 9` = ±0x7800 object units
 (15 squares) around the camera (`FUN_010386e8`, `DAT_0114c7dc != 0`).
 
-Port: `crates/payback/src/weather.rs` (spawn, lightning; off in multiplayer),
-`effects.rs` (wrap, respawn, drawing), `ScreenFlash` (applied by the view's final pass
-after the palette snap, as the original changes the palette; see §3). The snow marks
-are put on the top of cube 0 under the flake instead of at z 22500 (the port
+Port: `crates/payback/src/weather.rs` (spawn, lightning, rain volume; off in
+multiplayer), `effects.rs` (wrap, respawn, drawing), `ScreenFlash` (applied by the
+view's final pass after the palette snap, as the original changes the palette; see
+§3). It follows the Mac: cosmetic generator (`sim::VisualRng`) for the spawn and the
+updater, reversed argument order, snow removed at 0x4dc0, the view-sized rectangle,
+lightning setting the flash, and the rain volume. The snow marks are put on the top
+of cube 0 under the flake (street level 0x4dc0 where there is none; the port
 depth-tests list 0).
 
 ---
@@ -560,6 +611,15 @@ The camera looks **straight down**, north (−y) up, no roll, no tilt. Focal len
 for 320×256 = 256 px per (h-unit/h-unit) with 1 square = 256 h-units:
 **horizontal FOV = 2·atan(160/256) = 64.0°, vertical = 2·atan(128/256) = 53.1°**
 (scales with resolution: fx/cx stays ≈ 1/10 of the width).
+
+Both angles hold at every screen size, CONFIRMED in the Mac build too
+(`ReadScreenParams__Fv` @ 10051fc0 = OS4 `FUN_0104107c`: fx = (W+8)·16/320,
+fy = ((H+8)·16)>>8): at 640×480 fx 32, fy 30, so the 10:8 world area is stretched
+6.7 % wide on the 4:3 screen. Port (`camera::view_fov_for`): with
+`Settings::original_aspect` (the default, "Aspect: Original" in the Graphics
+options) the horizontal angle is fixed at the original's (64°; two players 49°) and
+the vertical one follows the window's aspect with square pixels; "Aspect: Free"
+fixes the vertical 53.1° and widens with the window instead.
 
 ### Camera motion — CONFIRMED (`FUN_010556e0(p)`, once per game tick, from `FUN_0105bd98`)
 
@@ -645,9 +705,35 @@ globals are reset to 0.
 Follow parameters in the rotating view (`FUN_010556e0`): on foot (human models,
 `+0x4909` set) K 150, B 1500, c 2, R 800; other on-foot player objects K 300, B 1500,
 R 600; driving (vehicle `+0x4909` clear) K 225, V 200, B 1000, R 600; other vehicles
-K 150, V 0x140, B 1000, R 800; `t = min(t, 3000)` without the lower clamp. The camera
-state is simulation state (people spawn window, traffic), so a replay must be played
-with the setting it was recorded with.
+K 150, V 0x140, B 1000, R 800; `t = min(t, 3000)` without the lower clamp. In the
+original the camera state is simulation state (people spawn window, traffic), so the
+option changes the game. **Port departure** (decision: the rotating view is not stored
+in replays): the simulation's camera (`GameCam`/`ViewCams`) always follows with the
+top-down parameters, and the views are drawn from separate render-only eyes
+(`camera.rs` `ViewEyes`, the rotating parameters above) that lighting, chimney smoke and
+the effect wrap also use. A replay plays back identically with the view on or off.
+The camera step runs after the tick's simulation systems (as the original calls
+`FUN_010556e0` from the render loop), so the spawn windows read a well-defined state.
+
+**Replay "TV camera"** (Mac only, CONFIRMED, `DrawMap` @ 1005a260 prologue; same code
+in the OS 9 build): when the rotating view is on, a replay plays back
+(`EnablePlayback__Fv` flag) and there is one player, the city is drawn from a roaming
+camera `(_DAT_1017d2cc, _DAT_1017d2c8)` (16.16 squares) instead of the followed one.
+Per frame: position `+= velocity (_DAT_1017d2c4, _DAT_1017d2c0) · ticks`, clamped to
+`0..0x7fffff`; the yaw (`_DAT_1017d2bc`) moves a quarter of the way (short way round)
+to `0x167f − GetAngle(target − camera)` (`GetAngle__Fdd` @ 10072340 = heading + 0xb40,
+so the target is up the screen; target = the driven vehicle or the player, or while
+the player is dead the view's own camera); the pitch is 0x14b4 (28.75°); the height is
+`1000 − (player.z >> 4)`; the visible range is `D·cx/(fx<<10) + 4` (+4 instead of +1).
+If the camera is more than `range >> 2` whole squares from the followed camera in x or
+y it re-spawns: `random3(4)` = 3 → velocity `random3(0x800) − 0x400` per axis; 2 →
+`vel·64/3` of the target (`+0x7dc/+0x7e0`); else both added. Position = followed camera
++ `vel·0x800 + random3(range << 13) − range·0x1000`, clamped to `[(−range) >> 2,
+range >> 2]` **in 16.16 units** (as compiled, so in effect it re-spawns at the
+followed camera), and the yaw snaps to the target. The yaw and pitch globals are
+restored after the frame. The water row formula clamps the negative pitch offset to 0.
+Port: `camera.rs` `tv_camera`, random numbers from the cosmetic generator
+(`VisualRng`, `random3`).
 
 **Water in the rotating view** (software, `FUN_01081ba4` / `FUN_0108a2a0`): the
 background is still read in screen space and does not turn with the view, but row
@@ -663,8 +749,8 @@ three or four (159×127): cx 80, cy 64, fx = fy = 8. Vertical FOV `2·atan(cy/(1
 
 **Per view** (`FUN_0105bd98` loop): `FUN_010556e0(p)` (camera), `FUN_01036574` and
 `FUN_010753e8` (dynamic lights), `FUN_01049374` (city, objects, effects, with this
-view's camera; its 8 chimney random numbers and the alarm-box pulse
-`DAT_012e5adc += ticks` run once per view), `FUN_01034804` (this view's lens flares,
+view's camera; its 8 chimney random numbers (the Mac's per-chimney `random3`
+draws, §10) and the alarm-box pulse `DAT_012e5adc += ticks` run once per view), `FUN_01034804` (this view's lens flares,
 collected during its city pass; the list is cleared afterwards), then the HUD.
 
 ---
@@ -733,11 +819,11 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   (11xx quarters, s/2), −1 (12xx quarters, s); singles are not mirrored. Every element
   goes through the flare's table: 5–8 add only R / R+G / G / B, so traffic-light
   flares are red, amber and green. No sun flare.
-* **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47). `Bubble` is loaded but unused. FadeDarken*,
+* **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47; the Mac has no `Blood.dark` and keeps its own `Blood` at night, see `mac_version.md`). `Bubble` is loaded but unused. FadeDarken*,
   HealthBar are HUD textures.
 
 Lifetimes are in game ticks (`DAT_0114c6a0` = ticks elapsed this frame; a tick is
-1/25 s on 68k (2 DateStamp ticks) and 1/30 s on OS4, CONFIRMED in `people.md` §1.1).
+1/25 s on 68k (2 DateStamp ticks) and 1/30 s on OS4 and the Mac (the port's rate), CONFIRMED in `people.md` §1.1).
 
 ---
 
@@ -877,7 +963,11 @@ Flares are only added for objects that are not burning (`obj+0x33c < 1`).
   numbers per frame for all chimneys) it adds per tick a type 6 `Dust2` smoke puff
   (subtractive) at the square centre + (rand(100)−50 + 100·i, rand(100)−50), z = its
   base z − 2500 + rand(300), v = (150+rand(30), rand(30)−15, rand(30)−250), size
-  300+rand(200), in the list of the layer being drawn.
+  300+rand(200), in the list of the layer being drawn. The Mac (`DrawMap` @ 1005b0b8,
+  CONFIRMED) draws `random3(3) == 1` and fresh numbers per chimney per tick (size, vz,
+  vy, vx, z, y, x), so chimneys smoke independently; the OS4 drew the set from the game
+  generator and restored its seed after the frame. Port (`objects.rs`
+  `chimney_smoke`): the Mac's, from `sim::VisualRng`.
 
 Port: `crates/payback/src/objects.rs` (slots/modes 1, 6 and inactive faces, burnt and
 dented mesh variants, scenery animation, chimneys, flare sources); flares are drawn by
@@ -886,6 +976,50 @@ plain mode 4 faces, and the night headlight polygon, go into an additive overlay
 and mode 5 faces into a line-list overlay (1-pixel lines), drawn as child entities of
 the object (`sync_overlays`); the main mesh keeps a degenerate triangle in their place.
 Additive blending happens in linear colour rather than palette space.
+
+### Mac models, face modes, doors and shadows (Mac `DrawObject` @ 10075880) — CONFIRMED unless noted
+
+* **Mac models** (docs/re/mac_version.md decision 4). `DrawObject` places every model at
+  its origin with no per-model offset (people: the same `Y + 0x5dc` when pitch is 0,
+  depth `>> 10`, horizontal `/3` as OS4 `FUN_010c101c`). The Mac changed the data
+  instead: people re-based by −max Y (MaleNormal 90, PedMale4 100, the rest 92) so the
+  feet are at Y = 0; Pug, Pug Racer, Taxi and Vapour raised so the body bottom is at
+  z = 0; `Doors/Bus` raised; shorter trees, phones and traffic lights; `Tree.Obj` the
+  `tanne` cross-billboard; new menu props. Port (`objects.rs` `ObjectLibrary::load`):
+  game models from the Mac data when present; scenery per `Settings::variants.scenery`
+  (at the next level load), menu props per `variants.menu_props`. The simulation reads
+  model extents (radius `+0x48c4`, front `+0x48c8`, back `+0x48cc`, ground mean: door
+  points, contact circles, AI), so `ModelInfo` always comes from the Amiga file and the
+  replays do not depend on the model set; the drawn model's own extents (`shape`) place
+  the headlight polygon, door and shadows, as the Mac computes them from its models.
+  Amiga people are drawn shifted by the Mac's per-model amounts, also before the lying
+  +1500 (`sim/people.rs` `standing`/`lying`). Mac-only object textures (PC, Keyboard,
+  Monitor, Disk, Moviereel, `tanne`) join the atlas.
+* **Face modes.** Slot 0's mode byte decides before the winding test, whatever its
+  `active` byte: 6 = lens flare only, 5 = a line (colour `param`; colour 0, black, in the
+  burnt pass `DrawLine(…, 0)`); neither draws a triangle. Shine sub-modes (mode − 0x10
+  or − 0x30): 1 file UV + CloudsReflect table 9, 2 opaque env map, 4 env map through
+  table 4 in `DrawObject` but table 0 in `DrawScenery` @ 10079e90, anything else
+  (0x10, 0x13, 0x15, 0x30 …) `Genlock` (texel 0 transparent) in software and `(7, 8)`
+  in hardware. Hardware mode 3 is `(7, 8)` with the filtered A1R5G5B5 key (soft edges);
+  port: a `keyed` overlay material, mask in software, alpha blend in hardware. No
+  shipped model uses the Genlock shines or 0x34 (CD.obj's 0x14 is a menu prop).
+* **Sand.** A person whose instance `+0x99c` (OS4 `+0x4b4`, the player number) is
+  n ≥ 1 draws both `Red sand` and `Red dark sand` faces with the *light* sand n
+  (`InitObjects` @ 10072d50: Red, Green, Yellow, Blue). Port: `build_person_mesh`.
+* **Doors.** While `+0x418` ≠ 0 the tail of `DrawObject` creates the door model
+  (`+0x8158`) at the hinge (`+0x8150` = −max|X|, `+0x8154` = door position) with heading
+  + `+0x418`, the vehicle's depth, pitch and roll, paint (`+0x8a4/8a8`) and burn timer
+  (`+0x81c`), not its dents. No offset: the Mac's raised cars keep the ±18 default
+  door. Port: `objects.rs` `vehicle_doors` (child entity).
+* **Shadows** (`DrawShadow` @ 1007f7d0, `DrawSceneryShadow` @ 1007ea20, called from the
+  `DrawMap` square loops after each layer's effects; object shadows once per frame,
+  flag `+0x816`): details and the port in `objects/shadows.rs`. Scenery shadows are
+  skipped at night (`GetObjectNight`); object shadows are not. Objects in state 6 have
+  none. Port approximations: depth-tested horizontal triangles 1 h-unit above the ground,
+  linear-colour subtraction, no spinning-pickup shadows, the face texture's own key for
+  the hardware `Tree2.clone`/`tanne.clone` (INFERRED same mask).
+* Not done: debris (`DrawPart` @ 100794c0, the part list of `FUN_01035438`).
 
 ---
 
@@ -1064,8 +1198,8 @@ Approximate or not done:
   render modes (the original's hardware load shifts the game RNG);
 * all blending runs in linear light on an sRGB target (Warp3D blends the 16-bit
   framebuffer values); the framebuffer is not quantised to 15/16 bits;
-* rain in hardware: 0.4 white added instead of an alpha 0.4 blend; effect and object
-  atlases filter bilinearly across neighbouring atlas tiles at sprite edges;
+* effect and object atlases filter bilinearly across neighbouring atlas tiles at
+  sprite edges (rain is blended `(7, 8)` at alpha 0.4, as the original);
 * object shine modes 0x14 / 0x28 additive and the `(7, 8)` shine modes, the shadow
   textures (`Tree2.clone`, `shadow` page), fades: still drawn as in software;
 * the rotating-view hardware water turns the UVs with the yaw (sign INFERRED); wall

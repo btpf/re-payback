@@ -24,7 +24,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef EFFECT_HARDWARE
     // Warp3D: the converted texture under ONE/ONE (alpha ignored) or
     // SRC_ALPHA/ONE_MINUS_SRC_ALPHA (alpha = the texture's); bilinear.
+#ifdef EFFECT_HW_OVERLAY
+    // Flares and weather under ONE / ONE_MINUS_SRC_ALPHA: a vertex alpha
+    // below 1 (rain, 0.4) blends at that alpha, premultiplied; the rest
+    // (alpha 1, compared with margin: interpolation is not exact) adds.
+#ifdef VERTEX_COLORS
+    if (in.color.a < 0.9) {
+        return vec4(t.rgb * in.color.a, in.color.a);
+    }
+#endif
+    return vec4(t.rgb, 0.0);
+#else
     return t;
+#endif
 #else
 #ifdef EFFECT_AVERAGE
     return vec4(t.rgb, 0.5);

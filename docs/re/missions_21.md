@@ -75,6 +75,15 @@ Dialog_Begin(2); Dialog_Say2(1); Dialog_End()
    // 1 "It's good to finally meet you. Your target for this level is 2,000,000 points. Get in the car."
 ```
 
+* **Mac release (CONFIRMED, `InitScript_21` @ 10129d20):** a second trigger follows the
+  first, `AddTrigger_script(50, 0x09 actor-gone, 50)`. Its handler in `ProcessTrigger_21`
+  @ 1013b2b0 (slot −1) runs `RemoveObjectAtWill(50)` (Actor_Release), slot = 1,
+  `StopStoredTriggers`, Say(2, 5 "You idiot!"), `Announce(2028 "Mission failed!")` and
+  `FinishMission_21()`, which opens phones 200/300/600 as after mission 1. On the Amiga a
+  car 50 destroyed before the player got in (traffic, explosions) left the level with no
+  phones: a soft-lock. After ev 100 the trigger can no longer fire, because the Mac
+  resolves actor triggers by script id and `Actor_Release(50)` cleared it
+  (script_api.md §3.3). The port has both (`level_21.rs`, event 50).
 * Actor id 1000000 (vehicle model 23, facing 270°) is never referenced again: a static
   parked vehicle. INFERRED.
 * Lives are not changed by the script (game default). No map edits at start.
@@ -560,6 +569,7 @@ ev 740  (50 s up: truck explodes)                                             @0
         SetCube(x,y, cube 2, 0x200, 0x200, 0, 0, 0)
         if Random(1) == 0:                              // always true: the shipped table is 0..511 (CONFIRMED)
            Explosion(x*0x800 + Random(0x800), y*0x800 + Random(0x800), 0x4268 + Random(1500), 0, 3000)
+           // drawn z, y, x (68k 0xc98e6..0xc990e, Mac 1013d194; OS4 x, y, z). CONFIRMED
      SetFaceTop(124,69, cube 0, type 1, tex 0xd0, flip 1); same for (125,69), (126,69)
      if 0x2fba50 == 0: Say2(76) "I love the smell of burning napalm in the morning!"
      else:             Say2(77) "That would have been a lot more impressive if you'd actually got out the truck..."
@@ -593,6 +603,7 @@ ev 800                                                                        @0
 
 ev 830  (phone self-destructs; cosmetic)                                      @0xc9b6a
   Explosion(0x253ce + Random(100), 0x3d3ce + Random(100), 20000, 0, 1500)   // at phone 8 (74,122)
+  // the y offset is drawn first (68k, Mac 1013d750; OS4 draws x first). CONFIRMED
   SetScenery(74,122, cube 0, scenery 0, byte0 0x2c, 0)  // phone removed from the map
 
 ev 801..812  (first crate smashed / grenades collected)                      @0xc9a6a

@@ -1,5 +1,6 @@
 //! The six level scripts (docs/re/missions_*.md), ported from the Update 7
-//! code. Each level is an event-driven state machine.
+//! code, and the Mac's Random missions for Rampage ([`random`]). Each level
+//! is an event-driven state machine.
 
 mod level_00;
 mod level_01;
@@ -7,6 +8,7 @@ pub(crate) mod level_10;
 mod level_11;
 mod level_20;
 pub(crate) mod level_21;
+pub mod random;
 
 use super::LevelScript;
 

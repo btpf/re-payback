@@ -29,6 +29,7 @@ mod level;
 mod lighting;
 mod mapedit;
 mod mission;
+mod music;
 mod multiplayer;
 mod objects;
 mod parked;
@@ -74,9 +75,11 @@ fn main() -> AppExit {
             map: arg("--map").unwrap_or_else(|| "0".into()),
             level: arg("--level").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
-        // One game tick is 1/25 s on the Amiga (the OS4 port uses 1/30 s;
-        // docs/re/people.md).
-        .insert_resource(Time::<Fixed>::from_hz(25.0))
+        // One game tick is 1/30 s, as on the Mac (`amiga_levelloop`
+        // @ 10100f50: `TickCount()` halved) and OS4 (`FUN_0110761c`); the 68k
+        // Update 7 runs 1/25 s (docs/re/people.md §1.1). Per-tick rules are
+        // the same in all builds.
+        .insert_resource(Time::<Fixed>::from_hz(30.0))
         .insert_resource(ClearColor(Color::srgb(0.35, 0.55, 0.85)))
         .add_plugins((
             level::LevelPlugin,
@@ -84,7 +87,7 @@ fn main() -> AppExit {
             mapedit::MapEditPlugin,
             camera::CameraPlugin,
             sim::SimPlugin,
-            audio::AudioPlugin,
+            (audio::AudioPlugin, music::MusicPlugin),
             water::WaterPlugin,
             (effects::EffectsPlugin, weather::WeatherPlugin),
             hud::HudPlugin,

@@ -1,5 +1,6 @@
-//! Display options: renderer, resolution and window mode
-//! (docs/re/frontend_menus.md §3, "Graphics options").
+//! Display options: renderer, resolution, window mode and the Mac/Amiga
+//! presentation and content choices (docs/re/frontend_menus.md §3,
+//! "Graphics options"; docs/re/mac_version.md, "Decisions").
 //!
 //! The original chose the screen mode and the renderer (software or Warp3D
 //! hardware, `DAT_0114c7d8`) in the external `PaybackSetup` launcher and
@@ -7,6 +8,14 @@
 //! menu items: the pause menu's "Graphics options" (`FUN_0101a7dc`, item 5)
 //! and the front end's Graphics options screen, saved in `Saves/Payback.cfg`
 //! (`hardware`, `resolution`, `window_mode`).
+//!
+//! The Mac release configured the window, size, renderer, rotating view,
+//! Gouraud, motion blur and FX in its "Payback Setup" dialog
+//! (`CPaybackPreferences::EditPreferences` @ 10050c60). The port has no
+//! such dialog: all of it is on the front end's Graphics options screen
+//! ([`SETUP_ITEMS`]), with the Mac/Amiga variants, the HUD resolution and
+//! the framing. The pause menu keeps the shorter [`ITEMS`] (its own items
+//! cover FX and motion blur).
 //!
 //! The window follows [`Settings`] live; `--resolution <w>x<h>` and
 //! `--window-mode windowed|borderless|fullscreen` win over the settings
@@ -25,9 +34,15 @@ use bevy::{
 /// The window when nothing is configured (logical pixels).
 pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
 
+/// The Mac's three sizes (MENU 135 "Size", `CAmigaWindow::CAmigaWindow`
+/// @ 10102400; 640×480 is its default, `ClearPreference` @ 100508c0),
+/// offered first.
+pub const MAC_SIZES: [(u32, u32); 3] = [(640, 480), (800, 600), (1024, 768)];
+
 /// Common windowed sizes offered besides the monitor's video modes: PAL
 /// 320×256 multiples, then the usual 16:10 / 16:9 / 4:3 sizes.
-const COMMON: [(u32, u32); 12] = [
+const COMMON: [(u32, u32); 13] = [
+    (640, 480),
     (640, 512),
     (800, 600),
     (960, 768),
@@ -109,9 +124,9 @@ pub struct Display {
 }
 
 impl Display {
-    /// Sizes the Resolution item cycles through: the monitor's video modes,
-    /// the common sizes that fit on it, the current size and the saved one,
-    /// ascending.
+    /// Sizes the Resolution item cycles through: the Mac sizes first
+    /// ([`MAC_SIZES`]), then the monitor's video modes, the common sizes
+    /// that fit on it, the current size and the saved one, ascending.
     pub fn resolutions(&self, saved: Option<(u32, u32)>) -> Vec<(u32, u32)> {
         let fits = |&(w, h): &(u32, u32)| self.monitor.is_none_or(|(mw, mh)| w <= mw && h <= mh);
         let mut v: Vec<(u32, u32)> = self.modes.clone();
@@ -119,7 +134,7 @@ impl Display {
         v.push(self.current);
         v.extend(saved);
         v.retain(|&(w, h)| w > 0 && h > 0);
-        v.sort_by_key(|&(w, h)| (w as u64 * h as u64, w));
+        v.sort_by_key(|&(w, h)| (!MAC_SIZES.contains(&(w, h)), w as u64 * h as u64, w));
         v.dedup();
         v
     }
@@ -148,9 +163,68 @@ pub enum Item {
     Resolution,
     /// "Window mode: " (no phrase).
     WindowMode,
+    /// "Motion blur: " 2053 (`DAT_0114c6c8`; pause menu item 3, the Mac
+    /// dialog's `mb!!`).
+    MotionBlur,
+    /// "Lens effects: " 2052 + 2060.. (pause menu item 2, the Mac dialog's
+    /// "FX:" popup `le!!`).
+    Fx,
+    /// "HUD: " hi-res / lo-res (`Settings::hires_hud`; no phrase).
+    HiresHud,
+    /// "Aspect: " original / free (`Settings::original_aspect`).
+    Aspect,
+    /// "Textures: " Mac / Amiga look (`Variants::textures`).
+    Textures,
+    /// "Blood: " Mac / Amiga (`Variants::blood`).
+    Blood,
+    /// "Menu props: " Mac / Amiga (`Variants::menu_props`).
+    MenuProps,
+    /// "Title screens: " Mac / Amiga (`Variants::title`).
+    Title,
+    /// "Intro: " Mac film / Amiga (`Variants::intro`).
+    Intro,
+    /// "Scenery: " Mac / Amiga (`Variants::scenery`).
+    Scenery,
+    /// "German gas: " on / off (`Variants::gas`).
+    Gas,
 }
 
-pub const ITEMS: [Item; 5] = [Item::Gouraud, Item::Rotating, Item::Hardware, Item::Resolution, Item::WindowMode];
+/// The pause menu's graphics sub-items (item 5).
+pub const ITEMS: [Item; 7] = [
+    Item::Gouraud,
+    Item::Rotating,
+    Item::Hardware,
+    Item::Resolution,
+    Item::WindowMode,
+    Item::HiresHud,
+    Item::Aspect,
+];
+
+/// The front end's Graphics options screen: the Mac setup dialog's
+/// controls in its order (display, then rendering), then the HUD and
+/// framing, then the Mac/Amiga content choices.
+pub const SETUP_ITEMS: [Item; 16] = [
+    Item::Resolution,
+    Item::WindowMode,
+    Item::Hardware,
+    Item::Rotating,
+    Item::Gouraud,
+    Item::MotionBlur,
+    Item::Fx,
+    Item::HiresHud,
+    Item::Aspect,
+    Item::Textures,
+    Item::Blood,
+    Item::Scenery,
+    Item::MenuProps,
+    Item::Title,
+    Item::Intro,
+    Item::Gas,
+];
+
+/// The Mac intro film (`GetPaybackMovie` @ 100fcbc0, played by
+/// `PlayAnimation` @ 100fb1d0).
+pub const MAC_FILM: &str = "Videos/payback_high_mpeg1.mpg";
 
 impl Item {
     pub fn label(self, cx: &Ctx) -> String {
@@ -165,7 +239,69 @@ impl Item {
                 format!("Resolution: {w}x{h}")
             }
             Item::WindowMode => format!("Window mode: {}", s.window_mode.label()),
+            // Hardware: always "Off" (drawn dimmed), as in the pause menu.
+            Item::MotionBlur => format!("{}{}", cx.g(2053), on_off(s.motion_blur && !s.hardware)),
+            Item::Fx => format!("{}{}", cx.g(2052), cx.g(2060 + s.fx.min(2) as u32)),
+            Item::HiresHud => format!("HUD: {}", if s.hires_hud { "Hi-res" } else { "Lo-res" }),
+            Item::Aspect => format!("Aspect: {}", if s.original_aspect { "Original" } else { "Free" }),
+            Item::Gas => format!("German gas: {}", on_off(s.variants.gas)),
+            _ => {
+                // A Mac choice reads "Amiga" when the Mac data is missing.
+                let mac = self.variant(s).unwrap_or(false) && !self.needs_mac(cx.data);
+                let (name, m, a) = match self {
+                    Item::Textures => ("Textures", "Mac", "Amiga look"),
+                    Item::Blood => ("Blood", "Mac", "Amiga"),
+                    Item::MenuProps => ("Menu props", "Mac", "Amiga"),
+                    Item::Title => ("Title screens", "Mac", "Amiga"),
+                    Item::Intro => ("Intro", "Mac film", "Amiga"),
+                    _ => ("Scenery", "Mac", "Amiga"),
+                };
+                format!("{name}: {}", if mac { m } else { a })
+            }
         }
+    }
+
+    /// The Mac/Amiga variant flag behind the item, if it is one.
+    fn variant(self, s: &Settings) -> Option<bool> {
+        let v = &s.variants;
+        Some(match self {
+            Item::Textures => v.textures,
+            Item::Blood => v.blood,
+            Item::MenuProps => v.menu_props,
+            Item::Title => v.title,
+            Item::Intro => v.intro,
+            Item::Scenery => v.scenery,
+            _ => return None,
+        })
+    }
+
+    fn variant_mut(self, s: &mut Settings) -> Option<&mut bool> {
+        let v = &mut s.variants;
+        Some(match self {
+            Item::Textures => &mut v.textures,
+            Item::Blood => &mut v.blood,
+            Item::MenuProps => &mut v.menu_props,
+            Item::Title => &mut v.title,
+            Item::Intro => &mut v.intro,
+            Item::Scenery => &mut v.scenery,
+            Item::Gas => &mut v.gas,
+            _ => return None,
+        })
+    }
+
+    /// A Mac-only choice without the Mac data (`GameData::mac`, or the film
+    /// for the intro): greyed out and showing the Amiga content.
+    pub fn needs_mac(self, data: &crate::data::GameData) -> bool {
+        match self {
+            Item::Intro => data.mac_path(MAC_FILM).is_none(),
+            Item::Textures | Item::Blood | Item::MenuProps | Item::Title | Item::Scenery => data.mac.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Dimmed for either reason ([`Item::dimmed`], [`Item::needs_mac`]).
+    pub fn locked(self, cx: &Ctx) -> bool {
+        self.dimmed(cx.settings) || self.needs_mac(cx.data)
     }
 
     /// Drawn dimmed (`FUN_0100cc78`): Gouraud under hardware rendering
@@ -173,7 +309,8 @@ impl Item {
     /// resolution in borderless fullscreen (it is the desktop's).
     pub fn dimmed(self, s: &Settings) -> bool {
         match self {
-            Item::Gouraud => s.hardware,
+            // Motion blur too (`FUN_0101a7dc` case 3 refuses it).
+            Item::Gouraud | Item::MotionBlur => s.hardware,
             Item::Resolution => s.window_mode == WindowChoice::Borderless,
             _ => false,
         }
@@ -191,9 +328,10 @@ impl Item {
     /// refuse sound.
     pub fn activate(self, cx: &mut Ctx, d: i32) {
         let display = cx.display.clone();
+        let locked = self.locked(cx);
         let s = &mut *cx.settings;
         let ok = match self {
-            _ if self.dimmed(s) => false,
+            _ if locked => false,
             Item::Gouraud => {
                 s.gouraud = !s.gouraud;
                 true
@@ -219,6 +357,29 @@ impl Item {
                 s.window_mode = s.window_mode.step(d);
                 true
             }
+            Item::MotionBlur => {
+                s.motion_blur = !s.motion_blur;
+                true
+            }
+            Item::Fx => {
+                s.fx = (s.fx as i32 + d).rem_euclid(3) as u8;
+                true
+            }
+            Item::HiresHud => {
+                s.hires_hud = !s.hires_hud;
+                true
+            }
+            Item::Aspect => {
+                s.original_aspect = !s.original_aspect;
+                true
+            }
+            _ => match self.variant_mut(s) {
+                Some(v) => {
+                    *v = !*v;
+                    true
+                }
+                None => false,
+            },
         };
         cx.sound(if ok { Sfx::Select } else { Sfx::Refuse });
     }
@@ -244,43 +405,68 @@ pub fn first_item(s: &Settings) -> usize {
 }
 
 /// The front end's Graphics options screen (main menu item 8; the
-/// original set these in PaybackSetup). Laid out like CD Audio Setup
-/// (`FUN_0102dd30`): title, the items from y = 60/200 14 px apart, "Done"
-/// 2148 at 170/200. Up/down select, fire or right steps an item forward,
-/// left back; Esc or Done saves and returns.
+/// original set these in PaybackSetup, the Mac in its setup dialog). Laid
+/// out like CD Audio Setup (`FUN_0102dd30`): title, the items, "Done" 2148
+/// at 170/200. The [`SETUP_ITEMS`] list is 12 px a line from 36/200 and
+/// scrolls when it does not fit above Done (dots mark hidden lines).
+/// Up/down select, fire or right steps an item forward, left back; Esc or
+/// Done saves and returns.
 pub struct GraphicsSetup {
-    /// Index into [`ITEMS`], or `ITEMS.len()` = Done.
+    /// Index into [`SETUP_ITEMS`], or `SETUP_ITEMS.len()` = Done.
     sel: usize,
+    /// First item shown.
+    top: usize,
+}
+
+/// Line spacing of the item list.
+const STEP: i32 = 12;
+
+/// First line and number of item lines that fit above Done.
+fn list_rows() -> (i32, usize) {
+    use super::ui::H;
+    let y0 = H * 36 / 200;
+    (y0, ((H * 170 / 200 - 4 - y0) / STEP) as usize)
 }
 
 impl GraphicsSetup {
     pub fn new(s: &Settings) -> GraphicsSetup {
-        GraphicsSetup { sel: first_item(s) }
+        // The Mac-only items come last, so the first one that is not
+        // dimmed is never locked for want of the Mac data.
+        let sel = SETUP_ITEMS.iter().position(|i| !i.dimmed(s)).unwrap_or(0);
+        GraphicsSetup { sel, top: 0 }
     }
 }
 
 impl super::ui::Screen for GraphicsSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &super::ui::Input) -> super::ui::Step {
-        let n = ITEMS.len() + 1;
+        let n = SETUP_ITEMS.len() + 1;
         if input.up || input.down {
             let d = if input.down { 1 } else { -1 };
             let mut i = self.sel as i32;
             for _ in 0..n {
                 i = (i + d).rem_euclid(n as i32);
-                if ITEMS.get(i as usize).is_none_or(|it| it.selectable(cx.settings)) {
+                if SETUP_ITEMS.get(i as usize).is_none_or(|it| !it.locked(cx)) {
                     break;
                 }
             }
             self.sel = i as usize;
             cx.sound(Sfx::Move);
         }
-        let done = self.sel == ITEMS.len();
+        // Keep the selection on screen (Done shows the end of the list).
+        let rows = list_rows().1;
+        let last = self.sel.min(SETUP_ITEMS.len() - 1);
+        if last < self.top {
+            self.top = last;
+        } else if last >= self.top + rows {
+            self.top = last + 1 - rows;
+        }
+        let done = self.sel == SETUP_ITEMS.len();
         if input.back || (input.fire && done) {
             cx.sound(Sfx::Select);
             cx.settings.save();
             return super::ui::Step::Pop(super::ui::Outcome::Done);
         }
-        if let Some(&item) = ITEMS.get(self.sel) {
+        if let Some(&item) = SETUP_ITEMS.get(self.sel) {
             if input.fire || input.right {
                 item.activate(cx, 1);
             } else if input.left {
@@ -293,16 +479,25 @@ impl super::ui::Screen for GraphicsSetup {
     fn draw(&self, ui: &mut super::ui::Ui, cx: &Ctx) {
         ui.picture(0, true);
         ui.title(&cx.g(1600));
-        for (i, item) in ITEMS.iter().enumerate() {
-            let y = ui.hy(60) + 14 * i as i32;
-            let c = if i == self.sel { ui.flash() } else { 2 };
-            if item.dimmed(cx.settings) {
+        let (y0, rows) = list_rows();
+        let end = (self.top + rows).min(SETUP_ITEMS.len());
+        for (row, i) in (self.top..end).enumerate() {
+            let item = SETUP_ITEMS[i];
+            let y = y0 + STEP * row as i32;
+            if item.locked(cx) {
                 ui.centred_dim(&item.label(cx), y, 2);
             } else {
+                let c = if i == self.sel { ui.flash() } else { 2 };
                 ui.centred(&item.label(cx), y, c);
             }
         }
-        let c = if self.sel == ITEMS.len() { ui.flash() } else { 2 };
+        if self.top > 0 {
+            ui.centred_dim("...", y0 - STEP, 2);
+        }
+        if end < SETUP_ITEMS.len() {
+            ui.centred_dim("...", y0 + STEP * rows as i32 - 4, 2);
+        }
+        let c = if self.sel == SETUP_ITEMS.len() { ui.flash() } else { 2 };
         ui.centred(&cx.g(2148), ui.hy(170), c);
     }
 }
@@ -447,7 +642,8 @@ mod tests {
         assert_eq!(WindowChoice::Fullscreen.step(1), WindowChoice::Windowed);
         let d = Display { monitor: Some((1920, 1080)), modes: vec![(1920, 1080), (800, 600)], current: (1000, 700) };
         let r = d.resolutions(Some((1280, 800)));
-        assert_eq!(r.first(), Some(&(640, 512)));
+        assert_eq!(&r[..3], &MAC_SIZES);
+        assert!(r[3..].windows(2).all(|p| p[0].0 as u64 * p[0].1 as u64 <= p[1].0 as u64 * p[1].1 as u64));
         assert!(r.contains(&(1000, 700)) && r.contains(&(1920, 1080)));
         assert!(!r.contains(&(2560, 1440)));
     }
@@ -458,7 +654,7 @@ mod tests {
         assert_eq!(first_item(&s), 0);
         s.hardware = true;
         assert_eq!(first_item(&s), 1);
-        assert_eq!(step_item(1, -1, &s), 4);
-        assert_eq!(step_item(4, 1, &s), 1);
+        assert_eq!(step_item(1, -1, &s), ITEMS.len() - 1);
+        assert_eq!(step_item(ITEMS.len() - 1, 1, &s), 1);
     }
 }

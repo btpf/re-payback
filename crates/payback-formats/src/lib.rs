@@ -23,7 +23,7 @@ pub use obj::Obj;
 pub use palette::Palette;
 pub use phrases::Phrases;
 pub use route::Route;
-pub use texture::{CubeTextureList, IndexedImage};
+pub use texture::{CubeTextureList, CustomTextures, IndexedImage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

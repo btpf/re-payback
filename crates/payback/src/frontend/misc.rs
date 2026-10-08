@@ -494,8 +494,11 @@ pub fn pad_name(cx: &Ctx, b: Option<GamepadButton>) -> String {
 /// to the first row. Left/right change the column (wrapping). Fire on an
 /// action shows the redefine prompt (2468, 2119) and waits for a key
 /// (`FUN_01040790`): Esc cancels, 0 disables, the digits, `-`, `=` and
-/// `P` are refused; pad columns take a gamepad button. Edits go to a copy
-/// that Done stores (and saves); Cancel drops them.
+/// F1 are refused (Mac; the Amiga refused `P` instead); pad columns take
+/// a gamepad button. Edits go to a copy that Done stores (and saves);
+/// Cancel drops them. The Mac (`DoControlSetup` @ 100a1f80) has 5 columns
+/// (keyboard, devices 1..4) and spins the `controlsetup` model behind
+/// the screen.
 pub struct ControlSetup {
     sel: usize,
     controls: Controls,
@@ -505,6 +508,8 @@ pub struct ControlSetup {
     waiting: bool,
     /// Flash phase 0..3 (`uVar18`).
     flash: u32,
+    /// The Mac's spinning `controlsetup` model.
+    obj: Bobbing,
 }
 
 const ROWS: usize = 11;
@@ -519,6 +524,7 @@ impl ControlSetup {
             scroll: -1000,
             waiting: false,
             flash: 0,
+            obj: Bobbing::new("options/controlsetup.obj"),
         }
     }
 
@@ -575,6 +581,7 @@ impl ControlSetup {
 impl Screen for ControlSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         self.flash = (self.flash + 1) % 4;
+        self.obj.tick();
         let target = if self.sel >= DONE { 0 } else { -100 * self.column() as i32 };
         self.scroll = (7 * self.scroll + target) >> 3;
         if self.waiting {
@@ -646,11 +653,14 @@ impl Screen for ControlSetup {
                     ui.text(s, x, y, colour);
                 }
             };
+            // Mac titles (`DoControlSetup`): "Single player" over Keyboard
+            // and device 1, "Multiplayer" over devices 2..4; then the key
+            // sets.
             let (head, device) = match col {
                 0 => (2455, cx.g(2167)),
-                1 => (2455, cx.g(2166)),
-                2..=5 => (2456, format!("{} {}", cx.g(2167), col - 1)),
-                _ => (2456, format!("{} {}", cx.g(2166), col - 5)),
+                1 => (2455, format!("{} 1", cx.g(2166))),
+                c if c < bindings::KEY_SET_COLUMN => (2456, format!("{} {c}", cx.g(2166))),
+                c => (2456, format!("{} {}", cx.g(2167), c - bindings::KEY_SET_COLUMN + 1)),
             };
             put(ui, &cx.g(head), ui.hy(30), 2);
             put(ui, &device, H / 5, 2);
@@ -668,34 +678,72 @@ impl Screen for ControlSetup {
             ui.centred(&cx.g(phrase), ui.hy(y), colour);
         }
     }
+
+    fn model(&self) -> Option<ModelView> {
+        Some(self.obj.view)
+    }
 }
 
-/// CD audio setup: no CD audio here, so device and unit stay unknown;
-/// only the playback mode is stored.
+/// CD audio setup, "Music setup" on the Mac (`DoCDAudioSetup` @ 100a1500,
+/// OS4 `FUN_0102dd30`): no CD drive here, so device and unit stay unknown
+/// (the Mac's `CD_Init` ignores them too); only the music mode is stored.
+/// The tracks are ripped files (`crate::music`); the mode shows Disabled,
+/// dimmed and skipped, while none are found, as both originals do when the
+/// CD is missing. Labels are drawn from x = 30/320 (the Mac's labels are
+/// indented so the colons line up), Done centred; the Mac spins the `cd`
+/// model behind the screen and starts on Done.
+///
+/// Added row: "One-shot cut" (`Variants::oneshot_cut`, the Mac's cut-off of
+/// one-shot sounds; docs/re/mac_version.md decision 2).
 pub struct CdSetup {
     sel: usize,
+    obj: Bobbing,
 }
+
+const CD_MODE: usize = 2;
+const CD_CUT: usize = 3;
+const CD_DONE: usize = 4;
 
 impl CdSetup {
     pub fn new() -> CdSetup {
-        CdSetup { sel: 2 }
+        CdSetup {
+            sel: CD_DONE,
+            obj: Bobbing::new("options/cd.obj"),
+        }
+    }
+
+    fn disabled() -> bool {
+        crate::music::effective_mode(0) == crate::music::mode::DISABLED
     }
 }
 
 impl Screen for CdSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
-        pick(&mut self.sel, 4, cx, input);
-        if input.back || (input.fire && self.sel == 3) {
+        self.obj.tick();
+        if input.up || input.down {
+            // Up/down skip the mode line while it is Disabled.
+            pick(&mut self.sel, CD_DONE + 1, cx, input);
+            if self.sel == CD_MODE && Self::disabled() {
+                self.sel = if input.down { CD_CUT } else { 1 };
+            }
+        }
+        if input.back || (input.fire && self.sel == CD_DONE) {
             cx.sound(Sfx::Select);
             cx.settings.save();
             return Step::Pop(Outcome::Done);
         }
         if input.fire {
-            if self.sel == 2 {
-                cx.settings.cd_mode = (cx.settings.cd_mode + 1) % 4;
-                cx.sound(Sfx::Select);
-            } else {
-                cx.sound(Sfx::Refuse);
+            match self.sel {
+                CD_MODE => {
+                    cx.settings.cd_mode = crate::music::next_mode(cx.settings.cd_mode);
+                    cx.sound(Sfx::Select);
+                }
+                CD_CUT => {
+                    let v = &mut cx.settings.variants;
+                    v.oneshot_cut = !v.oneshot_cut;
+                    cx.sound(Sfx::Select);
+                }
+                _ => cx.sound(Sfx::Refuse),
             }
         }
         Step::Stay
@@ -704,15 +752,31 @@ impl Screen for CdSetup {
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
         ui.title(&cx.g(2131));
+        let on_off = cx.g(if cx.settings.variants.oneshot_cut { 2081 } else { 2080 });
+        let x = ui.vx(30);
         let lines = [
-            (cx.g(2138), H / 4),
-            (cx.g(2139), H / 4 + 12),
-            (cx.g(2142 + cx.settings.cd_mode as u32), ui.hy(80)),
-            (cx.g(2148), ui.hy(170)),
+            (cx.g(2138), ui.hy(50)),
+            (cx.g(2139), ui.hy(61)),
+            (cx.g(2142 + crate::music::effective_mode(cx.settings.cd_mode) as u32), ui.hy(80)),
+            // No phrase: the colon in line with the Mac labels'.
+            (format!("{:>12} : {on_off}", "One-shot cut"), ui.hy(91)),
         ];
+        // Colour 1, the selected line flashing 2 (Mac `DisplayTextAlpha`,
+        // dimmed Disabled with `DisplayTextAlpha3`; OS4 `FUN_0100bb94` /
+        // `FUN_0100cc78`).
         for (i, (s, y)) in lines.iter().enumerate() {
-            let c = if i == self.sel { ui.flash() } else { 2 };
-            ui.centred(s, *y, c);
+            if i == CD_MODE && Self::disabled() {
+                ui.text_dim(s, x, *y, 1);
+            } else {
+                let c = if i == self.sel { ui.flash() } else { 1 };
+                ui.text(s, x, *y, c);
+            }
         }
+        let c = if self.sel == CD_DONE { ui.flash() } else { 1 };
+        ui.centred(&cx.g(2148), ui.hy(170), c);
+    }
+
+    fn model(&self) -> Option<ModelView> {
+        Some(self.obj.view)
     }
 }

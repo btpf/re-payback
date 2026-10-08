@@ -13,9 +13,13 @@
 //! 2. with "Motion blur" on (`DAT_0114c6c8`, software renderer only), shows
 //!    `Alpha.256` table 4 of the previous and the current frame, i.e. the
 //!    palette colour nearest their average (`FUN_01042f00` →
-//!    `FUN_01034438` → `FUN_0112cdb8`: the frame is drawn alternately into
-//!    two buffers `DAT_0114c7a8` / `DAT_0114c7ac` and the visible one,
-//!    `DAT_0114c7b0`, is `T4[prev][cur]` per pixel);
+//!    `FUN_01034438` → `FUN_0112cdb8`, Mac `MotionBlur` @ 100a6d50 →
+//!    `ScreenAlpha` @ 10154eb0: the frame is drawn alternately into two
+//!    buffers `DAT_0114c7a8` / `DAT_0114c7ac` and the visible one,
+//!    `DAT_0114c7b0`, is `T4[prev][cur]` per pixel). Switching it on blanks
+//!    the buffers (Mac `ToggleMotionBlur` @ 10053210 → `BlankChunky`; the
+//!    OS4 `FUN_01042308` left a stale frame), so the first blended frame
+//!    is averaged with black;
 //! 3. adds the palette flash (`DAT_0114c748`, `FUN_0103ad6c`: every palette
 //!    entry becomes `min(255, rgb + flash)`), after the snap as the original
 //!    changes the palette, not the pixels.
@@ -54,6 +58,7 @@ use bevy::{
 };
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 
 /// Weights of the colour metric (`FUN_0103b540`, rendering.md §3).
 const WEIGHTS: [u32; 3] = [25, 36, 16];
@@ -113,30 +118,97 @@ pub fn nearest_lut(palette: &[u8]) -> Vec<u8> {
     idx
 }
 
-/// `General/Alpha.256` (11 tables `T[k][dst·256 + src]`), or `None`.
-pub fn alpha_tables(data: &GameData) -> Option<Vec<u8>> {
-    data.read("General/Alpha.256")
-        .ok()
-        .filter(|b| b.len() >= 11 * 65536)
+/// [`nearest_lut`] of a palette, computed once per palette.
+pub fn cached_lut(palette: &[u8]) -> Arc<Vec<u8>> {
+    static CACHE: Mutex<Option<(Vec<u8>, Arc<Vec<u8>>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match &*cache {
+        Some((pal, lut)) if pal.as_slice() == palette => lut.clone(),
+        _ => {
+            let lut = Arc::new(nearest_lut(palette));
+            *cache = Some((palette.to_vec(), lut.clone()));
+            lut
+        }
+    }
+}
+
+/// One `Alpha.256` entry, table `k`, destination (framebuffer) colour `d`
+/// and source (texel) colour `s` (Mac `CalcAlpha` @ 10083ec0, OS4
+/// `FUN_0103b540`). Per channel, clamped to 0..255, then the nearest
+/// palette colour (`ClosestMatch` @ 10083dc0):
+///
+/// | k | result |
+/// |---|---|
+/// | 0 | d + s |
+/// | 1 | d − s |
+/// | 2 | d − 16 if s ≠ 0 (index), else d |
+/// | 3 | (s·255 + (255 − max(sR, sG, sB))·d) >> 8 |
+/// | 4 | s if s = d (index), else (s + d) >> 1 |
+/// | 5, 6, 7, 8 | d + s on R / R and G / G / B only |
+/// | 9 | d + s − 32 |
+/// | 10 | pal\[s\] + d (the index) − 128 |
+///
+/// The `s = d` shortcut of table 4 is the Mac's (the OS4 generator lacks
+/// it; only duplicate colours differ).
+fn alpha_entry(pal: &[u8], lut: &[u8], k: usize, d: usize, s: usize) -> u8 {
+    let dc = |c: usize| pal[d * 3 + c] as i32;
+    let sc = |c: usize| pal[s * 3 + c] as i32;
+    let rgb: [i32; 3] = match k {
+        0 => std::array::from_fn(|c| dc(c) + sc(c)),
+        1 => std::array::from_fn(|c| dc(c) - sc(c)),
+        2 if s != 0 => std::array::from_fn(|c| dc(c) - 16),
+        2 => std::array::from_fn(dc),
+        3 => {
+            let m = sc(0).max(sc(1)).max(sc(2));
+            std::array::from_fn(|c| (sc(c) * 255 + (255 - m) * dc(c)) >> 8)
+        }
+        4 if s == d => return s as u8,
+        4 => std::array::from_fn(|c| (sc(c) + dc(c)) >> 1),
+        5..=8 => {
+            let add = [[true, false, false], [true, true, false], [false, true, false], [false, false, true]]
+                [k - 5];
+            std::array::from_fn(|c| dc(c) + if add[c] { sc(c) } else { 0 })
+        }
+        9 => std::array::from_fn(|c| dc(c) + sc(c) - 32),
+        _ => std::array::from_fn(|c| d as i32 + sc(c) - 128),
+    };
+    let [r, g, b] = rgb.map(|v| v.clamp(0, 255) as usize);
+    lut[b * 65536 + g * 256 + r]
+}
+
+/// The 11 `Alpha.256` tables `T[k][dst·256 + src]` computed from the
+/// palette (Mac `GetAlpha` @ 10084710 → `CalcAlpha` @ 10083ec0). The Mac's
+/// shipped file is exactly this; the Amiga Update 7 file was built from the
+/// CD palette (colour 8 = 7,7,7) and is not used.
+pub fn alpha_tables(data: &GameData) -> Arc<Vec<u8>> {
+    static CACHE: Mutex<Option<(Vec<u8>, Arc<Vec<u8>>)>> = Mutex::new(None);
+    let pal = &data.palette;
+    if let Some((p, t)) = &*CACHE.lock().unwrap_or_else(|e| e.into_inner())
+        && p.as_slice() == pal.as_slice()
+    {
+        return t.clone();
+    }
+    let lut = cached_lut(pal);
+    let mut t = vec![0u8; 11 * 65536];
+    for (i, v) in t.iter_mut().enumerate() {
+        *v = alpha_entry(pal, &lut, i >> 16, (i >> 8) & 0xff, i & 0xff);
+    }
+    let t = Arc::new(t);
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((pal.to_vec(), t.clone()));
+    t
 }
 
 /// The night remap of cube and object textures (`FUN_0106ecf0(1)`,
 /// `FUN_010bf310(1)`): `c → T1[c][0x67]`, the palette colour nearest
-/// `pal[c] − pal[0x67]` = `pal[c] − (87, 87, 87)`; colour 0 unchanged. From
-/// the shipped `Alpha.256`, else computed.
+/// `pal[c] − pal[0x67]` = `pal[c] − (87, 87, 87)`; colour 0 unchanged.
+/// Computed as `CalcAlpha` does (see [`alpha_tables`]).
 pub fn night_remap(data: &GameData) -> [u8; 256] {
     let mut map = [0u8; 256];
-    let tables = alpha_tables(data);
     let pal = &data.palette;
     for (c, m) in map.iter_mut().enumerate().skip(1) {
-        *m = match &tables {
-            Some(t) => t[0x10000 + c * 256 + 0x67],
-            None => {
-                let want: [i32; 3] =
-                    std::array::from_fn(|k| (pal[c * 3 + k] as i32 - pal[0x67 * 3 + k] as i32).max(0));
-                nearest(pal, want)
-            }
-        };
+        let want: [i32; 3] =
+            std::array::from_fn(|k| (pal[c * 3 + k] as i32 - pal[0x67 * 3 + k] as i32).max(0));
+        *m = nearest(pal, want);
     }
     map
 }
@@ -229,7 +301,7 @@ fn blur_settings(
 /// Run by the start-up loader (`startup.rs`).
 pub(crate) fn build_tables(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
     let start = std::time::Instant::now();
-    let lut = nearest_lut(&data.palette);
+    let lut = cached_lut(&data.palette);
     debug!("palette LUT in {:?}", start.elapsed());
     let image = |w: u32, h: u32, d: u32, bytes: Vec<u8>, format: TextureFormat| {
         let mut image = Image::new(
@@ -254,23 +326,12 @@ pub(crate) fn build_tables(mut commands: Commands, data: Res<GameData>, mut imag
     for i in 0..256 {
         palette[i * 4..i * 4 + 3].copy_from_slice(&data.palette[i * 3..i * 3 + 3]);
     }
-    // Table 4 from Alpha.256, or the nearest of the average.
-    let average = match alpha_tables(&data) {
-        Some(t) => t[0x40000..0x50000].to_vec(),
-        None => {
-            let pal = &data.palette;
-            (0..65536)
-                .map(|i| {
-                    let (d, s) = (i / 256, i % 256);
-                    let rgb =
-                        std::array::from_fn(|k| (pal[d * 3 + k] as i32 + pal[s * 3 + k] as i32) / 2);
-                    nearest(pal, rgb)
-                })
-                .collect()
-        }
-    };
+    // Table 4 (`CalcAlpha`): the nearest of the average.
+    let average = (0..65536)
+        .map(|i| alpha_entry(&data.palette, &lut, 4, i >> 8, i & 0xff))
+        .collect();
     commands.insert_resource(PaletteTextures {
-        lut: images.add(image(256, 256, 256, lut, TextureFormat::R8Unorm)),
+        lut: images.add(image(256, 256, 256, lut.to_vec(), TextureFormat::R8Unorm)),
         palette: images.add(image(256, 1, 1, palette, TextureFormat::Rgba8Unorm)),
         average: images.add(image(256, 256, 1, average, TextureFormat::R8Unorm)),
     });
@@ -368,6 +429,8 @@ struct Work {
 struct PassState {
     work: Option<Work>,
     pipelines: HashMap<TextureFormat, CachedRenderPipelineId>,
+    /// Motion blur was on in the last pass.
+    blur: bool,
 }
 
 fn postfx_pass(
@@ -464,6 +527,11 @@ fn postfx_pass(
             ],
         });
     }
+    // Blur switched on: blank the previous frame (`ToggleMotionBlur` @
+    // 10053210, `BlankChunky`), so the first blend is with black. The
+    // buffer is shared by the views, so this clears every view's part.
+    let blank = fx.blur && !state.blur;
+    state.blur = fx.blur;
     let work = state.work.as_ref().unwrap();
     let (origin, extent) = camera.viewport.as_ref().map_or((UVec2::ZERO, size), |v| {
         (v.physical_position, v.physical_size)
@@ -501,6 +569,24 @@ fn postfx_pass(
     );
 
     let encoder = ctx.command_encoder();
+    if blank {
+        encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("postfx_blank"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &prev.1,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Default::default()),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
     let region = Origin3d {
         x: origin.x,
         y: origin.y,
@@ -595,5 +681,32 @@ mod tests {
         }
         // Palette colours map to their first entry.
         assert_eq!(lut[30 * 65536 + 20 * 256 + 10], 10);
+    }
+
+    /// `CalcAlpha` entries on a small palette.
+    #[test]
+    fn alpha_formulas() {
+        let mut pal = [0u8; 768];
+        for i in 0..256 {
+            pal[i * 3..i * 3 + 3].copy_from_slice(&[i as u8, (255 - i) as u8, (i / 2) as u8]);
+        }
+        // Colours 10 and 20 duplicated at 200 and 201.
+        pal[600..603].copy_from_slice(&[10, 245, 5]);
+        pal[603..606].copy_from_slice(&[10, 245, 5]);
+        let lut = nearest_lut(&pal);
+        let rgb = |i: u8| [pal[i as usize * 3], pal[i as usize * 3 + 1], pal[i as usize * 3 + 2]];
+        // T4: the diagonal returns the index itself, even for a duplicate.
+        assert_eq!(alpha_entry(&pal, &lut, 4, 201, 201), 201);
+        assert_eq!(alpha_entry(&pal, &lut, 4, 10, 10), 10);
+        // T3 lighten: s·255 + (255 − max s)·d, >> 8.
+        let (d, s) = (100usize, 40usize);
+        let m = 215i32;
+        let want: [i32; 3] = std::array::from_fn(|c| {
+            (pal[s * 3 + c] as i32 * 255 + (255 - m) * pal[d * 3 + c] as i32) >> 8
+        });
+        assert_eq!(alpha_entry(&pal, &lut, 3, d, s), nearest(&pal, want));
+        // T1 subtract clamps at 0; T2 leaves d alone for texel 0.
+        assert_eq!(alpha_entry(&pal, &lut, 1, 50, 60), nearest(&pal, [0, 10, 0]));
+        assert_eq!(alpha_entry(&pal, &lut, 2, 50, 0), nearest(&pal, [50, 205, 25]));
     }
 }

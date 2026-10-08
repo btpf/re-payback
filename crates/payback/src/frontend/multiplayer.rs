@@ -6,8 +6,14 @@
 //! the bindings for joysticks), City, Required kills 1..50, Play (needs
 //! at least two players, else 2179), Cancel. Each device (keyboard key
 //! set or joystick) can be used by one player only.
+//!
+//! Devices follow the Mac (`DoMultiplayerSetup` @ 1009f5b0,
+//! `GetNextFreeControl1` @ 1009c730): Off, Joystick 1..4, Keyboard, in that
+//! order, without the Amiga's PSX and CD32 pads; the joysticks are offered
+//! only while a gamepad is connected (`ControlMethodExists` @ 100f8420),
+//! and a joystick player uses that pad's bindings.
 
-use super::bindings::{self as b, Table};
+use super::bindings::{self as b, Controls, Table};
 use super::misc::{key_name, pad_name};
 use super::progress::Settings;
 use super::ui::*;
@@ -67,10 +73,15 @@ fn hint(cx: &Ctx, table: Table) -> String {
     )
 }
 
-/// The device order the left/right keys step through.
-fn device_cycle() -> Vec<Device> {
-    let mut v = vec![Device::Off, Device::Keyboard(0)];
-    v.extend((0..4).map(Device::Joystick));
+/// The device order the left/right keys step through: -1 Off, 0..3
+/// devices, 12 Keyboard (`GetNextFreeControl1`); the devices only with a
+/// gamepad connected.
+fn device_cycle(pads: usize) -> Vec<Device> {
+    let mut v = vec![Device::Off];
+    if pads > 0 {
+        v.extend((0..4).map(Device::Joystick));
+    }
+    v.push(Device::Keyboard(0));
     v
 }
 
@@ -114,9 +125,9 @@ impl MultiplayerSetup {
     /// Next device for player `p` in direction `d`, skipping devices other
     /// players use; a keyboard takes the first free key set.
     fn step_device(cx: &mut Ctx, p: usize, d: i32) {
-        let cycle = device_cycle();
+        let cycle = device_cycle(cx.pads);
         let cur = match cx.settings.mp_devices[p] {
-            Device::Keyboard(_) => 1,
+            Device::Keyboard(_) => cycle.len() - 1,
             dev => cycle.iter().position(|c| *c == dev).unwrap_or(0),
         };
         for k in 1..=cycle.len() as i32 {
@@ -237,8 +248,11 @@ impl Screen for MultiplayerSetup {
             ui.centred(&line, Self::row_y(ui, 2 * p), colour(2 * p));
             let hint = match dev {
                 Device::Off => continue,
-                Device::Keyboard(k) => format!("{}. {}", k + 1, hint(cx, cx.settings.controls.column(2 + k as usize % KEY_SETS))),
-                Device::Joystick(_) => hint(cx, cx.settings.controls.column(6 + p)),
+                Device::Keyboard(k) => {
+                    let col = Controls::key_set_column(k as usize % KEY_SETS);
+                    format!("{}. {}", k + 1, hint(cx, cx.settings.controls.column(col)))
+                }
+                Device::Joystick(n) => hint(cx, cx.settings.controls.column(Controls::pad_column(n as usize))),
             };
             ui.centred(&hint, Self::row_y(ui, 2 * p + 1), if 2 * p + 1 == self.sel && on { 1 } else { 2 });
         }

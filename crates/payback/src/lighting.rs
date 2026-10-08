@@ -13,7 +13,11 @@
 //! 3. Every cube corner (4 top, 4 bottom) is lit (`0x80`, night `0x60`) or in
 //!    shadow (`0x30`): a ray steps from the corner one half-square west, one
 //!    north and one z cell (128 h-units) up per step until z 9, and any
-//!    marked cell shades it (a sun in the north-west, 35° up). Edge squares
+//!    marked cell shades it (a sun in the north-west, 35° up). The NE, SW
+//!    and SE corners cast a second, parallel ray from the half-square point
+//!    beside them and are in shadow only if both rays are blocked (Mac
+//!    `DoLightSourcing` @ 1015b840 with `CheckVoxels` @ 100b3960, the same
+//!    paired tests inlined in OS4 `FUN_010766c8`). Edge squares
 //!    stay lit; Reflect tops are `0x80` even at night. Lit top corners of
 //!    slopes facing the sun (RVert/RHoriz with h1 > h2, Vert/Horiz with
 //!    h1 < h2) get `+0x40` (night `0x20`), slopes facing away the same less.
@@ -53,7 +57,8 @@ use crate::level::AppState;
 use crate::mapedit::{self, CityRender};
 use crate::render_mode::RenderMode;
 use crate::objects::ObjectLibrary;
-use crate::sim::Obj as SimObj;
+use crate::sim::combat::{Arsenal, Weapon};
+use crate::sim::{Class, Obj as SimObj, VisualRng};
 use crate::sim::traffic::LightPhase;
 use crate::world::{City, top_corners, to_render};
 use bevy::{
@@ -280,9 +285,15 @@ pub fn compute(map: &Map, night: bool, hardware: bool) -> CityLighting {
                 let edge = x == 0 || y == 0 || x == MAP_SIZE - 1 || y == MAP_SIZE - 1;
                 let heights = corner_heights(cube);
                 for c in 0..8 {
+                    // The ray from the corner itself, and the one from the
+                    // half-square point beside it (the same point for NW).
                     let (gx, gy) = (2 * x + 2 * (c & 1), 2 * y + (c & 2));
+                    let (hx, hy) = (2 * x + (c & 1), 2 * y + ((c >> 1) & 1));
                     let h = if c < 4 { base + heights[c] } else { base };
-                    let dark = !edge && vox.shadowed(gx, gy, h >> 7);
+                    let z = h >> 7;
+                    let dark = !edge
+                        && vox.shadowed(gx, gy, z)
+                        && ((hx, hy) == (gx, gy) || vox.shadowed(hx, hy, z));
                     light[c] = if dark { shadow } else { lit };
                 }
                 let (h1, h2) = (cube.height1, cube.height2);
@@ -401,12 +412,25 @@ pub fn compute(map: &Map, night: bool, hardware: bool) -> CityLighting {
 pub fn remap_table(data: &GameData) -> Vec<u16> {
     let names: Vec<&str> = data.cube_textures.entries.iter().map(|e| e.file.as_str()).collect();
     let mut table: Vec<u16> = (0..names.len() as u16).collect();
-    let Ok(raw) = data.read("CubeTextures/.CubeTextureRemapList") else {
+    // A user map's custom textures name their Gouraud texture themselves
+    // (`.textures` field `gouraud`, read in `FUN_010766c8`).
+    let custom = &data.custom_textures.slots;
+    if !custom.is_empty() {
+        let base = payback_formats::map::CUSTOM_TEXTURE_BASE;
+        table.extend(names.len() as u16..base + custom.len() as u16);
+        for (i, slot) in custom.iter().enumerate() {
+            if let Some(slot) = slot {
+                table[base as usize + i] = slot.gouraud;
+            }
+        }
+    }
+    // `.CubeTextureRemapList`, or the Mac's `CubeTextureRemapList.txt`.
+    let Ok(raw) = data.read_texture_list("CubeTextureRemapList") else {
         warn!("missing CubeTextures/.CubeTextureRemapList");
         return table;
     };
     let text = String::from_utf8_lossy(&raw);
-    for (i, line) in text.lines().enumerate().take(table.len()) {
+    for (i, line) in text.lines().enumerate().take(names.len()) {
         let name = line.trim();
         if let Some(j) = names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
             table[i] = j as u16;
@@ -730,7 +754,25 @@ fn scenery_lights(city: &City, library: &ObjectLibrary) -> Vec<SceneryLight> {
     out
 }
 
-/// Gather this frame's dynamic lights.
+/// Muzzle flash of a person who fired this tick (Mac `do_Person` @
+/// 1013fbd0, next to the fire sound): minigun, pistol and shotgun, 500
+/// z-units above the shooter.
+fn muzzle_flash(weapon: Weapon) -> Option<Vec3> {
+    let m = 1_000_000.0;
+    match weapon {
+        Weapon::Minigun => Some(Vec3::new(60.0, 60.0, 8.0) * m),
+        Weapon::Pistol => Some(Vec3::new(40.0, 40.0, 10.0) * m),
+        Weapon::Shotgun => Some(Vec3::new(60.0, 60.0, 20.0) * m),
+        _ => None,
+    }
+}
+
+/// Gather this frame's dynamic lights. The jitter comes from the cosmetic
+/// generator ([`VisualRng`], `random3` in Mac `DoEffectsLighting` @
+/// 100a82b0), drawn last argument first (B, G, R) as the Mac and 68k
+/// builds evaluate them (OS4: first to last). The burning-object and petrol-bomb jitter is drawn
+/// from the game's generator inside the original's object update; here it
+/// is cosmetic too, so the simulation does not depend on the renderer.
 #[allow(clippy::too_many_arguments)]
 fn collect_lights(
     gouraud: Res<Gouraud>,
@@ -738,17 +780,15 @@ fn collect_lights(
     library: Option<Res<ObjectLibrary>>,
     phase: Option<Res<LightPhase>>,
     effects: Res<Effects>,
-    objects: Query<&SimObj>,
+    objects: Query<(&SimObj, Option<&Arsenal>)>,
     mut lights: ResMut<DynamicLights>,
-    mut seed: Local<u32>,
+    rng: Option<ResMut<VisualRng>>,
     mut sources: Local<Option<Vec<SceneryLight>>>,
 ) {
     lights.0.clear();
-    let (true, Some(city), Some(library)) = (gouraud.0, city, library) else {
+    let (true, Some(city), Some(library), Some(mut rng)) = (gouraud.0, city, library, rng) else {
         return;
     };
-    let mut rng = Lcg(seed.wrapping_add(0x1234_5678));
-    *seed = seed.wrapping_add(1);
     let m = 1_000_000;
     let (phase, sub) = phase.map_or((0, 0), |p| (p.phase, p.sub));
 
@@ -775,60 +815,62 @@ fn collect_lights(
 
     // Fireballs, explosions, lens-flare debris and fires (`FUN_01036574`).
     for (kind, pos, r) in effects.light_sources() {
-        let rgb = match kind {
-            0xb => Vec3::new((r * 900_000) as f32, (r * 900_000) as f32, (r * 700_000) as f32),
-            2 => Vec3::new(
-                (r * 140_000 + rng.rand(5 * m)) as f32,
-                (r * 120_000 + rng.rand(4 * m)) as f32,
-                (r * 100_000 + rng.rand(3 * m)) as f32,
-            ),
-            7 => Vec3::new(
-                (r * 50_000 + rng.rand(2 * m)) as f32,
-                (r * 40_000 + rng.rand(3 * m / 2)) as f32,
-                (r * 30_000 + rng.rand(m)) as f32,
-            ),
-            0xf => Vec3::new(
-                (r * 100_000 + rng.rand(5 * m)) as f32,
-                (r * 70_000 + rng.rand(3 * m)) as f32,
-                (r * 50_000 + rng.rand(2 * m)) as f32,
-            ),
+        // (base, jitter range) per channel R, G, B; drawn B, G, R.
+        let [(rb, rj), (gb, gj), (bb, bj)] = match kind {
+            0xb => [(900_000, 0), (900_000, 0), (700_000, 0)],
+            2 => [(140_000, 5 * m), (120_000, 4 * m), (100_000, 3 * m)],
+            7 => [(50_000, 2 * m), (40_000, 3 * m / 2), (30_000, m)],
+            0xf => [(100_000, 5 * m), (70_000, 3 * m), (50_000, 2 * m)],
             _ => continue,
         };
+        let mut jitter = |n: i32| if n > 0 { rng.rand(n) } else { 0 };
+        let b = r * bb + jitter(bj);
+        let g = r * gb + jitter(gj);
+        let red = r * rb + jitter(rj);
+        let rgb = Vec3::new(red as f32, g as f32, b as f32);
         lights.0.push(PointLight { pos, rgb });
     }
 
     // Objects: burning (main object update, burn timer obj+0x33c), missiles
     // (`AddCollideObj`), petrol bombs, police lights.
-    for obj in &objects {
+    for (obj, arsenal) in &objects {
         let info = &library.model(obj.model).info;
         let p = obj.pos.as_vec3();
         let path = info.path.as_str();
         if obj.burn > 1 {
+            // The Mac's order: spread, B, G, R, then the z, y, x offsets.
             let (spread, half) = if obj.burn < 16 {
                 ((info.radius + rng.rand(150)) * 200_000, 5 * m)
             } else {
                 ((info.radius * 3 / 2 + rng.rand(300)) * 200_000, 10 * m)
             };
-            let j = Vec3::new(
-                (rng.rand(300) - 150) as f32,
-                (rng.rand(300) - 150) as f32,
-                (rng.rand(300) - 150) as f32,
-            );
-            let rgb = Vec3::new(
-                (rng.rand(half) + spread) as f32,
-                (rng.rand(half) + spread - half / 2) as f32,
-                (spread - rng.rand(half)) as f32,
-            );
+            let b = spread - rng.rand(half);
+            let g = rng.rand(half) + spread - half / 2;
+            let red = rng.rand(half) + spread;
+            let jz = rng.rand(300) - 150;
+            let jy = rng.rand(300) - 150;
+            let jx = rng.rand(300) - 150;
+            let j = Vec3::new(jx as f32, jy as f32, jz as f32);
+            let rgb = Vec3::new(red as f32, g as f32, b as f32);
             lights.0.push(PointLight { pos: p + j, rgb });
         }
         let lift = Vec3::new(0.0, 0.0, -500.0);
+        // A firearm fired this tick (the firing pose is set to 1 then).
+        if obj.class == Class::Person
+            && let Some(ars) = arsenal
+            && ars.pose == 1
+            && let Some(rgb) = muzzle_flash(ars.current)
+        {
+            lights.0.push(PointLight { pos: p + lift, rgb });
+        }
         let rgb = match path {
             "weapons/missile.obj" => Some(Vec3::new(100.0, 90.0, 80.0) * m as f32),
-            "weapons/petrol.obj" => Some(Vec3::new(
-                (rng.rand(10 * m) + 30 * m) as f32,
-                (rng.rand(5 * m) + 15 * m) as f32,
-                (rng.rand(2 * m) + 5 * m) as f32,
-            )),
+            "weapons/petrol.obj" => {
+                let b = rng.rand(2 * m) + 5 * m;
+                let g = rng.rand(5 * m) + 15 * m;
+                let red = rng.rand(10 * m) + 30 * m;
+                Some(Vec3::new(red as f32, g as f32, b as f32))
+            }
             "vehicles/police_red.obj" | "vehicles/policevan_red.obj" => {
                 Some(Vec3::new(200.0, 20.0, 20.0) * m as f32)
             }
@@ -857,8 +899,7 @@ fn collect_lights(
 fn upload_lights(
     lights: Res<DynamicLights>,
     render: Option<Res<CityRender>>,
-    cam: Res<crate::camera::GameCam>,
-    views: Res<crate::camera::ViewCams>,
+    eyes: Res<crate::camera::ViewEyes>,
     rotating: Res<crate::camera::RotatingView>,
     mut materials: ResMut<Assets<CityMaterial>>,
     mut last: Local<usize>,
@@ -867,12 +908,15 @@ fn upload_lights(
     if lights.0.is_empty() && *last == 0 {
         return;
     }
-    let cams = views.all(&cam);
-    let boxes: Vec<(Vec2, IVec2, (i32, i32))> = cams
+    // The views' eyes (the rotating view and the replay TV camera draw from
+    // their own camera positions, camera.rs).
+    let boxes: Vec<(Vec2, IVec2, (i32, i32))> = eyes
+        .cams
         .iter()
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let centre = Vec2::new(c.x as f32 / 32.0, c.y as f32 / 32.0);
-            (centre, c.square(), c.visible_squares(cams.len(), rotating.0))
+            (centre, c.square(), eyes.visible_squares(i, rotating.0))
         })
         .collect();
     let mut sorted: Vec<(f32, &PointLight)> = lights

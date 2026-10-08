@@ -5,7 +5,7 @@
 
 use super::people::{Person, PlayerInputs};
 use super::police::Hurt;
-use super::{Class, Obj, Rng, State, Stick, Trig, wrap};
+use super::{Class, Obj, Rng, State, Stick, Trig, VisualRng, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
@@ -230,7 +230,9 @@ impl Plugin for CombatPlugin {
     }
 }
 
-/// Number keys select a carried weapon (§3.1).
+/// Number keys select a carried weapon (§3.1): only alive and not stunned
+/// (health > 0 and stun timer 0; Mac `UpdateInputStatus` @ 100f8490, the
+/// Amiga agrees).
 fn select_weapon(
     mut commands: Commands,
     mut inputs: ResMut<PlayerInputs>,
@@ -246,7 +248,7 @@ fn select_weapon(
         let has = w == Weapon::Fist
             || ars.ammo[slot as usize] > 0
             || (w == Weapon::Bomb && ars.bomb.is_some());
-        if obj.health > 0 && has && ars.current != w {
+        if obj.health > 0 && person.stun == 0 && has && ars.current != w {
             ars.current = w;
             if person.follows_weapon {
                 person.kind = w.person_model();
@@ -337,6 +339,8 @@ fn fire_weapons(
     mut hurt: MessageWriter<Hurt>,
     mut triggers: ResMut<Triggers>,
     mission: Res<MissionState>,
+    mut crimes: Option<ResMut<super::police::Crimes>>,
+    mut vrng: Option<ResMut<VisualRng>>,
 ) {
     let (Some(mut library), Some(city)) = (library, city) else {
         return;
@@ -355,6 +359,15 @@ fn fire_weapons(
         let released = !stick.fire && ars.fire_held;
         ars.fire_held = stick.fire;
         let player = is_player.then(|| obj.player.unwrap_or(0));
+        // Firearms crime (+0x95c): only a grenade throw, a bomb drop, a
+        // bazooka and a shotgun shot count (Mac `do_Person` @ 1013fbd0, 68k
+        // `FUN_000e3a58` ~123180/~123300/~124022); the tank cannon counts in
+        // `vehicle_ai::tank_cannon`.
+        let firearm = |crimes: &mut Option<ResMut<super::police::Crimes>>| {
+            if let (true, Some(c)) = (is_player, crimes.as_deref_mut()) {
+                c.firearms += 1;
+            }
+        };
         let w = ars.current;
         let slot = w as usize;
 
@@ -387,6 +400,7 @@ fn fire_weapons(
                     player,
                 );
                 ars.ammo[slot] -= 1;
+                firearm(&mut crimes);
             }
             ars.fire_timer = if ars.fire_timer < 0 {
                 ars.fire_timer + 1
@@ -463,7 +477,7 @@ fn fire_weapons(
                     obj.level,
                     &mut set_scenery,
                     &mut effects,
-                    &mut rng,
+                    vrng.as_deref_mut(),
                 );
                 ars.pose = 2;
             }
@@ -496,6 +510,7 @@ fn fire_weapons(
                     &mut rng,
                 );
                 ars.ammo[slot] -= 2;
+                firearm(&mut crimes);
                 ars.fire_timer = -30;
                 obj.speed -= 0x20;
                 commands.spawn(Sound::once(id::SHOTGUN_FIRE, 4e6, 14000.0, at));
@@ -529,6 +544,7 @@ fn fire_weapons(
             Weapon::Bazooka => {
                 shoot(ProjectileKind::Missile, 0, IVec3::ZERO, &mut rng);
                 ars.ammo[slot] -= 1;
+                firearm(&mut crimes);
                 obj.speed -= 0x20;
                 commands.spawn(Sound::once(id::FIRE_MISSILE, 5e6, 17000.0, at));
                 for _ in 0..8 {
@@ -570,6 +586,7 @@ fn fire_weapons(
                         player,
                     );
                     ars.ammo[slot] -= 1;
+                    firearm(&mut crimes);
                     // Scripts tag the player's bombs (`SetProjectileId`).
                     if let (Some(b), true) = (ars.bomb, is_player && mission.projectile_id != -1) {
                         let id = mission.projectile_id;
@@ -670,7 +687,7 @@ fn break_crate_at(
     level: usize,
     set: &mut MessageWriter<SetScenery>,
     effects: &mut Effects,
-    rng: &mut Rng,
+    vrng: Option<&mut VisualRng>,
 ) {
     let (sx, sy) = ((pos.x >> 11) as usize, (pos.y >> 11) as usize);
     if sx >= MAP_SIZE || sy >= MAP_SIZE {
@@ -698,22 +715,41 @@ fn break_crate_at(
         special: None,
         rotation: None,
     });
-    let centre = Vec3::new(
-        (sx * 2048 + 1024) as f32,
-        (sy * 2048 + 1024) as f32,
-        pos.z as f32,
-    );
-    for _ in 0..3 {
-        effects.add(
-            3,
-            Tex::Dust,
-            centre,
-            Vec3::ZERO,
-            1500.0 + rng.rand(1000) as f32,
-            level as u8 + 1,
-            Blend::Add,
-        );
+    // `Bang(crate, layer+1, centre, z, angle, 5)` (Mac `CheckForCrate`
+    // @ 100593e0 -> `Bang` @ 100a6dd0, 68k `FUN_000d0670` -> `FUN_000384e8`):
+    // max(2, min(6, 5>>1)) = 2 dust puffs at the centre ± 400 (z ± 150),
+    // drawn from the cosmetic `random3` stream. `Bang` first calls `Split`
+    // (the crate fragments), which the port does not draw yet.
+    if let Some(vrng) = vrng {
+        let (cx, cy) = ((sx * 2048 + 1024) as i32, (sy * 2048 + 1024) as i32);
+        let mut r = |n| vrng.rand(n);
+        for _ in 0..2 {
+            dust_puff(effects, &mut r, IVec3::new(cx - 400, cy - 400, pos.z - 150), level as u8 + 1);
+        }
     }
+}
+
+/// One type-3 Dust puff of `Bang` / `CheckForWeapon` / `RespawnWeapons`:
+/// size 1500 + r(1000), v = r(500) − 250 per axis (divided by 3 in
+/// `AddEffect`), pos = `base` + (r(800), r(800), r(300)). Seven draws in
+/// the Mac/68k order (last argument first): size, vz, vy, vx, z, y, x.
+fn dust_puff(effects: &mut Effects, r: &mut impl FnMut(i32) -> i32, base: IVec3, layer: u8) {
+    let size = 1500 + r(1000);
+    let vz = r(500) - 250;
+    let vy = r(500) - 250;
+    let vx = r(500) - 250;
+    let z = base.z + r(300);
+    let y = base.y + r(800);
+    let x = base.x + r(800);
+    effects.add(
+        3,
+        Tex::Dust,
+        Vec3::new(x as f32, y as f32, z as f32),
+        Vec3::new(vx as f32, vy as f32, vz as f32),
+        size as f32,
+        layer,
+        Blend::Add,
+    );
 }
 
 /// Projectile flight and contact with the city (§3.3).
@@ -725,6 +761,10 @@ fn move_projectiles(
     mut effects: ResMut<Effects>,
     mut explode: MessageWriter<Explode>,
     mut set_scenery: MessageWriter<SetScenery>,
+    mut triggers: ResMut<Triggers>,
+    mut edits: MessageWriter<crate::mapedit::MapEdit>,
+    mut vrng: Option<ResMut<VisualRng>>,
+    mut arsenals: Query<&mut Arsenal>,
     mut q: Query<(Entity, &mut Obj, &Projectile)>,
 ) {
     let Some(city) = city else { return };
@@ -737,7 +777,11 @@ fn move_projectiles(
         let prev = obj.pos;
         let mut next = obj.pos + obj.vel;
         let floor = super::collide::floor(&city, next.x, next.y, prev.z);
-        let (resolved, hit) = super::collide::resolve_walls(&city, next, prev, 0);
+        // Projectiles smash glass (`GetCollideInfo` @ 100af0e0: any
+        // class but people).
+        let mut glass = Vec::new();
+        let (resolved, hit) = super::collide::resolve_walls_glass(&city, next, prev, 0, &mut glass);
+        super::collide::smash_glass(&mut commands, &city, &mut edits, &mut triggers, &glass);
         let on_ground = floor.is_some_and(|(fz, ..)| next.z >= fz);
         let layer = obj.level as u8 + 1;
         let at = SoundPos::At(prev.as_vec3());
@@ -756,7 +800,7 @@ fn move_projectiles(
                 obj.level,
                 &mut set_scenery,
                 &mut effects,
-                &mut rng,
+                vrng.as_deref_mut(),
             );
         }
 
@@ -793,6 +837,30 @@ fn move_projectiles(
                     explode.write(Explode {
                         pos: next,
                         power: 3000 * 20000,
+                        layer: obj.level,
+                        source: Some(e),
+                        by_player: p.by_player,
+                        player: p.player,
+                    });
+                    remove = true;
+                }
+                // A placed remote bomb destroyed by damage (a script
+                // `ExplodeObject`) goes off in full and frees its owner's
+                // bomb slot (Mac `DoCollideStuff` @ 10067b50: health < -70
+                // or <= 0 -> owner +0x860 = 0, `Detonate(i, 50000)`). The
+                // Amiga (68k `FUN_000dc5ac`, OS4 `FUN_010542b8`) left the
+                // slot pointing at the dead bomb.
+                if kind == ProjectileKind::Bomb && obj.health < 1 {
+                    for mut a in &mut arsenals {
+                        if a.bomb == Some(e) {
+                            a.bomb = None;
+                        }
+                    }
+                    triggers.report_actor(kind::ACTOR_KILLED, e);
+                    triggers.report_actor(kind::ACTOR_GONE, e);
+                    explode.write(Explode {
+                        pos: next,
+                        power: 50000 * 20000,
                         layer: obj.level,
                         source: Some(e),
                         by_player: p.by_player,
@@ -844,19 +912,21 @@ fn move_projectiles(
             }
             _ => {
                 if hit.x || hit.y || on_ground || scenery_hit {
-                    commands.spawn(Sound::once(
-                        id::RICOCHET,
-                        4e6 + rng.rand(2_000_000) as f32,
-                        11500.0 + rng.rand(1000) as f32,
-                        at,
-                    ));
-                    for _ in 0..2 {
-                        let v = Vec3::new(
-                            (rng.rand(80) - 40) as f32,
-                            (rng.rand(80) - 40) as f32,
-                            -(rng.rand(40) as f32),
-                        );
-                        effects.add(9, Tex::Flare, prev.as_vec3(), v, 100.0, layer, Blend::Add);
+                    // Ricochet and sparks (Mac `do_Weapon` @ 1013e390, 68k
+                    // ~121690-121800): the pitch is drawn before the volume;
+                    // bullets make 2 sparks of size rand(150)+150, pellets 3
+                    // of rand(150)+250. Gameplay code, so the sim `Rng`
+                    // (`random`), drawn in the original's order.
+                    let hz = 11500.0 + rng.rand(1000) as f32;
+                    let vol = 4e6 + rng.rand(2_000_000) as f32;
+                    commands.spawn(Sound::once(id::RICOCHET, vol, hz, at));
+                    let (n, base) = if kind == ProjectileKind::Pellet {
+                        (3, 250)
+                    } else {
+                        (2, 150)
+                    };
+                    for _ in 0..n {
+                        spark(&mut effects, &mut rng, prev, obj.vel, base, layer);
                     }
                     remove = true;
                 }
@@ -872,6 +942,29 @@ fn move_projectiles(
         obj.prev_pos = obj.pos;
         obj.pos = next;
     }
+}
+
+/// One bullet/pellet spark (effect type 9, Flare): pos ± 100 per axis,
+/// v = rand(80) − 40 − v/8 per axis (thrown back), size rand(150) + `base`.
+/// The draws follow the original's order: size, vz, vy, vx, z, y, x (68k
+/// ~121690, arguments pushed right to left).
+fn spark(effects: &mut Effects, rng: &mut Rng, at: IVec3, vel: IVec3, base: i32, layer: u8) {
+    let size = rng.rand(150) + base;
+    let vz = rng.rand(80) - ((vel.z >> 3) + 40);
+    let vy = rng.rand(80) - ((vel.y >> 3) + 40);
+    let vx = rng.rand(80) - ((vel.x >> 3) + 40);
+    let z = rng.rand(200) + at.z - 100;
+    let y = rng.rand(200) + at.y - 100;
+    let x = rng.rand(200) + at.x - 100;
+    effects.add(
+        9,
+        Tex::Flare,
+        Vec3::new(x as f32, y as f32, z as f32),
+        Vec3::new(vx as f32, vy as f32, vz as f32),
+        size as f32,
+        layer,
+        Blend::Add,
+    );
 }
 
 /// Projectiles hitting people and vehicles (68k `FUN_000de0b6`).
@@ -1016,8 +1109,17 @@ fn projectile_hits(
     }
 }
 
-/// Explosion damage, knock-back and effects (§5.2).
-#[allow(clippy::type_complexity)]
+/// Explosion damage, knock-back, score and effects (§5.2; Mac `Shockwave`
+/// @ 10054ac0 = 68k `FUN_000cd22e` / OS4 `FUN_0104405c`).
+///
+/// With q = (P>>4)/T: people and vehicles lose q/k, class-2 props
+/// (barrier, cone, dummy; `model+0x8165 == 2`) only (q>>4)/k and get no
+/// knock-back. In single player a player-owned blast on an object not
+/// owned by a player pays `min(6000, q/(k>>5))` (6000 when k>>5 < 1)
+/// times the multiplier. The original also pays blasts from AI-owned
+/// weapons (attacker owner `+0x824 >= 0`); the port's `Explode` only
+/// knows `by_player`, so it pays the player's blasts.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn explosions(
     mut commands: Commands,
     mut events: MessageReader<Explode>,
@@ -1027,7 +1129,9 @@ fn explosions(
     mut flash: ResMut<crate::effects::ScreenFlash>,
     mut panic: MessageWriter<Panic>,
     mut hurt: MessageWriter<Hurt>,
-    mut q: Query<(Entity, &mut Obj, Has<Person>, Option<&Projectile>)>,
+    mode: Res<crate::level::GameMode>,
+    session: Res<super::people::PlayerSession>,
+    mut q: Query<(Entity, &mut Obj, Has<Person>, Option<&Projectile>, Has<CameraTarget>)>,
 ) {
     let Some(library) = library else {
         events.clear();
@@ -1056,10 +1160,15 @@ fn explosions(
                 from: src,
             });
         }
-        for (e, mut o, is_person, proj) in &mut q {
+        // Score for the player (single player only), paid after the loop.
+        let pays = ex.by_player && !mode.is_multiplayer();
+        let mut score: i64 = 0;
+        for (e, mut o, is_person, proj, is_target) in &mut q {
             if Some(e) == ex.source || proj.is_some() {
                 continue;
             }
+            // Class 2: props without a `Projectile` (barrier, cone, dummy).
+            let prop = o.class == Class::Projectile;
             let d = (o.pos - ex.pos).as_i64vec3() / 256;
             let r2 = d.length_squared();
             let u = (r2 >> 4) * (r2 as f64).sqrt() as i64;
@@ -1070,11 +1179,16 @@ fn explosions(
             };
             let mass = library.model(o.model).info.mass.max(1) as i64;
             let q = (p >> 4) / mass;
-            let push = (d * q / k).clamp(I64Vec3::splat(-1000), I64Vec3::splat(1000));
-            o.vel += push.as_ivec3();
+            if !prop {
+                let push = (d * q / k).clamp(I64Vec3::splat(-1000), I64Vec3::splat(1000));
+                o.vel += push.as_ivec3();
+            }
             if matches!(o.filter, -1 | 1 | 3) {
-                let dmg = if is_person { q / k } else { (q >> 4) / k };
+                let dmg = if prop { (q >> 4) / k } else { q / k };
                 o.health -= dmg.min(i32::MAX as i64) as i32;
+                if pays && !is_target && o.state != State::Player && o.player.is_none() {
+                    score += if k >> 5 < 1 { 6000 } else { (q / (k >> 5)).min(6000) };
+                }
                 if dmg > 0 {
                     hurt.write(Hurt {
                         victim: e,
@@ -1083,6 +1197,12 @@ fn explosions(
                         attacker: ex.player,
                     });
                 }
+            }
+        }
+        if score > 0 {
+            if let Some((_, mut pl, ..)) = q.iter_mut().find(|(.., t)| *t) {
+                let add = score * session.multiplier.max(1) as i64;
+                pl.score = (pl.score as i64 + add).min(i32::MAX as i64) as i32;
             }
         }
         let layer = ex.layer as u8 + 1;
@@ -1241,6 +1361,8 @@ fn pickups(
     mut banner: ResMut<Banner>,
     mut respawns: ResMut<PickupRespawns>,
     mut set: MessageWriter<SetScenery>,
+    mut rng: ResMut<Rng>,
+    mut effects: ResMut<Effects>,
     mut q: Query<(&Obj, &mut Arsenal), With<CameraTarget>>,
 ) {
     let Some(city) = city else { return };
@@ -1265,6 +1387,12 @@ fn pickups(
             34 => (None, 0x51),
             _ => continue,
         };
+        // 2 dust puffs before the sound, from the gameplay `random`: 14
+        // draws (Mac `CheckForWeapon` @ 100597e0, 68k `FUN_000d0988`).
+        let base = IVec3::new((sx * 2048 + 0x270) as i32, (sy * 2048 + 0x270) as i32, o.pos.z - 150);
+        for _ in 0..2 {
+            dust_puff(&mut effects, &mut |n| rng.rand(n), base, o.level as u8 + 1);
+        }
         if let Some(slot) = slot {
             ars.ammo[slot] += PICKUP_AMMO[slot];
             commands.spawn(Sound::once(
@@ -1289,11 +1417,15 @@ fn pickups(
     }
 }
 
-/// Collected pickups come back as crates after 1200 ticks (§4 Respawn).
+/// Collected pickups come back as crates after 1200 ticks (§4 Respawn),
+/// with 2 dust puffs at the fixed height 0x4d8a from the gameplay `random`
+/// (14 draws; Mac `RespawnWeapons` @ 100595c0, 68k `FUN_000d079e`).
 fn respawn_pickups(
     mut commands: Commands,
     mut respawns: ResMut<PickupRespawns>,
     mut set: MessageWriter<SetScenery>,
+    mut rng: ResMut<Rng>,
+    mut effects: ResMut<Effects>,
 ) {
     for r in &mut respawns.0 {
         r.3 -= 1;
@@ -1306,6 +1438,11 @@ fn respawn_pickups(
                 special: None,
                 rotation: None,
             });
+            let base = IVec3::new((r.0 * 2048 + 0x270) as i32, (r.1 * 2048 + 0x270) as i32, 0x4d8a);
+            let layer = (r.2 as u8 + 1).min(3);
+            for _ in 0..2 {
+                dust_puff(&mut effects, &mut |n| rng.rand(n), base, layer);
+            }
             let at = Vec3::new((r.0 * 2048 + 1024) as f32, (r.1 * 2048 + 1024) as f32, 0.0);
             commands.spawn(Sound::once(
                 id::OBJECT_APPEAR,

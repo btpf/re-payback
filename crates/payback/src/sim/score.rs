@@ -1,13 +1,13 @@
 //! Kill scoring (docs/re/combat_police.md §7; OS4 `FUN_01043924`,
 //! `FUN_0104405c`, `FUN_01056c58`): 1500 per civilian, 2500 per police
 //! officer or police vehicle, times the multiplier, only when the player
-//! dealt the damage; every 11th cop kill adds the 100000 "Copkiller
-//! bonus!" (single player).
+//! dealt the damage; every 11th cop kill adds the "Copkiller bonus!",
+//! 100000 times the multiplier (single player; Mac `CheckHitObject`
+//! @ 100542d0, OS4 `FUN_01043924`: no sound, only the announcement).
 
 use super::Obj;
 use super::people::PlayerSession;
 use super::police::Hurt;
-use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::hud::{BigTitle, Texts};
 use bevy::platform::collections::HashMap;
@@ -61,9 +61,7 @@ pub(crate) fn track_attackers(mut hurt: MessageReader<Hurt>, mut last: ResMut<La
     last.0.retain(|e, _| alive.contains(*e));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn score_kills(
-    mut commands: Commands,
     mut killed: MessageReader<Killed>,
     mut last: ResMut<LastAttacker>,
     mut cops: ResMut<CopKills>,
@@ -84,11 +82,10 @@ fn score_kills(
         cops.0 += 1;
         if cops.0 > 10 {
             cops.0 = 0;
-            p.score += COPKILLER_BONUS;
+            p.score += COPKILLER_BONUS * session.multiplier;
             if let Some(t) = &texts {
                 title.show(t.global(COPKILLER_MESSAGE));
             }
-            commands.spawn(Sound::once(id::MISSION_COMPLETE, 255.0, 11025.0, SoundPos::Global));
         }
     }
 }

@@ -351,7 +351,9 @@ ev 0xcb:
     Dialog(2): phrase 31 "What the hell is that?!?"
     S = 2; P = 0; gasSound = 1
 ev 0xcc: AddEffect(0x27d2c+R(200), 0x21b9c+R(200), 20000-R(200), 0x1e+R(80), R(80)-0x28, -R(100), 400+R(500), 1)
-         AddMissionTrigger(0xcc, 0x37, 5)          // R(n) = Random(n); argument order from OS4 0x010d13f4
+         AddMissionTrigger(0xcc, 0x37, 5)          // R(n) = Random(n), drawn last argument first
+         // (life, vz, vy, vx, z, y, x: Mac case 10135cd8 and 68k; OS4 0x010d13f4 draws them in order).
+         // AddEffect_Gas = AddEffect(9, gas, ..., size, layer 1, blend 0x30000 tint) (Mac @ 10108310). CONFIRMED
 ev 0xcd: if P == 0: P = 1; Dialog(2): phrase 35 "Watch out! That stuff's poisonous!"
          AddHealth(-1); AddMissionTrigger(0xe6, 0x37, 5)
 ev 0xe6: AddMissionTrigger(0xcd, 0x38, 0x27c00, 0x21c00, 0)     // so -1 HP about every 5 ticks while in the gas

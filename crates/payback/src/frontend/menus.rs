@@ -26,6 +26,19 @@ const MAIN_MODELS: [&str; 10] = [
     "options/amiga.obj",
 ];
 
+/// Save the settings when the game quits, from the menu or by closing the
+/// window (Mac: every loop polls `MacHasQuit` @ 1004f560, then
+/// `CPaybackApp::Run` calls `amiga_cleanup`, which runs `SaveConfig` @
+/// 10052830). Only written when they differ from the file.
+pub fn save_on_exit(
+    mut exits: bevy::prelude::MessageReader<bevy::app::AppExit>,
+    settings: bevy::prelude::Res<super::progress::Settings>,
+) {
+    if exits.read().count() > 0 && *settings != super::progress::Settings::load() {
+        settings.save();
+    }
+}
+
 /// Cup model by cup/rating 1..3 (`DAT_0117bbf8`).
 pub fn cup_model(cup: i32) -> &'static str {
     match cup {
@@ -177,7 +190,16 @@ impl Screen for MainMenu {
         }
         if self.sel == 7 {
             // The OS4 build only refuses; the 68k build plays the intro
-            // (`FUN_00010364`).
+            // (`FUN_00010364`), and so does the Mac (`DoTitleScreen` @
+            // 100a2e70: `OpenAnimation("intro")`, the music stopped first
+            // unless it is Disabled, see `crate::music`), refusing when
+            // the film is missing.
+            let film = cx.data.mac_path("Videos/payback_high_mpeg1.mpg").is_some()
+                || cx.data.root.join("Videos/intro.video").is_file();
+            if !film {
+                cx.sound(Sfx::Refuse);
+                return Step::Stay;
+            }
             cx.sound(Sfx::Select);
             cx.requests.push(Request::PlayIntro);
             return Step::Stay;
@@ -559,6 +581,12 @@ impl PauseMenu {
 }
 
 impl Screen for PauseMenu {
+    /// Keep the music going: `CD_CheckForTrackEnd(0)` (Mac `ShowOptions`
+    /// @ 10093240, OS4 `FUN_0101a7dc`).
+    fn cd_track(&self) -> i32 {
+        0
+    }
+
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         self.obj.tick();
         self.person = (self.person + 0x20).rem_euclid(TURN);

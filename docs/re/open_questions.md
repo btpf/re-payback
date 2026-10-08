@@ -68,7 +68,7 @@ order). Nothing contradicts §11.
   There is no per-frame clear, so (INFERRED) sprites crossing the off-map area leave
   trails, and the lightning palette flash brightens that area too.
 - **Tick length "not traced here" (§7)**: resolved in `people.md` §1.1: 68k 25 Hz
-  (2 DateStamp ticks per game tick), OS4 30 Hz.
+  (2 DateStamp ticks per game tick), OS4 and Mac 30 Hz (the port uses 30 Hz).
 - **Mode 3 texel 0 transparent (§10, if still marked INFERRED)**: CONFIRMED.
   `FUN_0111e410` jumps into an unrolled span ending at 0x01128ae8; every pixel does
   `lbz; cmpwi 0; beq skip; stb`.

@@ -34,6 +34,47 @@ impl Icon {
     }
 }
 
+impl Icon {
+    /// The software hi-res copy (`LoadIcon__FPciii` @ 10086f80, Amiga
+    /// `FUN_0100d3c4`): each pixel P becomes a 2×2 block of P, avg(P,
+    /// right), avg(P, below) and avg(P, below right), edges clamped
+    /// (`GetPointCol`); `avg` = Alpha.256 table 4 unless both are equal
+    /// (`AverageVals` @ 10086ef0). Colour 0 is averaged like any other, so
+    /// shapes get a dark edge.
+    pub fn doubled(&self, avg: &Average) -> Icon {
+        let (w, h) = (self.w, self.h);
+        let at = |x: usize, y: usize| self.px[y.min(h - 1) * w + x.min(w - 1)];
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let p = at(x, y);
+                let o = 2 * y * 2 * w + 2 * x;
+                px[o] = p;
+                px[o + 1] = avg.of(p, at(x + 1, y));
+                px[o + 2 * w] = avg.of(p, at(x, y + 1));
+                px[o + 2 * w + 1] = avg.of(p, at(x + 1, y + 1));
+            }
+        }
+        Icon { w: 2 * w, h: 2 * h, px }
+    }
+}
+
+/// Alpha.256 table 4, the 50 % average (`T4[a·256 + b]`).
+pub struct Average(Vec<u8>);
+
+impl Average {
+    /// Computed like `CalcAlpha` @ 10083ec0 (`postfx::alpha_tables`).
+    pub fn load(data: &GameData) -> Average {
+        let t = crate::camera::postfx::alpha_tables(data);
+        Average(t[0x40000..0x50000].to_vec())
+    }
+
+    /// `AverageVals` @ 10086ef0.
+    pub fn of(&self, a: u8, b: u8) -> u8 {
+        if a == b { a } else { self.0[a as usize * 256 + b as usize] }
+    }
+}
+
 fn find(data: &GameData, name: &str) -> Option<std::path::PathBuf> {
     let dir = data.root.join("Icons");
     let exact = dir.join(name);
@@ -55,7 +96,12 @@ pub struct Font {
     pub h: usize,
 }
 
-const NAMED: [(&str, u8); 26] = [
+/// Named glyph files. `Dollar`, `Percent` and `Pound` exist in `Icons/`
+/// but no build loads them (OS4 `LoadFont` in `FUN_010138dc`, 68k, Mac
+/// `LoadFont` @ 10089380 / `LoadFontPartial` @ 10087d80), so '$', '%' and
+/// '£' fall back to '?' as in the originals (`analysis/mac/frontend.md`
+/// §5.3).
+const NAMED: [(&str, u8); 23] = [
     ("FullStop", b'.'),
     ("Comma", b','),
     ("Colon", b':'),
@@ -72,9 +118,6 @@ const NAMED: [(&str, u8); 26] = [
     ("Slash", b'/'),
     ("Underscore", b'_'),
     ("Plus", b'+'),
-    ("Dollar", b'$'),
-    ("Percent", b'%'),
-    ("Pound", 0xA3),
     ("ae", 0xC6),
     ("o_line", 0xD8),
     ("a_circle", 0xC5),
@@ -139,6 +182,15 @@ impl Font {
         f
     }
 
+    /// The same font with every glyph passed through `f`.
+    pub fn map(&self, f: &impl Fn(&Icon) -> Icon) -> Font {
+        Font {
+            glyphs: self.glyphs.iter().map(|(&c, g)| (c, f(g))).collect(),
+            w: self.w * 2,
+            h: self.h * 2,
+        }
+    }
+
     pub fn glyph(&self, c: u8) -> Option<&Icon> {
         self.glyphs.get(&c).or_else(|| self.glyphs.get(&b'?'))
     }
@@ -169,6 +221,31 @@ pub struct HudIcons {
 }
 
 impl HudIcons {
+    /// The software hi-res set: every icon doubled with [`Icon::doubled`]
+    /// (the original loads them so when `AreIconsScaled` @ 10085eb0).
+    pub fn doubled(&self, avg: &Average) -> HudIcons {
+        let f = |i: &Icon| i.doubled(avg);
+        let all = |v: &[Icon]| v.iter().map(f).collect::<Vec<_>>();
+        HudIcons {
+            big: self.big.map(&f),
+            you: self.you.map(&f),
+            them: self.them.map(&f),
+            small_digits: all(&self.small_digits),
+            small_x: f(&self.small_x),
+            small_person: f(&self.small_person),
+            heart_big: f(&self.heart_big),
+            heart_small: f(&self.heart_small),
+            siren: all(&self.siren),
+            weapons: self.weapons.iter().map(|(a, b)| (f(a), f(b))).collect(),
+            speakers: all(&self.speakers),
+            pager: f(&self.pager),
+            pager_digits: all(&self.pager_digits),
+            lights: all(&self.lights),
+            blobs: all(&self.blobs),
+            checkpoint: [f(&self.checkpoint[0]), f(&self.checkpoint[1])],
+        }
+    }
+
     pub fn load(data: &GameData) -> HudIcons {
         let small = |n: &str| Icon::load(data, &format!("Small.{n}"), 9, 13);
         let weapon_names = [

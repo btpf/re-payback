@@ -214,7 +214,9 @@ pub const TYPES: [VehicleType; 28] = [
         "vehicles/tank.obj",
         2341,
         -1,
-        [220, -100, 6, 20, 55, 50, 40000, 0],
+        // Reverse -220 as on the Mac (`InitStructures` @ 1005ffb0); the
+        // Amiga had -100 (68k `FUN_000d7874`, OS4 `FUN_0104e13c`).
+        [220, -220, 6, 20, 55, 50, 40000, 0],
         id::TANK_ENGINE,
         id::CAR_HORN,
         -1,

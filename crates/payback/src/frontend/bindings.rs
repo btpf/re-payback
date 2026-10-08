@@ -3,16 +3,24 @@
 //! control setup (`FUN_0102e75c`, `misc::ControlSetup`).
 //!
 //! Each table holds one binding per action, in phrase order 2457..2467
-//! ([`ACTIONS`]); `None` = disabled (the original's 0, "-?-"). The
-//! original has 11 tables: single-player keyboard / PSX / CD32 pad, then
-//! a PSX and a CD32 table per multiplayer player. Here there are 10:
+//! ([`ACTIONS`]); `None` = disabled (the original's 0, "-?-"). The Amiga
+//! has 11 tables: single-player keyboard / PSX / CD32 pad, then a PSX and
+//! a CD32 table per multiplayer player. The Mac (`DoControlSetup` @
+//! 100a1f80, `UpdateInputStatus` @ 100f8490) drops PSX and CD32 and has 5:
+//! the keyboard and one table per input device 1..4, where device 1 serves
+//! single player too and a multiplayer player uses the table of the device
+//! they picked. Here the Mac's 5 columns come first, then the multiplayer
+//! keyboard key sets (fixed on both originals, redefinable here):
 //!
 //! | Column | Table |
 //! |---|---|
 //! | 0 | single player, keyboard ([`Controls::keys`], read by `sim::people::read_keyboard`) |
-//! | 1 | single player, gamepad ([`Controls::pad`], the first connected pad) |
-//! | 2..5 | multiplayer keyboard key set 1..4 ([`Controls::mp_keys`]) |
-//! | 6..9 | multiplayer gamepad of player 1..4 ([`Controls::mp_pad`]) |
+//! | 1 | single player, gamepad 1 ([`Controls::pads`]`[0]`, the first connected pad; also multiplayer "Joystick 1") |
+//! | 2..4 | multiplayer gamepad 2..4 ([`Controls::pads`]`[1..4]`) |
+//! | 5..8 | multiplayer keyboard key set 1..4 ([`Controls::mp_keys`]) |
+//!
+//! Single player reads the keyboard and gamepad 1 together, as the Mac
+//! polls device 1 every frame next to the keyboard.
 //!
 //! Fixed, as in the original: digits 0..7 pick a weapon, Esc pauses. A
 //! gamepad's left stick and d-pad always steer and accelerate/reverse
@@ -54,7 +62,10 @@ pub type KeyTable = [Option<KeyCode>; 11];
 pub type PadTable = [Option<GamepadButton>; 11];
 
 /// Columns of the control setup screen.
-pub const COLUMNS: usize = 10;
+pub const COLUMNS: usize = 9;
+
+/// First multiplayer key-set column.
+pub const KEY_SET_COLUMN: usize = 5;
 
 /// Single-player keyboard: the keys `read_keyboard` has always read.
 const SP_KEYS: KeyTable = [
@@ -151,18 +162,17 @@ const MP_KEYS: [KeyTable; 4] = {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Controls {
     pub keys: KeyTable,
-    pub pad: PadTable,
+    /// Gamepad n's buttons (the Mac's device tables 1..4).
+    pub pads: [PadTable; 4],
     pub mp_keys: [KeyTable; 4],
-    pub mp_pad: [PadTable; 4],
 }
 
 impl Default for Controls {
     fn default() -> Self {
         Controls {
             keys: SP_KEYS,
-            pad: PAD,
+            pads: [PAD; 4],
             mp_keys: MP_KEYS,
-            mp_pad: [PAD; 4],
         }
     }
 }
@@ -178,35 +188,42 @@ impl Controls {
     pub fn column(&self, c: usize) -> Table {
         match c {
             0 => Table::Keys(self.keys),
-            1 => Table::Pad(self.pad),
-            2..=5 => Table::Keys(self.mp_keys[c - 2]),
-            _ => Table::Pad(self.mp_pad[(c - 6).min(3)]),
+            1..KEY_SET_COLUMN => Table::Pad(self.pads[c - 1]),
+            _ => Table::Keys(self.mp_keys[(c - KEY_SET_COLUMN).min(3)]),
         }
+    }
+
+    /// The control-setup column of gamepad `n` (0..3).
+    pub fn pad_column(n: usize) -> usize {
+        1 + n.min(3)
+    }
+
+    /// The control-setup column of multiplayer key set `k` (0..3).
+    pub fn key_set_column(k: usize) -> usize {
+        KEY_SET_COLUMN + k.min(3)
     }
 
     /// Column `c` is a keyboard table.
     pub fn is_keyboard(c: usize) -> bool {
-        matches!(c, 0 | 2..=5)
+        c == 0 || c >= KEY_SET_COLUMN
     }
 
     pub fn set_key(&mut self, c: usize, action: usize, key: Option<KeyCode>) {
         match c {
             0 => self.keys[action] = key,
-            2..=5 => self.mp_keys[c - 2][action] = key,
+            KEY_SET_COLUMN..COLUMNS => self.mp_keys[c - KEY_SET_COLUMN][action] = key,
             _ => {}
         }
     }
 
     pub fn set_pad(&mut self, c: usize, action: usize, b: Option<GamepadButton>) {
-        match c {
-            1 => self.pad[action] = b,
-            6..=9 => self.mp_pad[c - 6][action] = b,
-            _ => {}
+        if (1..KEY_SET_COLUMN).contains(&c) {
+            self.pads[c - 1][action] = b;
         }
     }
 
-    /// Settings-file lines (`key.<action>`, `pad.<action>`,
-    /// `mp<n>.key.<action>`, `mp<n>.pad.<action>`).
+    /// Settings-file lines (`key.<action>`, `pad.<action>` = gamepad 1,
+    /// `pad<n>.<action>` = gamepad n, `mp<n>.key.<action>` = key set n).
     pub fn write(&self, t: &mut String) {
         let mut table = |prefix: &str, names: [String; 11]| {
             for (a, n) in ACTIONS.iter().zip(names) {
@@ -214,12 +231,12 @@ impl Controls {
             }
         };
         table("key.", self.keys.map(|k| k.map(key_id).unwrap_or_default()));
-        table("pad.", self.pad.map(|b| b.map(pad_id).unwrap_or_default()));
-        for p in 0..4 {
-            table(&format!("mp{}.key.", p + 1), self.mp_keys[p].map(|k| k.map(key_id).unwrap_or_default()));
+        for (n, pad) in self.pads.iter().enumerate() {
+            let prefix = if n == 0 { "pad.".to_string() } else { format!("pad{}.", n + 1) };
+            table(&prefix, pad.map(|b| b.map(pad_id).unwrap_or_default()));
         }
         for p in 0..4 {
-            table(&format!("mp{}.pad.", p + 1), self.mp_pad[p].map(|b| b.map(pad_id).unwrap_or_default()));
+            table(&format!("mp{}.key.", p + 1), self.mp_keys[p].map(|k| k.map(key_id).unwrap_or_default()));
         }
     }
 
@@ -238,11 +255,20 @@ impl Controls {
         let Some(a) = ACTIONS.iter().position(|x| *x == action) else {
             return false;
         };
-        match (kind, player) {
-            ("key", None) => self.keys[a] = parse_key(v),
-            ("key", Some(p)) => self.mp_keys[p][a] = parse_key(v),
-            ("pad", None) => self.pad[a] = parse_pad(v),
-            ("pad", Some(p)) => self.mp_pad[p][a] = parse_pad(v),
+        let pad = match kind.strip_prefix("pad") {
+            Some("") => Some(0),
+            Some(n) => match n.parse::<usize>() {
+                Ok(n @ 2..=4) => Some(n - 1),
+                _ => return false,
+            },
+            None => None,
+        };
+        match (kind, player, pad) {
+            ("key", None, _) => self.keys[a] = parse_key(v),
+            ("key", Some(p), _) => self.mp_keys[p][a] = parse_key(v),
+            (_, None, Some(n)) => self.pads[n][a] = parse_pad(v),
+            // Older files: per-player multiplayer pads, now per gamepad.
+            (_, Some(_), Some(0)) => {}
             _ => return false,
         }
         true
@@ -279,15 +305,23 @@ pub fn pad_just(pad: &Gamepad, b: Option<GamepadButton>) -> bool {
     b.is_some_and(|b| pad.just_pressed(b))
 }
 
-/// Keys the redefine prompt refuses (`FUN_01040790`): the digits pick
-/// weapons, `-`, `=` and `P` are game keys too. 0 disables (handled by
-/// the caller), Esc cancels.
+/// Keys the redefine prompt refuses: the digits pick weapons, `-` and `=`
+/// are game keys too, and F1 is kept for "Press F1 to continue" (Mac
+/// `DoControlSetup` @ 100a1f80 refuses key code 0x7A and allows `P`, which
+/// the Amiga's `FUN_01040790` refused). 0 disables (handled by the
+/// caller), Esc cancels.
 pub fn refused_key(k: KeyCode) -> bool {
     use KeyCode::*;
     matches!(
         k,
-        Digit1 | Digit2 | Digit3 | Digit4 | Digit5 | Digit6 | Digit7 | Digit8 | Digit9 | Minus | Equal | KeyP
+        Digit1 | Digit2 | Digit3 | Digit4 | Digit5 | Digit6 | Digit7 | Digit8 | Digit9 | Minus | Equal | F1
     )
+}
+
+/// The fixed weapon key for HUD slot `d` (0..7): Digit0..Digit7.
+pub fn digit_key(d: u8) -> KeyCode {
+    use KeyCode::*;
+    [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7][d.min(7) as usize]
 }
 
 /// Keys that can be bound, by settings-file name.
@@ -339,22 +373,27 @@ mod tests {
     fn settings_roundtrip() {
         let mut c = Controls::default();
         c.set_key(0, NEXT_WEAPON, Some(KeyCode::KeyM));
-        c.set_key(3, SHOOT, None);
-        c.set_pad(7, BRAKE, Some(GamepadButton::West));
+        c.set_key(6, SHOOT, None);
+        c.set_pad(3, BRAKE, Some(GamepadButton::West));
+        c.set_pad(1, NEXT_WEAPON, None);
         let mut t = String::new();
         c.write(&mut t);
         let mut d = Controls {
             keys: [None; 11],
-            pad: [None; 11],
+            pads: [[None; 11]; 4],
             mp_keys: [[None; 11]; 4],
-            mp_pad: [[None; 11]; 4],
         };
         for line in t.lines() {
             let (k, v) = line.split_once('=').unwrap();
             assert!(d.read(k.trim(), v.trim()), "{line}");
         }
         assert_eq!(c, d);
+        assert_eq!(d.pads[2][BRAKE], Some(GamepadButton::West));
+        assert_eq!(d.mp_keys[1][SHOOT], None);
         assert!(!d.read("key.fly", "KeyF"));
+        assert!(!d.read("pad5.brake", "West"));
+        assert!(d.read("mp2.pad.brake", "East"), "old per-player pad lines are skipped");
+        assert_eq!(c, d);
     }
 
     #[test]

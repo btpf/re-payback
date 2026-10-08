@@ -253,9 +253,14 @@ impl Level01 {
                 s.create_actor(M3_CARS + 1, 10, 0x3e418, 0x3400, 0, 0, 4);
                 s.create_actor(M3_CARS + 2, 4, 0x3ebe8, 0x3400, 0, 0x15e0, 0);
                 self.active[..3].fill(true);
+                // Grouped by kind, as the original adds them (Mac, 68k, OS4).
                 for i in 0..3 {
                     s.t(M3_GET_IN + i, ENTER_ACTOR, M3_CARS + i, 0, 0, 0);
+                }
+                for i in 0..3 {
                     s.t(M3_IN_SEA + i, ACTOR_IN_WATER, M3_CARS + i, 0, 0, 0);
+                }
+                for i in 0..3 {
                     s.t(M3_WRECKED + i, ACTOR_GONE, M3_CARS + i, 0, 0, 0);
                 }
                 s.t(0x154, COUNTDOWN, 200, 0, 0, 0);
@@ -404,8 +409,7 @@ impl Level01 {
                 }
                 s.say(BOSS, 16);
                 s.set_wanted_level(5);
-                // Sample 0x30 = "Alarm"; the original's range 20000 has no
-                // equivalent in `add_sound`.
+                // Sample 0x30 = "Alarm"; 20000 is the sound's z.
                 s.add_sound(0, 0x30, true, 100_000_000.0, 16000.0, 0x2e400, 0x2b400, 20000);
                 alarm_boxes(s, 22);
             }
