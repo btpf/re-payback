@@ -463,7 +463,13 @@ Field meanings (C):
 Keys: 11 actions (phrases 2457–2467: accelerate, reverse/brake, left, right, shoot,
 shoot alt, in/out, brake only, next weapon, prev weapon, repeat message). Keyboard raw
 keys `4C 4D 4F 4E 40 00 44 31 5F 46 37` (cursor up/down/left/right, Space, –, Return, Z,
-Help, Del, M); odd tables PSX `106 109 100 102 107 10C 108 10D 10B 10A 104`; even tables
+Help, Del, M). Repeat message (C): the message queue (`DAT_0117bc40`, 100 × 16-byte entries:
+type 1 Open / 2 Text / 3 Close, count `DAT_011746a4`) is mirrored on every enqueue into a
+last-message list (`DAT_0117c280`, count `DAT_011746a8`; `FUN_01015d7c` Open restarts it,
+`FUN_01015e18` Text, `FUN_01015f68` Close, `FUN_01015b2c` any type; full → "LastMessageEnqueue():
+Too many entries"). `FUN_01015a10` copies that list back into the queue; it is called from the
+keyboard reader `FUN_0103f3d0` on the bound key's release (raw `| 0x80`) and from the pad reader
+`FUN_0103da68` when the button goes down. Odd tables PSX `106 109 100 102 107 10C 108 10D 10B 10A 104`; even tables
 CD32 `11D 11E 118 11A 11F 0 120 122 121 0 0`. Control setup `FUN_0102e75c` (2469):
 11 columns (Single player 2455: Keyboard/PSX/CD32; Multiplayer 2456: PSX/CD32 per
 player), eased scroll `p = (7p+target)>>3`, rows y = (50+10i)/200, key names 1500–1534,

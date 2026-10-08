@@ -27,8 +27,88 @@ pub struct CurrentModel(pub Option<ModelView>, pub Option<ModelView>);
 #[derive(Resource, Default)]
 pub struct ModelCache {
     lib: Option<ObjectLibrary>,
-    meshes: HashMap<&'static str, Option<Handle<Mesh>>>,
+    meshes: HashMap<&'static str, Option<MenuMesh>>,
 }
+
+/// Every model the menus show, loaded at start-up (`crate::startup`).
+const MENU_MODELS: [&str; 16] = [
+    "options/joystick.obj",
+    "options/joystick_multi.obj",
+    "options/disk.obj",
+    "options/moviereel.obj",
+    "options/cup_bronze.obj",
+    "options/cup_silver.obj",
+    "options/cup_gold.obj",
+    "options/cd.obj",
+    "options/controlsetup.obj",
+    "options/world.obj",
+    "options/questionmarks.obj",
+    "options/amiga.obj",
+    "options/options.obj",
+    "options/torch.obj",
+    "options/cross.obj",
+    "people/malenormal.obj",
+];
+
+/// Start-up: the menu models' object library (the object textures).
+pub fn preload_library(world: &mut World) {
+    world.resource_scope(|world, mut cache: Mut<ModelCache>| {
+        if cache.lib.is_some() {
+            return;
+        }
+        let data = world.resource::<GameData>().clone();
+        world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+            let mut materials = world.resource_mut::<Assets<crate::objects::ObjectMaterial>>();
+            cache.lib = Some(ObjectLibrary::new(&data, &mut images, &mut materials, false));
+        });
+    });
+}
+
+/// Start-up: build every menu model.
+pub fn preload_models(world: &mut World) {
+    preload_library(world);
+    let data = world.resource::<GameData>().clone();
+    world.resource_scope(|world, mut cache: Mut<ModelCache>| {
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        for path in MENU_MODELS {
+            cache.mesh(&data, &mut meshes, path);
+        }
+    });
+}
+
+impl ModelCache {
+    /// The meshes of `path` (built on first use): the model and its
+    /// blended parts with their materials ([`ObjectLibrary::menu_parts`]).
+    fn mesh(&mut self, data: &GameData, meshes: &mut Assets<Mesh>, path: &'static str) -> Option<MenuMesh> {
+        let lib = self.lib.as_mut()?;
+        self.meshes
+            .entry(path)
+            .or_insert_with(|| {
+                let i = lib.load(data, meshes, path)?;
+                let (main, overlays) = lib.menu_parts(&lib.model(i).obj, |v| {
+                    let k = MODEL_UNIT;
+                    to_render(v.x as f32 * k, v.y as f32 * k, v.z as f32 * k).to_array()
+                });
+                Some(MenuMesh {
+                    main: meshes.add(main),
+                    overlays: overlays.into_iter().map(|(m, mat)| (meshes.add(m), mat)).collect(),
+                })
+            })
+            .clone()
+    }
+}
+
+/// A menu model's meshes: the main mesh (drawn with the library's
+/// material) and its blended parts.
+#[derive(Clone)]
+struct MenuMesh {
+    main: Handle<Mesh>,
+    overlays: Vec<(Handle<Mesh>, Handle<crate::objects::ObjectMaterial>)>,
+}
+
+/// The blended parts of a menu model, children of its entity.
+#[derive(Component)]
+struct MenuOverlay;
 
 #[derive(Component)]
 pub struct MenuCamera;
@@ -81,7 +161,7 @@ pub fn sync_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<crate::objects::ObjectMaterial>>,
-    mut model: Query<(Entity, &MenuModel, &mut Mesh3d, &mut Transform)>,
+    mut model: Query<(Entity, &MenuModel, &Mesh3d, &mut Transform)>,
 ) {
     for (slot, view) in [current.0, current.1].into_iter().enumerate() {
         let existing = model.iter_mut().find(|(_, m, ..)| m.0 as usize == slot);
@@ -91,23 +171,11 @@ pub fn sync_model(
             }
             continue;
         };
-        let cache = &mut *cache;
-        let lib = cache
-            .lib
-            .get_or_insert_with(|| ObjectLibrary::new(&data, &mut images, &mut materials, false));
-        let mesh = cache
-            .meshes
-            .entry(view.path)
-            .or_insert_with(|| {
-                let i = lib.load(&data, &mut meshes, view.path)?;
-                let m = lib.build_mesh(&lib.model(i).obj, |v| {
-                    let k = MODEL_UNIT;
-                    to_render(v.x as f32 * k, v.y as f32 * k, v.z as f32 * k).to_array()
-                });
-                Some(meshes.add(m))
-            })
-            .clone();
-        let Some(mesh) = mesh else { continue };
+        if cache.lib.is_none() {
+            cache.lib = Some(ObjectLibrary::new(&data, &mut images, &mut materials, false));
+        }
+        let Some(mesh) = cache.mesh(&data, &mut meshes, view.path) else { continue };
+        let material = cache.lib.as_ref().map(|l| l.material.clone()).unwrap_or_default();
         let transform = Transform::from_translation(to_render(
             view.pos[0] as f32,
             view.pos[1] as f32,
@@ -115,20 +183,30 @@ pub fn sync_model(
         ))
         .with_rotation(rotation(view.rot));
         match existing {
-            Some((_, _, mut m, mut t)) => {
-                if m.0 != mesh {
-                    m.0 = mesh;
+            Some((_, _, m, mut t)) if m.0 == mesh.main => *t = transform,
+            other => {
+                if let Some((e, ..)) = other {
+                    commands.entity(e).despawn();
                 }
-                *t = transform;
-            }
-            None => {
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(lib.material.clone()),
-                    transform,
-                    RenderLayers::layer(LAYER),
-                    MenuModel(slot as u8),
-                ));
+                commands
+                    .spawn((
+                        Mesh3d(mesh.main.clone()),
+                        MeshMaterial3d(material),
+                        transform,
+                        RenderLayers::layer(LAYER),
+                        MenuModel(slot as u8),
+                    ))
+                    .with_children(|p| {
+                        for (part, mat) in &mesh.overlays {
+                            p.spawn((
+                                Mesh3d(part.clone()),
+                                MeshMaterial3d(mat.clone()),
+                                Transform::IDENTITY,
+                                RenderLayers::layer(LAYER),
+                                MenuOverlay,
+                            ));
+                        }
+                    });
             }
         }
     }

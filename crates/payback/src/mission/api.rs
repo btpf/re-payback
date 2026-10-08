@@ -205,7 +205,7 @@ impl<'w> Script<'w> {
     }
 
     pub fn dialog_flush(&mut self) {
-        *self.world.resource_mut::<Dialog>() = Dialog::default();
+        self.world.resource_mut::<Dialog>().flush();
     }
 
     /// `Say(s, n)` = begin(s); say2(n); end().

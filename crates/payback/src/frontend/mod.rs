@@ -9,7 +9,8 @@
 //! on a second camera that also draws the spinning option model between
 //! the two.
 //!
-//! Debug: `--frontend-screen <name>` opens a screen directly (main, game,
+//! Debug: `--frontend-screen <name>` opens a screen directly (main, on
+//! item `--menu-item <n>` if given, game,
 //! levelselect, complete, gameover, gamecomplete, name, load, save,
 //! replays, credits, language, controls, controls-redefine, cd, graphics,
 //! rampage, multiplayer, mpresults, highscore, replayinfo (with
@@ -194,7 +195,7 @@ impl Plugin for FrontendPlugin {
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             )
-            .add_systems(Update, (run, model::sync_model).chain())
+            .add_systems(Update, (run, model::sync_model).chain().in_set(FrontendRun))
             // The pause menu's FX option drives the lens flares (`--fx` wins).
             .add_systems(Update, |settings: Res<Settings>, mut mode: ResMut<crate::effects::FxMode>| {
                 if settings.is_changed() && crate::arg("--fx").is_none() && mode.0 != settings.fx {
@@ -204,7 +205,7 @@ impl Plugin for FrontendPlugin {
     }
 }
 
-fn setup(mut commands: Commands, data: Res<GameData>, mut fe: ResMut<Frontend>) {
+fn setup(mut commands: Commands, data: Res<GameData>) {
     commands.insert_resource(FrontendIcons::load(&data));
     commands.insert_resource(usermaps::UserMaps::scan(&data));
     // Phrases/Global.<language>.phrases, keeping the middle token.
@@ -221,11 +222,21 @@ fn setup(mut commands: Commands, data: Res<GameData>, mut fe: ResMut<Frontend>) 
         .unwrap_or_default();
     langs.sort_by_key(|l| l.to_lowercase());
     commands.insert_resource(Languages(langs));
-    // Same condition as the intro's start-up play.
-    let skip = ["--map", "--screenshot", "--no-intro"]
-        .iter()
-        .any(|a| std::env::args().any(|x| x == *a));
-    fe.wait_intro = !skip || std::env::args().any(|x| x == "--intro");
+}
+
+/// The menu loop (`run`); the start-up loader runs before it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FrontendRun;
+
+/// Start-up stage: the object textures of the menu models
+/// (`crate::startup`; the original's `FUN_000952c2`).
+pub fn preload_textures(world: &mut World) {
+    model::preload_library(world);
+}
+
+/// Start-up stage: the menu models (the original's `FUN_000d7874`).
+pub fn preload_models(world: &mut World) {
+    model::preload_models(world);
 }
 
 /// Keep the HUD and intro overlay on the game camera when the menu camera
@@ -238,7 +249,10 @@ fn default_ui_camera(mut commands: Commands, cams: Query<Entity, With<GameCamera
 
 fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
     Some(match name {
-        "main" => Box::new(menus::MainMenu::running()),
+        "main" => Box::new(match crate::arg("--menu-item").and_then(|v| v.parse().ok()) {
+            Some(i) => menus::MainMenu::at(i),
+            None => menus::MainMenu::running(),
+        }),
         "game" => Box::new(menus::GameMenu::new()),
         "levelselect" => Box::new(levels::LevelSelect::new(cx.profile)),
         "complete" => Box::new(levels::LevelComplete::new(cx.profile, 0, 0, 9)),
@@ -562,6 +576,7 @@ struct Env<'w, 's> {
     game_cam: Query<'w, 's, Entity, (With<IsDefaultUiCamera>, With<Camera3d>)>,
     current: ResMut<'w, model::CurrentModel>,
     level_load: Option<Res<'w, LevelLoad>>,
+    startup: Option<Res<'w, crate::startup::StartupLoad>>,
     pads: Query<'w, 's, (Entity, &'static Gamepad)>,
     user_maps: Res<'w, usermaps::UserMaps>,
     display: Res<'w, display::Display>,
@@ -577,7 +592,10 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     if env.intro_done.read().count() > 0 {
         fe.wait_intro = false;
     }
-    let intro_on = env.intro.is_some() || fe.wait_intro;
+    // Start-up loading (`crate::startup`): the Loading panel, then the
+    // intro; the menus start after CloseProgress.
+    let startup = env.startup.as_deref().map(|s| (s.pieces(), s.intro_playing()));
+    let intro_on = env.intro.is_some() || fe.wait_intro || startup.is_some_and(|s| s.1);
     let playing = *env.state.get() == AppState::Playing;
 
     // Esc (or a gamepad's Start) in a level opens the pause menu
@@ -626,7 +644,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         sfx: Vec::new(),
         requests: Vec::new(),
     };
-    if fe.needs_init && !playing {
+    if fe.needs_init && !playing && startup.is_none() {
         fe.needs_init = false;
         let result = env.result.as_deref().copied();
         if result.is_some() {
@@ -634,7 +652,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
         }
         init_stack(&mut fe, &mut cx, result);
     }
-    if fe.stack.is_empty() && fe.loading.is_none() {
+    if fe.stack.is_empty() && fe.loading.is_none() && startup.is_none() {
         env.typed.clear();
         return;
     }
@@ -650,7 +668,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
 
     // Ticks at 30 Hz of real time (virtual time is paused in the pause
     // menu).
-    if intro_on || fe.loading.is_some() {
+    if intro_on || fe.loading.is_some() || startup.is_some() {
         fe.acc = 0.0;
         pending = Input::default();
     } else {
@@ -779,7 +797,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
 
     // Loading panel: once it is up, the level loads one stage per frame
     // (`level::LevelLoad`) while the bar fills, then the game starts.
-    let mut pieces = 0;
+    let mut pieces = startup.map_or(0, |s| s.0);
     if let Some((launch, n)) = &mut fe.loading {
         *n += 1;
         if let Some(l) = env.level_load.as_deref().filter(|l| l.spec == launch.spec) {
@@ -824,7 +842,7 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
     layers.back_px.fill(0);
     layers.front_px.fill(0);
     let top = fe.stack.last();
-    let loading = fe.loading.is_some();
+    let loading = fe.loading.is_some() || startup.is_some();
     {
         let mut ui = Ui {
             back: Painter {

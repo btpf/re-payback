@@ -253,7 +253,7 @@ impl Plugin for AudioPlugin {
             .init_resource::<OtherListeners>()
             .init_resource::<FxVolume>()
             .init_resource::<Mixer>()
-            .add_systems(Startup, (load_sounds, start_mixer))
+            .add_systems(Startup, start_mixer)
             .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain());
     }
 }
@@ -282,7 +282,8 @@ pub fn wav_from_pcm8(samples: &[u8], rate: u32) -> Vec<u8> {
     w
 }
 
-fn load_sounds(mut commands: Commands, data: Res<GameData>) {
+/// Run by the start-up loader (`startup.rs`).
+pub(crate) fn load_sounds(mut commands: Commands, data: Res<GameData>) {
     let mut sounds = Sounds::default();
     for name in SOUND_FILES {
         let pcm = data

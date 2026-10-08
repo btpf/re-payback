@@ -36,6 +36,11 @@ impl MapVehicles {
                 .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
                 .ok_or(Error::Truncated("vehicles"))
         };
+        // A version other than 1 reads as no flags and no vehicles.
+        let version = at(0)?;
+        if version != 1 {
+            return Ok(Self { version, cities: [false; 3], parked: Vec::new() });
+        }
         let count = at(4)?;
         if !(0..=MAX as i32).contains(&count) {
             return Err(Error::Parse { what: "vehicles", detail: format!("count {count}") });
@@ -46,7 +51,8 @@ impl MapVehicles {
                 Ok(Parked { model: at(b)?, x: at(b + 1)?, y: at(b + 2)?, layer: at(b + 3)?, heading: at(b + 4)? })
             })
             .collect::<Result<_>>()?;
-        Ok(Self { version: at(0)?, cities: [at(1)? != 0, at(2)? != 0, at(3)? != 0], parked })
+        // Each flag is set only by the value 1.
+        Ok(Self { version, cities: [at(1)? == 1, at(2)? == 1, at(3)? == 1], parked })
     }
 }
 
@@ -62,5 +68,10 @@ mod tests {
         assert_eq!(v.cities, [false, true, false]);
         assert_eq!(v.parked, vec![Parked { model: 17, x: 145600, y: 118208, layer: 0, heading: 3690 }]);
         assert!(MapVehicles::parse(&bytes[..30]).is_err());
+        let mut v2 = words;
+        v2[0] = 2;
+        let bytes: Vec<u8> = v2.iter().flat_map(|w: &i32| w.to_be_bytes()).collect();
+        let v = MapVehicles::parse(&bytes).unwrap();
+        assert_eq!((v.cities, v.parked.len()), ([false; 3], 0));
     }
 }

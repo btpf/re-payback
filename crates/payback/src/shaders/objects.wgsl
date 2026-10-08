@@ -4,7 +4,8 @@
 // an ordinary face. Kinds:
 //   1  mode 0x32: the slot texture at u = 127 + 127·nx, v = 63 + 63·ny
 //      (per-vertex normal, world space; y = south = render +z)
-//   2  mode 0x12/0x14: the slot texture at screen-space coordinates
+//   2  mode 0x12/0x14: the slot texture at screen-space coordinates (0x14
+//      through objects.rs's `half` material: 50 % blend, hardware ONE/ONE)
 //      u = 88 + 80·sx + 127·nx, v = 52 + 32·sy + 63·ny (face normal; sx, sy
 //      = vertex position across the screen, 0..1)
 //   3  mode 0x31: file-UV texture, then CloudsReflect at the kind-1

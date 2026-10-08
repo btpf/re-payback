@@ -198,7 +198,6 @@ impl Plugin for PostFxPlugin {
                 ExtractComponentPlugin::<PostFx>::default(),
                 ExtractResourcePlugin::<PaletteTextures>::default(),
             ))
-            .add_systems(Startup, build_tables)
             .add_systems(PreUpdate, blur_settings)
             .add_systems(PostUpdate, update_views);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -227,7 +226,8 @@ fn blur_settings(
     }
 }
 
-fn build_tables(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
+/// Run by the start-up loader (`startup.rs`).
+pub(crate) fn build_tables(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
     let start = std::time::Instant::now();
     let lut = nearest_lut(&data.palette);
     debug!("palette LUT in {:?}", start.elapsed());

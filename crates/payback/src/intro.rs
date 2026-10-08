@@ -1,7 +1,8 @@
 //! Intro video player (`Videos/intro.video` + `intro.audio`; 68k
 //! `FUN_00010364` load, `FUN_000106c0` play; docs/re/frontend_audio.md §5).
 //!
-//! The 68k build plays it once at start-up (`FUN_000ec686`) and from the
+//! The 68k build plays it once at the end of start-up loading
+//! (`FUN_000ec686`, call at 0xeda52; requested by `startup.rs`) and from the
 //! main menu's "View intro". 15 frames per second, locked to 1470-byte
 //! chunks of 22050 Hz signed 8-bit audio; any key or button skips.
 
@@ -54,19 +55,7 @@ impl Plugin for IntroPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PlayIntro>()
             .add_message::<IntroFinished>()
-            .add_systems(Startup, play_at_startup)
             .add_systems(Update, (start, advance).chain());
-    }
-}
-
-/// Start-up intro when booting into the menus (not with `--map`,
-/// `--screenshot` or `--no-intro`).
-fn play_at_startup(mut play: MessageWriter<PlayIntro>) {
-    let skip = ["--map", "--screenshot", "--no-intro"]
-        .iter()
-        .any(|a| std::env::args().any(|x| x == *a));
-    if !skip || std::env::args().any(|x| x == "--intro") {
-        play.write(PlayIntro);
     }
 }
 

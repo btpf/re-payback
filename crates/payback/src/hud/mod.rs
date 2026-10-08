@@ -104,15 +104,15 @@ pub struct Dialog {
     wait: i32,
     scroll: i32,
     typing_sound: Option<Entity>,
-    pub last: Vec<Entry2>,
+    /// The last message's entries, for the repeat-message key
+    /// (`DAT_0117c280`, count `DAT_011746a8`): every enqueue also appends
+    /// here, and an Open starts the list afresh.
+    last: Vec<Entry>,
 }
 
-/// Copy of the last message, for "repeat last message".
-#[derive(Clone, Debug)]
-pub struct Entry2 {
-    pub text: String,
-    pub voice: Voice,
-}
+/// Entries in the message queue and in the last-message list
+/// (`DAT_0117bc40` / `DAT_0117c280`, 100 each).
+const QUEUE_MAX: usize = 100;
 
 impl Default for Voice {
     fn default() -> Self {
@@ -121,20 +121,62 @@ impl Default for Voice {
 }
 
 impl Dialog {
+    /// Enqueue an entry and copy it to the last-message list
+    /// ("LastMessageEnqueue": OS4 `FUN_01015d7c` Open, which restarts the
+    /// list, `FUN_01015e18` text, `FUN_01015f68` Close, `FUN_01015b2c` any).
+    /// Both lists hold 100 entries: a full queue drops the entry ("Enqueue():
+    /// Too many entries in list..."), a full last-message list overwrites its
+    /// final entry.
+    fn enqueue(&mut self, entry: Entry) {
+        if self.queue.len() >= QUEUE_MAX {
+            warn!("Enqueue(): Too many entries in list...");
+            return;
+        }
+        if matches!(entry, Entry::Open(_)) {
+            self.last.clear();
+        } else if self.last.len() >= QUEUE_MAX {
+            warn!("LastMessageEnqueue(): Too many entries in list...");
+            self.last.pop();
+        }
+        self.last.push(entry.clone());
+        self.queue.push_back(entry);
+    }
+
     pub fn begin(&mut self, speaker: Speaker) {
-        self.queue.push_back(Entry::Open(speaker));
+        self.enqueue(Entry::Open(speaker));
     }
 
     pub fn say(&mut self, text: impl Into<String>, voice: Voice) {
-        self.queue.push_back(Entry::Text(text.into(), voice));
+        self.enqueue(Entry::Text(text.into(), voice));
     }
 
     pub fn end(&mut self) {
-        self.queue.push_back(Entry::Close);
+        self.enqueue(Entry::Close);
     }
 
-    pub fn busy(&self) -> bool {
-        !self.queue.is_empty() || !self.pending.is_empty() || self.open.is_some()
+    /// The repeat-message key (control 10, phrase 2467): queue the last
+    /// message's entries again (OS4 `FUN_01015a10`, called by the keyboard
+    /// reader `FUN_0103f3d0` when the bound key is released, raw code
+    /// `| 0x80`, and by the pad reader `FUN_0103da68` when the bound button
+    /// goes down, `FUN_0103d9a0(.., 10, ..)`). The list itself is unchanged;
+    /// entries that do not fit in the queue are dropped.
+    pub fn repeat(&mut self) {
+        for entry in &self.last {
+            if self.queue.len() >= QUEUE_MAX {
+                warn!("Enqueue(): Too many entries in list...");
+                continue;
+            }
+            self.queue.push_back(entry.clone());
+        }
+    }
+
+    /// `Dialog_Flush` (68k `FUN_00035f76`, OS4 `FUN_01015ce4`): drop the
+    /// queued entries from the first queued Open on; what is already shown
+    /// and the last-message list stay.
+    pub fn flush(&mut self) {
+        if let Some(i) = self.queue.iter().position(|e| matches!(e, Entry::Open(_))) {
+            self.queue.truncate(i);
+        }
     }
 }
 
@@ -460,10 +502,6 @@ fn tick_dialog(mut commands: Commands, mut d: ResMut<Dialog>) {
                 d.anim = 0;
             }
             d.voice = voice;
-            d.last = vec![Entry2 {
-                text: text.clone(),
-                voice,
-            }];
             d.pending = text.split_whitespace().map(str::to_string).collect();
             // SqueakyVoice loops while the text types out.
             let e = commands
@@ -835,5 +873,59 @@ impl Views<'_> {
             let y = ((t.y * 16) >> 12) * vh / CANVAS_H as i32 - 11;
             p.text(&icons.big, &text, x, y, pitch, Blend::Lighten);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(d: &Dialog) -> Vec<String> {
+        d.queue
+            .iter()
+            .map(|e| match e {
+                Entry::Open(s) => format!("open {s:?}"),
+                Entry::Text(t, _) => t.clone(),
+                Entry::Close => "close".into(),
+            })
+            .collect()
+    }
+
+    /// The repeat key re-queues the last message from its Open on
+    /// (`FUN_01015a10`); a new Open restarts the list.
+    #[test]
+    fn repeat_last_message() {
+        let mut d = Dialog::default();
+        d.begin(Speaker::Phone);
+        d.say("one", Voice::Them);
+        d.end();
+        d.begin(Speaker::Mobile);
+        d.say("two", Voice::You);
+        d.say("three", Voice::Them);
+        d.end();
+        d.queue.clear();
+        d.repeat();
+        assert_eq!(texts(&d), ["open Mobile", "two", "three", "close"]);
+        d.repeat();
+        assert_eq!(texts(&d).len(), 8);
+        // Text without an Open joins the current list.
+        d.queue.clear();
+        d.say("four", Voice::Them);
+        d.queue.clear();
+        d.repeat();
+        assert_eq!(texts(&d), ["open Mobile", "two", "three", "close", "four"]);
+    }
+
+    /// `Dialog_Flush` drops the queue from the first queued Open on.
+    #[test]
+    fn flush_from_first_open() {
+        let mut d = Dialog::default();
+        d.say("left", Voice::Them);
+        d.end();
+        d.begin(Speaker::Phone);
+        d.say("dropped", Voice::Them);
+        d.flush();
+        assert_eq!(texts(&d), ["left", "close"]);
+        assert_eq!(d.last.len(), 2);
     }
 }

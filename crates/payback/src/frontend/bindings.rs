@@ -48,6 +48,7 @@ pub const IN_OUT: usize = 6;
 pub const BRAKE: usize = 7;
 pub const NEXT_WEAPON: usize = 8;
 pub const PREV_WEAPON: usize = 9;
+pub const REPEAT_MESSAGE: usize = 10;
 
 pub type KeyTable = [Option<KeyCode>; 11];
 pub type PadTable = [Option<GamepadButton>; 11];
@@ -67,7 +68,8 @@ const SP_KEYS: KeyTable = [
     Some(KeyCode::ShiftLeft),
     None,
     None,
-    None,
+    // Repeat message: M, the original's default (raw key 0x37).
+    Some(KeyCode::KeyM),
 ];
 
 /// A gamepad: up/down/left/right also come from the stick and d-pad.

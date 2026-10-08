@@ -113,6 +113,16 @@ impl MainMenu {
         }
     }
 
+    /// Debug (`--frontend-screen main --menu-item <n>`): on item `n`.
+    pub fn at(i: usize) -> MainMenu {
+        let sel = i.min(MAIN_MODELS.len() - 1);
+        MainMenu {
+            sel,
+            obj: OptionObj::new(MAIN_MODELS[sel], 600, 6000),
+            ..MainMenu::running()
+        }
+    }
+
     fn phrase(i: usize) -> u32 {
         match i {
             5 => 2454,

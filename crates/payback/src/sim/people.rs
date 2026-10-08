@@ -351,6 +351,7 @@ fn read_keyboard(
     pads: Query<(Entity, &Gamepad)>,
     player: Query<(&Obj, &crate::sim::combat::Arsenal), With<crate::camera::CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
+    mut dialog: ResMut<crate::hud::Dialog>,
 ) {
     use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
     // Multiplayer devices are read by `multiplayer::read_devices`.
@@ -379,6 +380,13 @@ fn read_keyboard(
     input.brake = held(b::BRAKE);
     if just(b::IN_OUT) {
         input.use_pressed = true;
+    }
+    // Repeat the last message (`FUN_01015a10`): on the key's release
+    // (`FUN_0103f3d0`), on the button's press (`FUN_0103da68`). Only the
+    // message box changes, so replays are unaffected.
+    let released = k[b::REPEAT_MESSAGE].is_some_and(|key| keys.any_just_released(b::key_variants(key)));
+    if released || pad.is_some_and(|g| pad_just(g, p[b::REPEAT_MESSAGE])) {
+        dialog.repeat();
     }
     let digits = [
         KeyCode::Digit0,

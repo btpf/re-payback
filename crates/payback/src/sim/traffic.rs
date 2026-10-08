@@ -104,29 +104,59 @@ fn centre(sq: IVec2) -> IVec2 {
     IVec2::new((sq.x << 11) | 0x400, (sq.y << 11) | 0x400)
 }
 
-/// Pick a vehicle type for traffic (up to 20 tries; police more likely at
-/// wanted >= 4; forced type from scripts).
+/// Which home cities' traffic models (`+0x48d4` 0/1/2) a user map allows:
+/// the three booleans of its `.vehicles` file (OS4 `FUN_0106dbbc`; read
+/// through `FUN_0106d958/64/70`). No file, or a version other than 1,
+/// allows none.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrafficCities(pub [bool; 3]);
+
+/// Pick a vehicle type for traffic (OS4 `FUN_01047af4` ~37770, 68k
+/// `FUN_000cf5cc`): a script-forced type (`DAT_0011a734`) unless one is
+/// already out; otherwise draw a model (the police car with chance
+/// `1/(10 − wanted)` at wanted >= 4, not in multiplayer; else `random(28)`)
+/// and keep it if `random(256) < weight` (`+0x4934`) and its home city
+/// (`+0x48d4`) is -1, the current city (cities 0..2), or, on a user map
+/// (city >= 3), one the map's `.vehicles` allows. A draw failing the weight
+/// test after the 20th gives up; one passing the weight but not the city
+/// test does not count against that, and an accepted draw after the 19th
+/// is discarded too.
 fn pick_type(
     rng: &mut Rng,
     wanted: i32,
+    multiplayer: bool,
     city: i32,
+    allowed: TrafficCities,
     forced: i32,
     existing: &[usize],
 ) -> Option<usize> {
     if forced >= 0 && !existing.contains(&(forced as usize)) {
         return Some(forced as usize);
     }
-    for _ in 0..20 {
-        if wanted >= 4 && rng.rand(10 - wanted.min(9)) == 0 {
-            return Some(vk::POLICE);
-        }
-        let t = rng.rand(28) as usize;
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let t = if !multiplayer && wanted >= 4 && rng.rand(10 - wanted.min(9)) == 0 {
+            vk::POLICE
+        } else {
+            rng.rand(28) as usize
+        };
         let ty = &TYPES[t];
-        if rng.rand(256) < ty.weight && (ty.city == -1 || ty.city == city) {
-            return Some(t);
+        if rng.rand(256) < ty.weight {
+            let home = ty.city;
+            let ok = home == -1
+                || if city <= 2 {
+                    home == city
+                } else {
+                    (0..3).contains(&home) && allowed.0[home as usize]
+                };
+            if ok {
+                return (tries < 20).then_some(t);
+            }
+        } else if tries > 19 {
+            return None;
         }
     }
-    None
 }
 
 /// Spawn traffic on lane squares at the edge of the view window.
@@ -165,7 +195,10 @@ fn spawn_traffic(world: &mut World) {
         .map(|v| v.kind)
         .collect();
     let forced = world.resource::<MissionState>().forced_traffic;
-    let city_no: i32 = world.resource::<LevelSpec>().map.parse().unwrap_or(-1);
+    // `DAT_0114c694`: 0..2, or 3 and up for a user map.
+    let city_no: i32 = world.resource::<LevelSpec>().city().map_or(3, i32::from);
+    let allowed = world.get_resource::<TrafficCities>().copied().unwrap_or_default();
+    let multiplayer = world.resource::<crate::level::GameMode>().is_multiplayer();
     let aggr = world.get_resource::<Aggressiveness>().map_or(2, |a| a.0);
     let c = cam.square();
     let h = cam.window();
@@ -200,6 +233,9 @@ fn spawn_traffic(world: &mut World) {
                 continue;
             }
             for level in 0..3 {
+                // Square test (68k `FUN_000cf5cc`, OS4 `FUN_01047af4`): a
+                // slope (cube `+8` != 0) whose top face type (`+9`) is
+                // neither Off nor Reflect.
                 let cube = &city.map.square(sq.x as usize, sq.y as usize).cubes[level];
                 let top = cube.faces[map::TOP];
                 if cube.slope == Slope::Off || !top.visible() || top.kind == map::FaceType::Reflect
@@ -219,7 +255,9 @@ fn spawn_traffic(world: &mut World) {
                     continue;
                 }
                 let (_, dx, dy, heading, dir) = exits[rng.rand(exits.len() as i32) as usize];
-                let Some(kind) = pick_type(&mut rng, wanted, city_no, forced, &existing) else {
+                let Some(kind) =
+                    pick_type(&mut rng, wanted, multiplayer, city_no, allowed, forced, &existing)
+                else {
                     continue;
                 };
                 let top_h = city.square_cubes(sq.x as usize, sq.y as usize)[level].top_at(0.5, 0.5);
@@ -432,5 +470,44 @@ fn drive_traffic(
         } else {
             0
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rng() -> Rng {
+        let mut s: u32 = 0x1234_5678;
+        let table = (0..65536)
+            .map(|_| {
+                s = s.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                ((s >> 16) & 0x7fff) as i32 >> 6
+            })
+            .collect();
+        Rng { table, idx: 0 }
+    }
+
+    /// Home-city models (ice-cream van 0, police van 1, truck 2) on a user
+    /// map only with the `.vehicles` flag; on a built-in city only at home.
+    #[test]
+    fn user_map_city_flags() {
+        let homes = |city: i32, allowed: [bool; 3]| {
+            let mut r = rng();
+            let mut seen = [false; 3];
+            for _ in 0..20000 {
+                if let Some(t) = pick_type(&mut r, 0, false, city, TrafficCities(allowed), -1, &[]) {
+                    if let Ok(h) = usize::try_from(TYPES[t].city) {
+                        seen[h] = true;
+                    }
+                }
+            }
+            seen
+        };
+        assert_eq!(homes(3, [false; 3]), [false; 3]);
+        assert_eq!(homes(3, [true, false, true]), [true, false, true]);
+        assert_eq!(homes(3, [false, true, false]), [false, true, false]);
+        assert_eq!(homes(1, [false; 3]), [false, true, false]);
+        assert_eq!(homes(0, [false, true, true]), [true, false, false]);
     }
 }

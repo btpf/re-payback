@@ -36,6 +36,7 @@ mod rampage;
 mod render_mode;
 mod replay;
 mod sim;
+mod startup;
 mod vehicles;
 mod water;
 mod weather;
@@ -89,7 +90,7 @@ fn main() -> AppExit {
             hud::HudPlugin,
             frontend::FrontendPlugin,
             mission::MissionPlugin,
-            intro::IntroPlugin,
+            (intro::IntroPlugin, startup::StartupPlugin),
             (parked::ParkedPlugin, window_icon::WindowIconPlugin, render_mode::RenderModePlugin),
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
             autoplay::AutoplayPlugin,

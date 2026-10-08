@@ -553,7 +553,6 @@ impl Plugin for EffectsPlugin {
             .init_resource::<FxMode>()
             .init_resource::<ScreenFlash>()
             .init_resource::<Flares>()
-            .add_systems(Startup, setup)
             .add_systems(FixedPreUpdate, update_effects)
             .add_systems(
                 OnExit(crate::level::AppState::Playing),
@@ -978,6 +977,14 @@ struct Atlases {
 /// Linear RGB of the rain colour.
 #[derive(Resource)]
 struct RainColour([f32; 4]);
+
+/// Start-up stage (`startup.rs`): the effect textures and batches.
+pub fn load(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    if let Err(e) = world.run_system_once(setup) {
+        error!("effects: {e}");
+    }
+}
 
 fn setup(
     mut commands: Commands,

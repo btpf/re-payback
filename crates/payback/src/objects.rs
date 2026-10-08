@@ -13,7 +13,9 @@
 //! `General/64->256.dat`), 2 textured, 3 texel 0 transparent, 4
 //! translucent, 5 line, 6 lens flare (slot 0 only, drawn even when the
 //! slot is inactive, `param` = Alpha.256 table). Here the active slot is
-//! drawn double-sided; faces with no active slot are degenerate.
+//! drawn double-sided; faces with no active slot are degenerate. Shine
+//! mode 0x14 (`CD.obj`) is averaged with the background (Alpha.256 table
+//! 4) in software and added in hardware.
 //!
 //! Also: traffic lights, crossing beacons and alarm boxes that change model
 //! with the light phase, spinning pickups, chimney smoke, lens-flare sources
@@ -190,6 +192,11 @@ pub struct ObjectLibrary {
     /// Mode 4 faces: drawn through Alpha.256 table 0 (`FUN_011113e0` with
     /// the table pointer `DAT_0114c908`), i.e. additive.
     additive: Handle<ObjectMaterial>,
+    /// Mode 0x14 faces (`CD.obj`): the environment-mapped slot texture
+    /// through Alpha.256 table 4, the 50 % average (`FUN_010c101c` sets
+    /// `+0xff4 = DAT_0114c908 + 0x40000` before `FUN_011113e0`); Warp3D
+    /// adds them ONE/ONE (rendering.md §11.6). See [`half_material`].
+    half: Handle<ObjectMaterial>,
     /// Night map: vehicles get the `Lights` headlight polygon.
     night: bool,
     /// The atlas holds the hardware conversion of the textures.
@@ -205,6 +212,7 @@ pub struct ObjectLibrary {
 #[derive(Clone, Default)]
 struct Overlay {
     additive: Option<Handle<Mesh>>,
+    half: Option<Handle<Mesh>>,
     lines: Option<Handle<Mesh>>,
 }
 
@@ -241,7 +249,16 @@ impl Tris {
 struct Parts {
     main: Mesh,
     additive: Option<Mesh>,
+    half: Option<Mesh>,
     lines: Option<Mesh>,
+}
+
+/// The mode-0x14 material's blend: software averages (Alpha.256 table 4,
+/// as alpha 0.5), hardware adds ONE/ONE.
+fn half_material(m: &mut ObjectMaterial, hardware: bool) {
+    let a = if hardware { 1.0 } else { 0.5 };
+    m.base.base_color = Color::srgba(1.0, 1.0, 1.0, a);
+    m.base.alpha_mode = if hardware { AlphaMode::Add } else { AlphaMode::Blend };
 }
 
 /// The object texture atlas (`ObjectTextures/*`, 256x128 each, file-name
@@ -378,9 +395,12 @@ fn sync_mode(
     library.hardware = hardware;
     let (atlas, _) = build_atlas(&data, library.night, hardware);
     let flag = if hardware { 1.0 } else { 0.0 };
-    for handle in [library.material.clone(), library.additive.clone()] {
+    for handle in [library.material.clone(), library.additive.clone(), library.half.clone()] {
         let Some(mut m) = materials.get_mut(&handle) else { continue };
         m.extension.params.x = flag;
+        if handle == library.half {
+            half_material(&mut *m, hardware);
+        }
         if let Some(image) = m.base.base_color_texture.clone()
             && let Some(mut slot) = images.get_mut(&image)
         {
@@ -434,15 +454,19 @@ impl ObjectLibrary {
         let additive = materials.add(ExtendedMaterial {
             base: StandardMaterial {
                 alpha_mode: AlphaMode::Add,
-                ..base
+                ..base.clone()
             },
-            extension,
+            extension: extension.clone(),
         });
+        let mut half = ExtendedMaterial { base, extension };
+        half_material(&mut half, hardware);
+        let half = materials.add(half);
         ObjectLibrary {
             slots,
             flat_colours,
             material,
             additive,
+            half,
             night,
             hardware,
             overlays: HashMap::new(),
@@ -569,6 +593,27 @@ impl ObjectLibrary {
         self.build_mesh_skin(obj, Skin::Normal, None, |v, _| place(v))
     }
 
+    /// A menu model (`frontend::model`): the main mesh and the blended
+    /// parts (additive, mode 0x14, lines) with their materials. The front
+    /// end draws objects with `FUN_010c101c(obj, 0, 0, 0, 0x65)`, so mode 4
+    /// is additive there too (table 0).
+    pub fn menu_parts(
+        &self,
+        obj: &Obj,
+        place: impl Fn(&Vertex) -> [f32; 3],
+    ) -> (Mesh, Vec<(Mesh, Handle<ObjectMaterial>)>) {
+        let parts = self.build_parts_with(obj, Skin::Normal, None, None, |v, _| place(v));
+        let overlays = [
+            (parts.additive, &self.additive),
+            (parts.half, &self.half),
+            (parts.lines, &self.material),
+        ]
+        .into_iter()
+        .filter_map(|(m, mat)| m.map(|m| (m, mat.clone())))
+        .collect();
+        (parts.main, overlays)
+    }
+
     /// Atlas UV of texel (u, v in file units) in slot `t`, from the keyed
     /// (colour 0 transparent) or the opaque half.
     fn atlas_uv(t: u32, u: i32, v: i32, keyed: bool) -> [f32; 2] {
@@ -598,9 +643,10 @@ impl ObjectLibrary {
         let h = meshes.add(parts.main);
         let overlay = Overlay {
             additive: parts.additive.map(|m| meshes.add(m)),
+            half: parts.half.map(|m| meshes.add(m)),
             lines: parts.lines.map(|m| meshes.add(m)),
         };
-        if overlay.additive.is_some() || overlay.lines.is_some() {
+        if overlay.additive.is_some() || overlay.half.is_some() || overlay.lines.is_some() {
             self.overlays.insert(h.id(), overlay);
         }
         h
@@ -633,6 +679,7 @@ impl ObjectLibrary {
     ) -> Parts {
         let mut main = Tris::default();
         let mut add = Tris::default();
+        let mut halves = Tris::default();
         let mut lines = Tris::default();
         let burnt = self.slots.get("burnt").copied();
         let reflect = self.slots.get("cloudsreflect").copied();
@@ -688,6 +735,10 @@ impl ObjectLibrary {
             let out = if additive && slot.mode & 0x10 == 0 && skin == Skin::Normal {
                 main.degenerate(p0());
                 &mut add
+            } else if slot.mode == 0x14 && skin == Skin::Normal {
+                // Shine mode 4 (`uVar50 == 4` in `FUN_010c101c`): table 4.
+                main.degenerate(p0());
+                &mut halves
             } else {
                 &mut main
             };
@@ -755,6 +806,7 @@ impl ObjectLibrary {
         Parts {
             main: main.mesh(PrimitiveTopology::TriangleList),
             additive: nonempty(add, PrimitiveTopology::TriangleList),
+            half: nonempty(halves, PrimitiveTopology::TriangleList),
             lines: nonempty(lines, PrimitiveTopology::LineList),
         }
     }
@@ -829,6 +881,7 @@ fn sync_overlays(
         let mut children = Vec::new();
         for (part, material) in [
             (&overlay.additive, &library.additive),
+            (&overlay.half, &library.half),
             (&overlay.lines, &library.material),
         ] {
             if let Some(part) = part {
