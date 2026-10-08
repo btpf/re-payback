@@ -199,6 +199,72 @@ pub struct Settings {
     pub mp_devices: [crate::multiplayer::Device; 4],
     /// Multiplayer required kills 1..50 (`DAT_0114c2e8`, config field 10).
     pub required_kills: u8,
+    /// Mac-or-Amiga content variants (decisions in `docs/re/mac_version.md`).
+    pub variants: Variants,
+    /// Hi-res HUD at >= 640x400 (both builds switch at W > 639 && H > 399);
+    /// false = always the lo-res 320x256 layout.
+    pub hires_hud: bool,
+    /// Fixed original framing (HFOV ~64 deg, the 320x256 look on 4:3);
+    /// false = widen with the window aspect.
+    pub original_aspect: bool,
+}
+
+/// Mac-or-Amiga content choices (true = Mac; a Mac choice only applies when
+/// the Mac data is present). Render and audio only, except
+/// `random_missions`, which changes the simulation and is recorded in replays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Variants {
+    /// Mac cube textures; false = the "Amiga look".
+    pub textures: bool,
+    /// Mac `Blood` day and night; false = Amiga `Blood` + `Blood.dark` at night.
+    pub blood: bool,
+    /// Mac menu props (PC, gamepad, floppy, remodelled cup/world/CD).
+    pub menu_props: bool,
+    /// Mac title screens.
+    pub title: bool,
+    /// Mac MPEG intro film; false = the Amiga FLC.
+    pub intro: bool,
+    /// Mac scenery heights (shorter phones, traffic lights, tree crowns).
+    pub scenery: bool,
+    /// German: `EffectTextures/Gas` in the blood slot (Mac `DoSetLanguage`).
+    pub gas: bool,
+    /// Mac one-shot cut-off at ~65 % of the sample (slot clock).
+    pub oneshot_cut: bool,
+    /// Random phone missions in Rampage (Mac `ProcessTrigger_Random`).
+    pub random_missions: bool,
+}
+
+impl Default for Variants {
+    fn default() -> Self {
+        Variants {
+            textures: true,
+            blood: true,
+            menu_props: true,
+            title: true,
+            intro: true,
+            scenery: true,
+            gas: false,
+            oneshot_cut: false,
+            random_missions: true,
+        }
+    }
+}
+
+impl Variants {
+    /// (config key, field) pairs, for load and save.
+    fn fields(&mut self) -> [(&'static str, &mut bool); 9] {
+        [
+            ("mac.textures", &mut self.textures),
+            ("mac.blood", &mut self.blood),
+            ("mac.menu_props", &mut self.menu_props),
+            ("mac.title", &mut self.title),
+            ("mac.intro", &mut self.intro),
+            ("mac.scenery", &mut self.scenery),
+            ("gas", &mut self.gas),
+            ("oneshot_cut", &mut self.oneshot_cut),
+            ("random_missions", &mut self.random_missions),
+        ]
+    }
 }
 
 impl Default for Settings {
@@ -222,6 +288,9 @@ impl Default for Settings {
                 [Device::Keyboard(0), Device::Keyboard(1), Device::Off, Device::Off]
             },
             required_kills: 5,
+            variants: default(),
+            hires_hud: true,
+            original_aspect: true,
         }
     }
 }
@@ -261,7 +330,13 @@ impl Settings {
                 // >= 3: a user map (checked against the list when used).
                 "city" => s.rampage_city = num(u8::MAX).unwrap_or(s.rampage_city),
                 "required_kills" => s.required_kills = num(50).unwrap_or(s.required_kills).max(1),
+                "hires_hud" => s.hires_hud = v == "1",
+                "original_aspect" => s.original_aspect = v == "1",
                 _ => {
+                    if let Some((_, f)) = s.variants.fields().into_iter().find(|(n, _)| *n == k) {
+                        *f = v == "1";
+                        continue;
+                    }
                     if let Some(p) = k.strip_prefix("mp.player").and_then(|p| p.parse::<usize>().ok()) {
                         if let (Some(slot), Some(d)) =
                             (s.mp_devices.get_mut(p.wrapping_sub(1)), crate::multiplayer::Device::parse(v))
@@ -305,6 +380,11 @@ impl Settings {
         t += &format!("police = {}\n", self.police);
         t += &format!("city = {}\n", self.rampage_city);
         t += &format!("required_kills = {}\n", self.required_kills);
+        t += &format!("hires_hud = {}\n", b(self.hires_hud));
+        t += &format!("original_aspect = {}\n", b(self.original_aspect));
+        for (k, v) in self.variants.clone().fields() {
+            t += &format!("{k} = {}\n", b(*v));
+        }
         for (i, d) in self.mp_devices.iter().enumerate() {
             t += &format!("mp.player{} = {}\n", i + 1, d.name());
         }
