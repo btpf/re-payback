@@ -341,12 +341,11 @@ pub fn resolve_walls_glass(
     resolve(city, pos, prev, r, Some(glass))
 }
 
-/// The port's simplified vehicle box (`CheckForCubeCollision` vehicle
-/// branch tests 8 box edges plus the centre path): a cross of half-size
-/// `r` against the walls of the neighbouring squares (reference square =
-/// the centre's), then the path from the previous position (reference =
-/// the previous square). A blocked axis goes back to the previous
-/// position. Probes off the map count as a wall hit, as on the Mac
+/// A point object (projectiles, `r` = 0) or a cross of half-size `r`
+/// against the walls of the neighbouring squares (reference square = the
+/// centre's), then the path from the previous position (reference = the
+/// previous square). A blocked axis goes back to the previous position.
+/// (Vehicles use the box test, [`vehicle_walls`].) Probes off the map count as a wall hit, as on the Mac
 /// (`CheckForCubeCollision` @ 100af980 clamps the 3×3 points and flags
 /// them; 68k `FUN_00044f82` / OS4 `FUN_01070868` flag the edge only on the
 /// earlier sub-steps, so there a car could leave the map).
@@ -427,6 +426,117 @@ fn resolve(
     p.x = p.x.clamp(0, WORLD_MAX);
     p.y = p.y.clamp(0, WORLD_MAX);
     (p, hit)
+}
+
+/// The 3×3 box points of a vehicle (vehicle branch of
+/// `CheckForCubeCollision` @ 100af980, last sub-step; OS4 `FUN_01070868`,
+/// 68k `FUN_00044f82`).
+#[derive(Clone, Copy, Debug)]
+pub struct BoxPoints {
+    /// Index `lat·3 + long`: across −half-width, 0, +half-width; along
+    /// −rear, 0, front. x, y in world units, clamped to the map; z is the
+    /// probe h-depth: `(z >> 4) − 0x40`, raised (never lowered) by the
+    /// point's height offset from the roll and pitch, `>> 10`.
+    pub pts: [IVec3; 9],
+    /// The box-centre square: the mean of the 4 unclamped corners `>> 11`
+    /// (the reference square of the edge tests).
+    pub centre: IVec2,
+    /// Points clamped at the map edge, as a hit (+1: off the − side).
+    pub edge: IVec2,
+}
+
+/// Build the box points of a vehicle at `pos` (Mac `CheckForCubeCollision`
+/// @ 100af980 vehicle branch): across `w` ∈ (−hw, 0, hw), along
+/// `l` ∈ (−rear, 0, front); `lat = cos(roll)·w`, `up = −sin(roll)·w`,
+/// `fwd = cos(pitch)·l − up·sin(pitch)`, `dz = up·cos(pitch) + sin(pitch)·l`,
+/// then rotated by the heading.
+#[allow(clippy::too_many_arguments)]
+pub fn box_points(
+    trig: &Trig,
+    pos: IVec3,
+    roll: i32,
+    pitch: i32,
+    heading: i32,
+    hw: i32,
+    front: i32,
+    rear: i32,
+) -> BoxPoints {
+    let (sr, cr) = (trig.sin(roll), trig.cos(roll));
+    let (sp, cp) = (trig.sin(pitch), trig.cos(pitch));
+    let (sh, ch) = (trig.sin(heading), trig.cos(heading));
+    let zh = (pos.z >> 4) - 0x40;
+    let mut out = BoxPoints {
+        pts: [IVec3::ZERO; 9],
+        centre: IVec2::ZERO,
+        edge: IVec2::ZERO,
+    };
+    let (mut sum_x, mut sum_y) = (0i64, 0i64);
+    for (i, w) in [-hw, 0, hw].into_iter().enumerate() {
+        let lat = cr * w >> 8;
+        let up = -(sr * w) >> 8;
+        for (j, l) in [-rear, 0, front].into_iter().enumerate() {
+            let fwd = cp * l - up * sp;
+            let dz = up * cp + sp * l;
+            let z = if dz >> 10 > 0 { zh } else { zh + (dz >> 10) };
+            let mut y = pos.y + (((fwd >> 8) * ch - lat * sh) >> 8);
+            let mut x = pos.x + ((lat * ch + (fwd >> 8) * sh) >> 8);
+            if i != 1 && j != 1 {
+                sum_x += x as i64;
+                sum_y += y as i64;
+            }
+            // The Mac flags a clamped point as a hit (the Amiga only on
+            // the earlier sub-steps; vehicles.md §2.7).
+            if x < 0 {
+                out.edge.x = 1;
+                x = 0;
+            }
+            if x > WORLD_MAX {
+                out.edge.x = -1;
+                x = WORLD_MAX;
+            }
+            if y < 0 {
+                out.edge.y = 1;
+                y = 0;
+            }
+            if y > WORLD_MAX {
+                out.edge.y = -1;
+                y = WORLD_MAX;
+            }
+            out.pts[i * 3 + j] = IVec3::new(x, y, z);
+        }
+    }
+    out.centre = IVec2::new((sum_x >> 13) as i32, (sum_y >> 13) as i32);
+    out
+}
+
+/// Vehicle wall test (Mac `CheckForCubeCollision` @ 100af980 vehicle
+/// branch; OS4 `FUN_01070868`, 68k `FUN_00044f82`): the map-edge flags,
+/// then the 4 box edges in both directions (rear 0↔6, front 2↔8, left
+/// 0↔2, right 6↔8) against the walls beyond the box-centre square, then
+/// the centre path from `clear` (the last position without a hit,
+/// `+0x8f0`) against the walls beyond its square, a later hit replacing an
+/// earlier one per axis (`MergeCollide` @ 100af7b0). The position is not
+/// changed: `BounceUnit` pushes the car off. Glass breaks into `glass`.
+pub fn vehicle_walls(
+    city: &City,
+    b: &BoxPoints,
+    pos: IVec3,
+    clear: IVec3,
+    glass: &mut Vec<Glass>,
+) -> Hit {
+    let mut g = Some(glass);
+    let mut s = b.edge;
+    for (i, j) in [(0, 6), (6, 0), (2, 8), (8, 2), (0, 2), (2, 0), (6, 8), (8, 6)] {
+        s = merge(s, collide_info(city, b.pts[i], b.pts[j], b.centre, &mut g));
+    }
+    let a = IVec3::new(pos.x, pos.y, (pos.z - 0x400) >> 4);
+    let c = IVec3::new(clear.x, clear.y, (clear.z - 0x400) >> 4);
+    s = merge(s, collide_info(city, a, c, square_of(clear), &mut g));
+    Hit {
+        x: s.x != 0,
+        y: s.y != 0,
+        side: s,
+    }
 }
 
 /// People's version (`CheckForCubeCollision` person branch, 68k
@@ -753,6 +863,44 @@ mod tests {
         );
         let (fz, level, _) = floor(&c, 5 * 2048 + 10, 0x400, GROUND_Z).unwrap();
         assert_eq!((fz, level), ((1500 - 304) * 16, 1));
+    }
+
+    #[test]
+    fn vehicle_box_meets_a_fence_diagonally() {
+        // A fence on the west edge of column 5: an empty level-1 cube with
+        // only its west face (type 2), as on map 0 (18..19, 61..63).
+        let c = city(|x, _| {
+            let mut sq = Square::default();
+            sq.cubes[0] = cube(256, FaceType::Normal);
+            if x == 5 {
+                let mut f = cube(256, FaceType::Off);
+                f.faces[map::WEST].kind = FaceType::Genlocked;
+                sq.cubes[1] = f;
+            }
+            sq
+        });
+        let trig = Trig::default();
+        let (hw, front, rear) = (300, 600, 600);
+        let y = 0x8000;
+        let at = |x: i32| IVec3::new(x, y, GROUND_Z);
+        // Heading 0x2d0 (45°, +x +y): the front +hw corner is 636 ahead in x.
+        let test = |x: i32| {
+            let b = box_points(&trig, at(x), 0, 0, 0x2d0, hw, front, rear);
+            vehicle_walls(&c, &b, at(x), at(x - 64), &mut Vec::new())
+        };
+        assert!(!test(5 * 2048 - 700).x);
+        let hit = test(5 * 2048 - 500);
+        assert!(hit.x);
+        assert_eq!(hit.side.x, -1);
+        // The old cross of half-size 256 let that corner through.
+        assert!(!resolve_walls(&c, at(5 * 2048 - 500), at(5 * 2048 - 564), 256).1.x);
+        // Box points are rotated by the heading: straight +x, the front is
+        // 600 ahead and the side points 300 across.
+        let b = box_points(&trig, at(1000), 0, 0, 0x5a0, hw, front, rear);
+        assert_eq!(b.pts[4].truncate(), IVec2::new(1000, y));
+        assert_eq!(b.pts[5].truncate(), IVec2::new(1000 + 600, y));
+        assert_eq!(b.pts[1].truncate(), IVec2::new(1000, y + 300));
+        assert_eq!(b.pts[4].z, (GROUND_Z >> 4) - 0x40);
     }
 
     #[test]

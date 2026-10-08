@@ -10,12 +10,15 @@
 //! grip; the remaining slip drives skid sounds and marks.
 
 use super::collide;
+use super::combat::{Arsenal, Pickup, PickupRespawns, break_crate_at};
 use super::people::PlayerInputs;
 use super::{Obj, Rng, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
+use crate::debris::Parts;
 use crate::effects::{Blend, Effects, Tex};
+use crate::hud::{Texts, labels::Labels};
 use crate::mapedit::MapEdit;
 use crate::mission::{Triggers, kind};
 use crate::objects::{ObjectLibrary, SetScenery};
@@ -47,6 +50,11 @@ pub struct Drive {
     /// left (−half-width), centre line, right; each rear, centre, front.
     /// Set by the collision step when nothing was hit.
     pub heights: [i32; 9],
+    /// The last position without a wall hit (`+0x8f0`, the start of the
+    /// centre-path test) and the position the driving step left the car
+    /// at; when something else has moved the car since, its position is
+    /// used instead.
+    pub clear: Option<(IVec3, IVec3)>,
     pub skid_sound: Option<Entity>,
     pub beep_sound: Option<Entity>,
     pub clonk: bool,
@@ -62,7 +70,14 @@ impl Plugin for DrivingPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (player_vehicle_stick, drive, vehicle_sounds)
+            (
+                player_vehicle_stick,
+                (drive_test_setup, drive_test_stick)
+                    .chain()
+                    .run_if(|| crate::arg("--drive-test").is_some()),
+                drive,
+                vehicle_sounds,
+            )
                 .chain()
                 .in_set(DrivingSet)
                 .after(super::people::PeopleSet)
@@ -102,6 +117,74 @@ fn player_vehicle_stick(
         };
         stick.brake = input.brake;
         stick.fire = input.fire;
+    }
+}
+
+/// `--drive-test x,y,heading[,kind[,steer[,ticks]]]` (world units, angle
+/// units): once the player is on foot, put them in a new vehicle of `kind`
+/// (default 0) there, on the ground, and hold the accelerator (and the
+/// steering, −1/0/1) for `ticks` (default: always), then brake to a stop. For checking wall, kerb and crate
+/// contacts.
+fn drive_test_setup(world: &mut World, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Some(spec) = crate::arg("--drive-test") else { return };
+    let v: Vec<i32> = spec.split(',').filter_map(|k| k.trim().parse().ok()).collect();
+    let (Some(&x), Some(&y), Some(&h)) = (v.first(), v.get(1), v.get(2)) else { return };
+    let player = world
+        .query_filtered::<(Entity, &Obj), (With<CameraTarget>, With<super::people::Person>)>()
+        .iter(world)
+        .next()
+        .map(|(e, o)| (e, o.player));
+    let Some((pe, pl)) = player else { return };
+    let Some(z) = world
+        .get_resource::<City>()
+        .and_then(|c| collide::floor(c, x, y, collide::PLANE * 16))
+        .map(|f| f.0)
+    else {
+        return;
+    };
+    *done = true;
+    let kind = v.get(3).copied().unwrap_or(0);
+    let Some(car) = crate::vehicles::spawn_vehicle_world(world, kind, IVec3::new(x, y, z), wrap(h), 1)
+    else {
+        return;
+    };
+    if let Some(mut o) = world.get_mut::<Obj>(car) {
+        o.state = State::Player;
+        o.player = Some(pl.unwrap_or(0));
+    }
+    world.entity_mut(car).insert((CameraTarget, Arsenal::default()));
+    world.entity_mut(pe).despawn();
+}
+
+fn drive_test_stick(
+    mut q: Query<(&Obj, &mut Stick), (With<CameraTarget>, With<Vehicle>)>,
+    mut ticks: Local<i32>,
+) {
+    let field = |n: usize| {
+        crate::arg("--drive-test").and_then(|s| s.split(',').nth(n).and_then(|k| k.trim().parse::<i32>().ok()))
+    };
+    let (steer, limit) = (field(4).unwrap_or(0), field(5).unwrap_or(i32::MAX));
+    for (o, mut stick) in &mut q {
+        if o.state == State::Player {
+            *ticks += 1;
+            let on = *ticks <= limit;
+            // Then brake (reverse throttle) to a stop.
+            stick.throttle = if on { -1 } else if o.speed > 0 { 1 } else { 0 };
+            stick.steer = if on { steer } else { 0 };
+            info!(
+                "drive-test: pos {} {} {} roll {} pitch {} heading {:#x} speed {}",
+                o.pos.x,
+                o.pos.y,
+                o.pos.z,
+                angle_signed(o.roll),
+                angle_signed(o.pitch),
+                o.heading,
+                o.speed
+            );
+        }
     }
 }
 
@@ -163,9 +246,13 @@ fn effective_reverse(t: &VehicleType, health: i32) -> i32 {
 fn drive(
     mut commands: Commands,
     data: Res<GameData>,
-    city: Option<Res<City>>,
+    city: Option<ResMut<City>>,
     trig: Res<Trig>,
     library: Option<Res<ObjectLibrary>>,
+    texts: Option<Res<Texts>>,
+    mut labels: ResMut<Labels>,
+    mut respawns: ResMut<PickupRespawns>,
+    mut debris: ResMut<Parts>,
     mut triggers: ResMut<Triggers>,
     mut edits: MessageWriter<MapEdit>,
     mut set_scenery: MessageWriter<SetScenery>,
@@ -178,15 +265,16 @@ fn drive(
         &mut Drive,
         &Stick,
         Has<CameraTarget>,
+        Option<&mut Arsenal>,
     )>,
 ) {
-    let (Some(city), Some(library)) = (city, library) else { return };
+    let (Some(mut city), Some(library)) = (city, library) else { return };
     let mut glass = Vec::new();
     // Snowmen knocked down this tick (the original clears the cell at
     // once, so later circles and vehicles no longer meet it).
     let mut snowmen: Vec<(usize, usize, usize)> = Vec::new();
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
-        let Ok((e, mut obj, veh, mut d, stick, is_player)) = q.get_mut(e__) else { continue };
+        let Ok((e, mut obj, veh, mut d, stick, is_player, mut ars)) = q.get_mut(e__) else { continue };
         let t = &TYPES[veh.kind];
         let info = &library.model(obj.model).info;
         let (hw, front, rear) = (info.radius.max(1), info.max_y, info.min_y);
@@ -363,11 +451,18 @@ fn drive(
             slip
         };
 
-        // Move with wall collisions (bounce and damage).
-        let prev = obj.pos;
+        // Move with wall collisions (bounce and damage): the box edges and
+        // the centre path (`CheckForCubeCollision` @ 100af980 vehicle
+        // branch, vehicles.md §2.7).
         let mut next = obj.pos + IVec3::new(obj.vel.x, obj.vel.y, 0);
-        let r = 256;
-        let (resolved, hit) = collide::resolve_walls_glass(&city, next, prev, r, &mut glass);
+        let clear = match d.clear {
+            Some((c, left)) if left == obj.pos => c,
+            _ => obj.pos,
+        };
+        let bp = collide::box_points(
+            &trig, next, obj.roll, obj.pitch, obj.heading, hw, front, rear,
+        );
+        let hit = collide::vehicle_walls(&city, &bp, next, clear, &mut glass);
         // A hit that opposes the velocity turns the heading by 0x5a, away
         // from the wall (tail of `CheckForCubeCollision` @ 100af980, 68k
         // `FUN_00044f82`; all builds).
@@ -393,27 +488,70 @@ fn drive(
                 }
             }
         }
+        // `BounceUnit` pushes the car off the wall from where it got to:
+        // `x += v' ± 0x20` with the halved velocity `v'` pointing away.
         // (The port also halves the speed on a hit; `BounceUnit` leaves it.)
         if hit.x {
             obj.vel.x = bounce(hit.side.x, obj.vel.x);
+            next.x += obj.vel.x + if hit.side.x < 1 { -0x20 } else { 0x20 };
             obj.speed /= 2;
         }
         if hit.y {
             obj.vel.y = bounce(hit.side.y, obj.vel.y);
+            next.y += obj.vel.y + if hit.side.y < 1 { -0x20 } else { 0x20 };
             obj.speed /= 2;
         }
-        next = resolved;
-        // The ground under the 3×3 box points, kept from the last step
-        // without a hit (`CheckForCubeCollision`; `PositionUnit` reads it).
-        if !hit.x && !hit.y {
-            d.heights = box_heights(&city, &trig, &obj, next, hw, front, rear);
+        // Without a hit: the ground under the 3×3 box points (read by
+        // `PositionUnit` and the scenery test), then per point, while the
+        // car is near the ground, the player's car collects pickups
+        // (`CheckForWeapon` @ 100597e0) and any car smashes crates
+        // (`CheckForCrate` @ 100593e0), both on the centre's cube level.
+        // A hit keeps the heights from the last clear step.
+        let clear_now = !hit.x && !hit.y;
+        if clear_now {
+            let (heights, level) = box_heights(&city, &bp, next.z);
+            d.heights = heights;
+            if d.heights[4] - 0x200 < next.z {
+                for (i, p) in bp.pts.iter().enumerate() {
+                    let (sx, sy) = (p.x >> 11, p.y >> 11);
+                    if obj.state == State::Player
+                        && let Some(ars) = ars.as_deref_mut()
+                    {
+                        let mut pick = Pickup {
+                            commands: &mut commands,
+                            texts: texts.as_deref(),
+                            labels: &mut labels,
+                            respawns: &mut respawns,
+                            set: &mut set_scenery,
+                            rng: &mut rng,
+                            effects: &mut effects,
+                        };
+                        if pick
+                            .check_for_weapon(&city, &obj, ars, sx, sy, level, d.heights[i])
+                            .is_some()
+                        {
+                            city.map.squares[sx as usize * MAP_SIZE + sy as usize].cubes[level]
+                                .scenery = 0;
+                        }
+                    }
+                    let at = IVec3::new(p.x, p.y, d.heights[i]);
+                    if let Some(contents) =
+                        break_crate_at(&city, at, level, &mut set_scenery, &mut debris)
+                    {
+                        // At once, as the original writes the cell: the
+                        // scenery test below and later vehicles see it.
+                        city.map.squares[sx as usize * MAP_SIZE + sy as usize].cubes[level]
+                            .scenery = contents;
+                    }
+                }
+            }
         }
 
         // Follow the ground; fall when it drops away (vehicles.md §2.6).
         // On the ground vz follows the terrain (`ground + 0x80 - z`), so a
         // car leaving a ramp keeps its climb and jumps; in the air only
         // gravity acts.
-        if let Some((fz, level, water)) = collide::floor(&city, next.x, next.y, prev.z) {
+        if let Some((fz, level, water)) = collide::floor(&city, next.x, next.y, obj.pos.z) {
             obj.level = level;
             obj.floor_z = fz;
             if next.z >= fz {
@@ -463,6 +601,7 @@ fn drive(
         // overlap and stopped; the push damages the car,
         // `(px² + py²) >> 12`, with Thud below 11, else Thud2 (dented; a
         // bus screams). A snowman is knocked down instead.
+        let clear_pos = next;
         let h = d.heights;
         let body = collide::Body {
             radius: hw,
@@ -536,6 +675,7 @@ fn drive(
 
         obj.prev_pos = obj.pos;
         obj.pos = next;
+        d.clear = Some((if clear_now { clear_pos } else { clear }, next));
     }
     collide::smash_glass(&mut commands, &city, &mut edits, &mut triggers, &glass);
 }
@@ -572,39 +712,29 @@ fn bounce(side: i32, v: i32) -> i32 {
     if side < 1 { -half } else { half }
 }
 
-/// Ground heights under the 3×3 box points at `pos` (the vehicle branch of
-/// `CheckForCubeCollision` @ 100af980): across the half-width (−, 0, +)
-/// and along the body (−rear, 0, front), rotated by the roll, pitch and
-/// heading. The centre uses the floor rule (`GetCubeInfo`), the others the
-/// nearest surface (`GetCubeInfo2`).
-fn box_heights(
-    city: &City,
-    trig: &Trig,
-    obj: &Obj,
-    pos: IVec3,
-    hw: i32,
-    front: i32,
-    rear: i32,
-) -> [i32; 9] {
-    let (sr, cr) = (trig.sin(obj.roll), trig.cos(obj.roll));
-    let (sp, cp) = (trig.sin(obj.pitch), trig.cos(obj.pitch));
-    let (sh, ch) = (trig.sin(obj.heading), trig.cos(obj.heading));
-    let mut out = [pos.z; 9];
-    for (i, w) in [-hw, 0, hw].into_iter().enumerate() {
-        let lat = cr * w >> 8;
-        let up = -(sr * w) >> 8;
-        for (j, l) in [-rear, 0, front].into_iter().enumerate() {
-            out[i * 3 + j] = if (i, j) == (1, 1) {
-                collide::floor(city, pos.x, pos.y, pos.z).map_or(pos.z, |f| f.0)
-            } else {
-                let fwd = (cp * l - up * sp) >> 8;
-                let x = pos.x + ((lat * ch + fwd * sh) >> 8);
-                let y = pos.y + ((fwd * ch - lat * sh) >> 8);
-                collide::ground_at(city, x, y, pos.z).0
-            };
-        }
+/// Ground heights under the 3×3 box points (the vehicle branch of
+/// `CheckForCubeCollision` @ 100af980 after a step without a hit), and the
+/// centre's cube level (`+0x8b4`). The centre uses the floor rule
+/// (`GetCubeInfo` @ 100ae3c0), the others the surface nearest the car's
+/// height `z` (`GetCubeInfo2` @ 100ae580), so a point over a low kerb
+/// reads the kerb, one over the open road the road.
+fn box_heights(city: &City, b: &collide::BoxPoints, z: i32) -> ([i32; 9], usize) {
+    let mut out = [z; 9];
+    let mut level = 0;
+    for (i, p) in b.pts.iter().enumerate() {
+        out[i] = if i == 4 {
+            match collide::floor(city, p.x, p.y, z) {
+                Some((f, l, _)) => {
+                    level = l;
+                    f
+                }
+                None => z,
+            }
+        } else {
+            collide::ground_at(city, p.x, p.y, z).0
+        };
     }
-    out
+    (out, level)
 }
 
 /// Average two angles the short way round (`PositionUnit`'s filter).

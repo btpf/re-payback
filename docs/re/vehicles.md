@@ -407,14 +407,38 @@ Corrections from the Mac comparison (CONFIRMED, Mac `CheckForCubeCollision` @ 10
 - **Heading deflection (N7, all builds).** If a hit opposes the velocity (`hitX > 0 && vx < 1` or
   `hitX < 0 && vx >= 0`), the heading turns by 0x5a: for x, −0x5a with the heading in [1, 0x5a0] or
   [0xb41, 0x10e0], +0x5a otherwise; for y the signs swap (applied after x). This makes cars glance off walls.
-- When nothing is hit, the ground heights under the 9 box points are stored (+0x8b8..+0x8d8: rows −half-width,
-  centre, +half-width; each rear, centre, front). The centre uses `GetCubeInfo` (the floor rule), the others
-  `GetCubeInfo2` (the surface nearest the car's z, a higher one winning within 32 h). `PositionUnit` and the
-  scenery test read them.
+- **Box points** (CONFIRMED, Mac @ 100af980 last sub-step; OS4 `FUN_01070868` reads them from `DAT_0130e1a0`
+  x[9], `…e1c4` y[9], `…e1e8` z[9]). Index `lat·3 + long`, across w ∈ (−hw, 0, +hw), along l ∈ (−rear, 0, front):
+  `lat = cos(roll)·w >> 8`, `up = −(sin(roll)·w) >> 8`, `fwd = cos(pitch)·l − up·sin(pitch)`,
+  `dz = up·cos(pitch) + sin(pitch)·l`; `x = X + (lat·cos h + (fwd>>8)·sin h) >> 8`,
+  `y = Y + ((fwd>>8)·cos h − lat·sin h) >> 8`; probe depth `(Z>>4) − 0x40 + (dz>>10)`, the offset only when it raises
+  the probe. Points are clamped to `[0, 0x3ffff]` (Mac: a clamp is a hit). The reference square of the edge tests
+  is the mean of the 4 unclamped corners `>> 11` (`sum >> 13`).
+- **Tests**, merged per axis with a later hit replacing an earlier one (`MergeCollide` @ 100af7b0): the clamp flags,
+  then `GetCollideInfo` along the 4 box edges in both directions — 0↔6 (rear), 2↔8 (front), 0↔2 (−hw side),
+  6↔8 (+hw side), each at its two points' probe depths — then the centre path from (X, Y, (Z−0x400)>>4) to the
+  last position without a hit (`+0x8f0..+0x8f8`, written only on a clear step), reference = that position's
+  square. A car can therefore never get a box edge across a wall face (fences included: map 0's wooden fences are
+  type-2 side faces of an otherwise empty level-1 cube, on both squares of the edge).
+- When nothing is hit (CONFIRMED): `+0x8f0` = position; the ground heights under the 9 box points are stored
+  (+0x8b8..+0x8d8: rows −half-width, centre, +half-width; each rear, centre, front). The centre uses `GetCubeInfo`
+  @ 100ae3c0 (the floor rule; its level → `+0x8b4`), the others `GetCubeInfo2` @ 100ae580 (the surface nearest the
+  car's z, a higher one winning within 32 h). `PositionUnit` and the scenery test read them. Then, if
+  `h[centre] − 0x200 < Z` (near the ground), per point in index order: a **player-driven** car (state 2) runs
+  `CheckForWeapon(obj, sx, sy, level, h[i])` @ 100597e0 (collects a pickup on the point's square), and **any** car
+  `CheckForCrate(sx, sy, level, h[i])` @ 100593e0 (a crate there is `Bang`ed into its contents), level = the
+  centre's cube level. These run before `AddCollideObj`, which registers every non-zero scenery cell (crates and
+  pickups too, radius `size/2` from `+0x8174`): the box's front points reach a crate's square long before the
+  front circle reaches the crate, so cars smash crates without stopping, and the player's car takes the pickup the
+  next step. AI cars are still bumped by a lying pickup (the original does the same).
+- On a hit the heights, `+0x8f0` and the level stay from the last clear step, so a car pressed against a wall keeps
+  the roll and pitch it had before touching it.
 
-Port (`collide.rs` `resolve_walls_glass`, `driving.rs`): a cross of half-size 256 instead of the box, the
-position restored to the previous one on a hit, and the speed halved on a hit (`BounceUnit` leaves the speed);
-the bounce keeps half the normal velocity pointing away from the wall, as `BounceUnit` does.
+Port (`collide.rs` `box_points` / `vehicle_walls`, `driving.rs`): as above (one sub-step per tick). Deviation kept:
+the speed is halved on a hit (`BounceUnit` leaves it). Until 2026-10 the port tested a cross of half-size 256 and
+restored the previous position: corners of the box (half-width and front/rear are larger than 256) could get into a
+building or through a fence, and the 9 height samples then read a roof (`GetCubeInfo2` of a building square has only
+the roof), rolling the car up to 90° beside walls and jittering as the contact came and went.
 
 Wall bounce `FUN_010cd198(obj, hitX, hitY)`, per blocked axis (shown for x; y is identical with vy):
 
@@ -485,7 +509,9 @@ up otherwise until −0x5a0; the flying helicopter takes pitch = speed and roll 
 
 Port (`driving.rs` `position_unit`, `box_heights`): as above, with ticks = 1. The `+0x7fc`/`+0x800` terms are
 unknown and taken as 0, and the steering lean is drawn separately rather than added to the roll. The body roll
-and pitch are drawn on the vehicle model.
+and pitch are drawn on the vehicle model. Nothing limits the slope other than `arctan`'s ±0x5a0: a flat
+roll beside a wall depends on the box never reaching into the wall's square, which the §2.7 edge tests guarantee
+(no step clamp, no level filter, no wall-cube skip in `GetCubeInfo2`).
 
 ### 2.11 Vehicle ↔ vehicle, people, scenery
 

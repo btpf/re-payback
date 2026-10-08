@@ -685,7 +685,9 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 **Collection.**
 - Only by the player-controlled object (state 2), **by entering the square**: there is no
   distance test. A vehicle checks every square under its 3×3 footprint loop and also breaks
-  crates there.
+  crates there (any vehicle breaks crates; only the player's collects; after a step without a
+  wall hit, before the scenery circles: vehicles.md §2.7). Port: `driving.rs` per box point;
+  `combat.rs` `pickups` covers people only.
 - Only model types 1..99 qualify. Radar (100), briefcase (23, no type) and phones are not pickups
   in this code. Phones are script triggers 0x01/0x07; nothing in either exe tests radar
   (`+0x4908 == 100`). [C; briefcase not traced further]

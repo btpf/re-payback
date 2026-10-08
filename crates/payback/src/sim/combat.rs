@@ -682,21 +682,23 @@ pub struct Panic {
     pub from: Entity,
 }
 
-/// Smash a crate on the square at `pos` into its contents (§4 Crates).
-fn break_crate_at(
+/// Smash a crate on the square at `pos` into its contents (§4 Crates;
+/// `CheckForCrate` @ 100593e0). Returns the contents' scenery id (0 for
+/// none) when there was a crate.
+pub(crate) fn break_crate_at(
     city: &City,
     pos: IVec3,
     level: usize,
     set: &mut MessageWriter<SetScenery>,
     debris: &mut Parts,
-) {
+) -> Option<u8> {
     let (sx, sy) = ((pos.x >> 11) as usize, (pos.y >> 11) as usize);
-    if sx >= MAP_SIZE || sy >= MAP_SIZE {
-        return;
+    if pos.x < 0 || pos.y < 0 || sx >= MAP_SIZE || sy >= MAP_SIZE || level > 2 {
+        return None;
     }
     let cube = &city.map.square(sx, sy).cubes[level];
     if cube.scenery != 6 {
-        return;
+        return None;
     }
     let contents = match cube.special {
         1 => 9,
@@ -723,6 +725,7 @@ fn break_crate_at(
     // the cosmetic `random3` stream (`crate::debris`).
     let centre = IVec3::new((sx * 2048 + 1024) as i32, (sy * 2048 + 1024) as i32, pos.z);
     debris.bang(centre, level + 1, rotation);
+    Some(contents)
 }
 
 /// One type-3 Dust puff of `Bang` / `CheckForWeapon` / `RespawnWeapons`:
@@ -1352,7 +1355,10 @@ fn deaths(
     }
 }
 
-/// The player collects pickups by entering their square (§4).
+/// The player collects pickups by entering their square (§4). On foot the
+/// square under the centre; a player-driven vehicle collects through its
+/// box points instead (`driving.rs`, Mac `CheckForCubeCollision` @
+/// 100af980).
 #[allow(clippy::too_many_arguments)]
 fn pickups(
     mut commands: Commands,
@@ -1363,7 +1369,7 @@ fn pickups(
     mut set: MessageWriter<SetScenery>,
     mut rng: ResMut<Rng>,
     mut effects: ResMut<Effects>,
-    mut q: Query<(Entity, &Obj, &mut Arsenal), With<CameraTarget>>,
+    mut q: Query<(Entity, &Obj, &mut Arsenal), (With<CameraTarget>, Without<crate::vehicles::Vehicle>)>,
 ) {
     let Some(city) = city else { return };
     // Players in object-table order: the first one there takes a pickup.
@@ -1372,11 +1378,53 @@ fn pickups(
         if o.state != State::Player {
             continue;
         }
-        let (sx, sy) = ((o.pos.x >> 11) as usize, (o.pos.y >> 11) as usize);
-        if sx >= MAP_SIZE || sy >= MAP_SIZE {
-            continue;
+        let (sx, sy) = (o.pos.x >> 11, o.pos.y >> 11);
+        let mut pick = Pickup {
+            commands: &mut commands,
+            texts: texts.as_deref(),
+            labels: &mut labels,
+            respawns: &mut respawns,
+            set: &mut set,
+            rng: &mut rng,
+            effects: &mut effects,
+        };
+        pick.check_for_weapon(&city, o, &mut ars, sx, sy, o.level, o.pos.z);
+    }
+}
+
+/// What `CheckForWeapon` touches.
+pub(crate) struct Pickup<'a, 'w, 's, 'm> {
+    pub commands: &'a mut Commands<'w, 's>,
+    pub texts: Option<&'a Texts>,
+    pub labels: &'a mut Labels,
+    pub respawns: &'a mut PickupRespawns,
+    pub set: &'a mut MessageWriter<'m, SetScenery>,
+    pub rng: &'a mut Rng,
+    pub effects: &'a mut Effects,
+}
+
+impl Pickup<'_, '_, '_, '_> {
+    /// `CheckForWeapon(obj, sx, sy, level, z)` @ 100597e0 (68k
+    /// `FUN_000d0988`): a pickup on that cell goes to `o`'s arsenal, with
+    /// 2 dust puffs at `z`, the pickup sound and its name floating up; it
+    /// comes back as a crate after 1200 ticks. Returns the scenery id
+    /// taken (the cell is now empty), if any.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_for_weapon(
+        &mut self,
+        city: &City,
+        o: &Obj,
+        ars: &mut Arsenal,
+        sx: i32,
+        sy: i32,
+        level: usize,
+        z: i32,
+    ) -> Option<u8> {
+        if !(0..MAP_SIZE as i32).contains(&sx) || !(0..MAP_SIZE as i32).contains(&sy) || level > 2 {
+            return None;
         }
-        let scenery = city.map.square(sx, sy).cubes[o.level].scenery;
+        let (sx, sy) = (sx as usize, sy as usize);
+        let scenery = city.map.square(sx, sy).cubes[level].scenery;
         // (ammo slot, name phrase): kinds 1-7 are 2100-2104, 2106, 2107,
         // the info pickup (0x50) 2105, the key (0x51) 2108 (Mac
         // `CheckForWeapon` @ 100597e0).
@@ -1390,38 +1438,39 @@ fn pickups(
             28 => (Some(7), 2107),
             24 => (None, 2105),
             34 => (None, 2108),
-            _ => continue,
+            _ => return None,
         };
         // 2 dust puffs before the sound, from the gameplay `random`: 14
         // draws (Mac `CheckForWeapon` @ 100597e0, 68k `FUN_000d0988`).
-        let base = IVec3::new((sx * 2048 + 0x270) as i32, (sy * 2048 + 0x270) as i32, o.pos.z - 150);
+        let base = IVec3::new((sx * 2048 + 0x270) as i32, (sy * 2048 + 0x270) as i32, z - 150);
         for _ in 0..2 {
-            dust_puff(&mut effects, &mut |n| rng.rand(n), base, o.level as u8 + 1);
+            dust_puff(self.effects, &mut |n| self.rng.rand(n), base, level as u8 + 1);
         }
         // Every kind plays the pickup sound and floats its name up from
-        // the square centre at the player's z (`AddLabel`, hud::labels).
+        // the square centre at the object's z (`AddLabel`, hud::labels).
         if let Some(slot) = slot {
             ars.ammo[slot] += PICKUP_AMMO[slot];
         }
-        commands.spawn(Sound::once(
+        self.commands.spawn(Sound::once(
             id::PICKUP_WEAPON,
             1e6,
             14000.0,
             SoundPos::At(o.posf()),
         ));
-        if let Some(t) = &texts {
+        if let Some(t) = self.texts {
             let centre = IVec3::new((sx * 2048 + 0x400) as i32, (sy * 2048 + 0x400) as i32, o.pos.z);
-            labels.add(centre, t.global(phrase));
+            self.labels.add(centre, t.global(phrase));
         }
-        set.write(SetScenery {
+        self.set.write(SetScenery {
             sx,
             sy,
-            level: o.level,
+            level,
             scenery: 0,
             special: None,
             rotation: None,
         });
-        respawns.0.push((sx, sy, o.level, 1200));
+        self.respawns.0.push((sx, sy, level, 1200));
+        Some(scenery)
     }
 }
 
