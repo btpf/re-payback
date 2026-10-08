@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payback reimplementation: progress</title>
+<script>
+/* =====================================================================
+   DATA. Edit only this object to update the page.
+   status: "done" | "partial" | "progress" (being worked on) | "missing"
+   pct:    rough completion of the area, 0-100
+   weight: how big the area is in the original game (relative)
+   The overall estimate is the weight-averaged pct, computed below.
+   ===================================================================== */
+const DATA = {
+  title: "Payback reimplementation",
+  subtitle: "Reverse engineering of Payback (Apex Designs, Amiga, 2001) and a Rust / Bevy 0.19 reimplementation",
+  updated: "2026-10-07",
+  summary: [
+    "All six story levels are ported from the original mission scripts and run on a faithful city renderer, people, vehicle, combat and police simulation. The front end, HUD, saves, intro video, rampage mode, deterministic replays, 2-4 player split-screen deathmatch and a software sound mixer are in.",
+    "What is left is mostly verification and polish: an automated playthrough to prove every level can be finished (being worked on now), a few AI and multiplayer edge cases, and front-end details (loading bar, key redefinition, gamepad menus)."
+  ],
+  estimateNote: "Each area below has a rough completion figure (how much of the original behaviour is in and believed correct) and a weight for how large that area is in the original game. The headline number is the weighted average, rounded down to the nearest 5%. It is a judgement call, not a measurement: an area counts as done when it is ported from the decompiled code and checked against screenshots or tests, not when it is merely present.",
+  inProgress: [
+    "Automated level playthrough (--autoplay): confirm all 6 story levels can be completed; the race levels 10 and 21 are not yet verified."
+  ],
+  areas: [
+    { name: "Data formats, extraction and tools", status: "done", pct: 95, weight: 8,
+      notes: [
+        "payback-formats crate: maps, Obj models, textures, palette, phrases, sounds, Human.motion, .route, FLC video, replays, rampage scores.",
+        "Real-data tests parse every original file; tools/extract.py builds the merged CD + Update 7 install.",
+        "Docker RE workbench (Ghidra, radare2, amitools, FS-UAE); 68k and OS4 builds decompiled.",
+        "Left: a few unknown fields (Obj header flag, map header variant)."
+      ] },
+    { name: "City rendering, water, weather, effects and lens flares", status: "partial", pct: 90, weight: 14,
+      notes: [
+        "Cubes, slopes, alpha and genlocked faces, original units and camera; water as displaced screen-space sky.",
+        "Weather, lightning and palette flash, lens flares with ghosts, explosions, smoke, Blood.dark at night, traffic-light and crossing swaps.",
+        "Gouraud lighting, on by default: computed sun shadows, static lamps, dynamic lights; night headlight polygons; object face modes 3/4/5.",
+        "Approximate: the shadow-ray start cell is reconstructed; lit colours aren't snapped to the palette; at most 64 dynamic lights; possible diagonal banding.",
+        "Missing: the rotating-view and motion-blur options (stored in settings, not rendered).",
+        "Additive blending is done in linear colour rather than palette space."
+      ] },
+    { name: "Vehicles: models and shine, physics, AI", status: "partial", pct: 90, weight: 12,
+      notes: [
+        "Models with one-sided faces, paint, liveries under all four Shine face kinds, burnt and dented looks.",
+        "Driving physics, boarding and hijacking, object contact and destruction, traffic AI and scripted driving.",
+        "Approximate: the shine/reflection blend is done in a different colour space from the original."
+      ] },
+    { name: "People, combat and weapons, police and pursuit", status: "partial", pct: 88, weight: 14,
+      notes: [
+        "Pedestrian simulation and motion, weapons and pickups, kill scoring and copkiller bonus, drowning and respawn.",
+        "Police, wanted level, route-graph pursuit and roadblocks.",
+        "Gaps: arresting the player in a car leaves the car \"dead\"; script police sent with goto 0x15 are not switched to pursuit."
+      ] },
+    { name: "Missions (6 story levels)", status: "progress", pct: 80, weight: 18,
+      notes: [
+        "Mission engine (triggers, script API) and all six level scripts ported from the 68k code.",
+        "An automated playthrough is being built to confirm each level can be completed.",
+        "Script AddSound has no audible-range argument; some TODO(api) comments in the level files are stale (special objects and actor-boards-actor now work)."
+      ],
+      levels: [
+        { id: "00", name: "City 0, level 0", status: "partial", note: "Ported; completion check pending" },
+        { id: "01", name: "City 0, level 1", status: "partial", note: "Ported; completion check pending" },
+        { id: "10", name: "Los Francos, level 0 (race)", status: "partial", note: "Ported; race completion unverified" },
+        { id: "11", name: "City 1, level 1", status: "partial", note: "Ported; completion check pending" },
+        { id: "20", name: "Night city: Escape from jail", status: "partial", note: "Ported; completion check pending" },
+        { id: "21", name: "Night city, level 1 (race)", status: "partial", note: "Ported; race completion unverified" }
+      ] },
+    { name: "HUD, front-end menus, saves, intro video", status: "partial", pct: 85, weight: 10,
+      notes: [
+        "HUD and icons, menus, level select, results (with Save replay), pause (options.obj title; goal line only in story mode), progress saves, high scores; intro video (FLC) with audio.",
+        "Missing: the loading bar never fills; key redefinition; gamepad input in the menus.",
+        "The raised lowercase \"o\" in the dialog font matches the data (not a bug)."
+      ] },
+    { name: "Audio mixer", status: "partial", pct: 85, weight: 6,
+      notes: [
+        "Software mixer like the original: 8-bit samples, stereo pan, Doppler, per-sound volume and rate.",
+        "Split screen: a sound plays as loud as at its nearest listener.",
+        "No CD music: no audio tracks are available."
+      ] },
+    { name: "Rampage, replays and determinism, multiplayer", status: "partial", pct: 85, weight: 10,
+      notes: [
+        "Rampage mode with high scores; deterministic replays (record/play, MATCH check script).",
+        "2-4 player split-screen deathmatch with respawns.",
+        "Gaps: you can't hijack a car another player is driving; weather, flares and smoke follow player 1's view only; user-map cities aren't offered in rampage.",
+        "The shipped replays are version 3 and are rejected, as in the original."
+      ] },
+    { name: "RE documentation", status: "done", pct: 90, weight: 8,
+      notes: [
+        "docs/formats.md, docs/research.md and 13 docs/re/*.md notes (rendering, vehicles, people, combat/police, front end/audio, menus, script API, one per level).",
+        "Facts marked CONFIRMED (with function address) or INFERRED.",
+        "Each note keeps an open-questions list; research.md's older roadmap and questions are partly out of date."
+      ] }
+  ],
+  /* Ordered by priority, highest first. */
+  remaining: [
+    { pri: 1, status: "progress", text: "Finish the automated playthrough and confirm all 6 story levels can be completed." },
+    { pri: 1, status: "missing",  text: "Verify the race levels 10 and 21 end to end." },
+    { pri: 2, status: "missing",  text: "In-car arrest leaves the car \"dead\"; fix to match the original." },
+    { pri: 2, status: "missing",  text: "Switch script police sent with goto 0x15 to pursuit." },
+    { pri: 2, status: "missing",  text: "Multiplayer: allow hijacking a car another player is driving." },
+    { pri: 2, status: "missing",  text: "Multiplayer: weather, flares and smoke per view, not only player 1's." },
+    { pri: 3, status: "missing",  text: "Loading bar that actually fills." },
+    { pri: 3, status: "missing",  text: "Key redefinition and gamepad menu input." },
+    { pri: 3, status: "missing",  text: "Rotating-view and motion-blur options (stored in settings, not rendered)." },
+    { pri: 3, status: "partial",  text: "Shine/reflection and additive blends are approximate in colour space." },
+    { pri: 3, status: "partial",  text: "Lighting approximations: reconstructed shadow-ray start cell, colours not snapped to the palette, 64 dynamic lights max, possible diagonal banding." },
+    { pri: 4, status: "missing",  text: "Offer user-map cities in rampage." },
+    { pri: 4, status: "partial",  text: "Script AddSound audible range; tidy stale TODO(api) comments in the level files." },
+    { pri: 4, status: "partial",  text: "Close the open questions in docs/re/*.md and refresh docs/research.md." }
+  ],
+  /* Faithful to the original: listed so nobody "fixes" them. */
+  notBugs: [
+    "The shipped replays are version 3 and are rejected, as in the original.",
+    "The raised lowercase \"o\" in the dialog font is in the font data.",
+    "No CD music: there are no audio tracks to play."
+  ],
+  /* Newest first. From git log. */
+  timeline: [
+    { date: "2026-10-07", hash: "741ae5f", text: "Gouraud lighting, night headlights, object face modes 3/4/5" },
+    { date: "2026-10-07", hash: "d8ba8ee", text: "Split screen: sky behind the city, black separators as overlay" },
+    { date: "2026-10-07", hash: "dd3cece", text: "Software sound mixer with stereo pan and Doppler" },
+    { date: "2026-10-07", hash: "f5e3f5a", text: "Pause and results fixes: options title, story-only goal line, Save replay" },
+    { date: "2026-10-07", hash: "3df169e", text: "Respawn a drowned player" },
+    { date: "2026-10-07", hash: "62727c7", text: "2-4 player split-screen deathmatch" },
+    { date: "2026-10-07", hash: "6147347", text: "Liveries under the shine: all four Shine face kinds" },
+    { date: "2026-10-07", hash: "5185193", text: "Rampage mode and deterministic replays" },
+    { date: "2026-10-07", hash: "da50d43", text: "Vehicle model fixes: one-sided faces, ground lift, paint, shine" },
+    { date: "2026-10-07", hash: "4a40c32", text: "Weather, lens flares, traffic-light swaps, vehicle damage looks" },
+    { date: "2026-10-07", hash: "c11e979", text: "Front end: menus, level select, results, pause, saves" },
+    { date: "2026-10-07", hash: "dd2ffc4", text: "Scripted vehicles, police pursuit and roadblocks" },
+    { date: "2026-10-07", hash: "5f56536", text: "Intro video; kill scoring and copkiller bonus" },
+    { date: "2026-10-07", hash: "e2f3dd4", text: "Replay and rampage high-score formats" },
+    { date: "2026-10-07", hash: "cc270b1", text: "FLC decoder for the intro video" },
+    { date: "2026-10-07", hash: "2d9b428", text: "Object contact, vehicle destruction; levels via AppState" },
+    { date: "2026-10-07", hash: "3a545a0", text: "Mission engine gaps fixed while porting the levels" },
+    { date: "2026-10-07", hash: "4912f06", text: "All six level scripts ported; driving, boarding, traffic" },
+    { date: "2026-10-07", hash: "a99c6ca", text: "HUD, combat, police, effects, mission engine, map edits" },
+    { date: "2026-10-07", hash: "2991a4a", text: "Faithful city rendering, original units, people simulation" },
+    { date: "2026-10-07", hash: "8d59177", text: "Plugins, collision world, player, camera, audio" },
+    { date: "2026-10-07", hash: "ce8c481", text: "Formats, RE findings and roadmap documented" },
+    { date: "2026-10-07", hash: "b499697", text: "Scenery objects rendered from Obj models" },
+    { date: "2026-10-07", hash: "da4d802", text: "City maps rendered in Bevy" },
+    { date: "2026-10-07", hash: "d8e2423", text: "RE tooling, Docker workbench, payback-formats crate" }
+  ]
+};
+</script>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --border: #e2e2dd; --ink: #1d1d1b;
+    --ink2: #55554f; --muted: #85857d; --track: #ececE7;
+    --done: #2f8a4e; --partial: #b7791f; --progress: #2f6fb5; --missing: #c2413b;
+    --accent: #2f6fb5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --surface: #1f1f1d; --border: #34342f; --ink: #ecece7;
+      --ink2: #b5b5ad; --muted: #85857d; --track: #2c2c29;
+      --done: #5cb87a; --partial: #e0a84a; --progress: #6aa2e0; --missing: #e7716a;
+      --accent: #6aa2e0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 40px 0 12px; }
+  .sub { color: var(--ink2); margin: 0; }
+  .updated { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .hero { display: grid; grid-template-columns: 200px 1fr; gap: 24px; margin-top: 24px; align-items: start; }
+  .big { font-size: 56px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 22px; color: var(--ink2); font-weight: 500; }
+  .label { color: var(--ink2); font-size: 13px; margin-top: 6px; }
+  .hero p { margin: 0 0 10px; }
+  .hero .how { color: var(--ink2); font-size: 13px; }
+  .bar { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; margin-top: 12px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .inprog { margin: 14px 0 0; padding: 0; list-style: none; }
+  .inprog li { padding-left: 0; margin: 4px 0; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .card h3 { font-size: 15px; margin: 0; flex: 1; }
+  .card .head { display: flex; gap: 10px; align-items: baseline; }
+  .card .pct { font-variant-numeric: tabular-nums; color: var(--ink2); font-size: 13px; }
+  .card ul { margin: 10px 0 0; padding-left: 18px; color: var(--ink2); font-size: 13.5px; }
+  .card li { margin: 3px 0; }
+  .card .bar { height: 6px; margin-top: 8px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+    white-space: nowrap; color: var(--ink2);
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+  .s-done .dot, .dot.s-done { background: var(--done); }
+  .s-partial .dot, .dot.s-partial { background: var(--partial); }
+  .s-progress .dot, .dot.s-progress { background: var(--progress); }
+  .s-missing .dot, .dot.s-missing { background: transparent; box-shadow: inset 0 0 0 2px var(--missing); }
+  .levels { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 12px; }
+  .lvl { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+  .lvl b { font-size: 14px; display: flex; align-items: center; gap: 6px; }
+  .lvl div { color: var(--ink2); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  .pri { font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .timeline { list-style: none; margin: 0; padding: 0 0 0 18px; border-left: 2px solid var(--border); }
+  .timeline li { position: relative; margin: 0 0 12px; padding-left: 14px; }
+  .timeline li::before {
+    content: ""; position: absolute; left: -25px; top: 6px; width: 10px; height: 10px;
+    border-radius: 50%; background: var(--surface); box-shadow: 0 0 0 2px var(--accent);
+  }
+  .timeline .meta { color: var(--muted); font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: var(--ink2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .plain { margin: 0; padding-left: 18px; color: var(--ink2); font-size: 14px; }
+  @media (max-width: 720px) { .hero, .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+(function () {
+  const STATUS = {
+    done:     "Done",
+    partial:  "Partial",
+    progress: "In progress",
+    missing:  "Missing"
+  };
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const badge = s => `<span class="badge s-${s}"><span class="dot"></span>${STATUS[s]}</span>`;
+
+  const totalW = DATA.areas.reduce((a, x) => a + x.weight, 0);
+  const exact = DATA.areas.reduce((a, x) => a + x.pct * x.weight, 0) / totalW;
+  const overall = Math.floor(exact / 5) * 5;
+
+  let h = `
+    <h1>${esc(DATA.title)}</h1>
+    <p class="sub">${esc(DATA.subtitle)}</p>
+    <p class="updated">Last updated ${esc(DATA.updated)}</p>
+
+    <section class="hero">
+      <div class="panel">
+        <div class="big">~${overall}<small>%</small></div>
+        <div class="label">overall, estimated (weighted ${exact.toFixed(1)}%)</div>
+        <div class="bar" role="img" aria-label="${overall}% complete"><span style="width:${overall}%"></span></div>
+      </div>
+      <div class="panel">
+        ${DATA.summary.map(p => `<p>${esc(p)}</p>`).join("")}
+        <p class="how"><b>How the estimate is made.</b> ${esc(DATA.estimateNote)}</p>
+        <b style="font-size:14px">Being worked on now</b>
+        <ul class="inprog">${DATA.inProgress.map(t => `<li>${badge("progress")} &nbsp;${esc(t)}</li>`).join("")}</ul>
+      </div>
+    </section>
+
+    <h2>Areas</h2>
+    <div class="grid">`;
+
+  for (const a of DATA.areas) {
+    h += `
+      <article class="panel card">
+        <div class="head"><h3>${esc(a.name)}</h3>${badge(a.status)}</div>
+        <div class="bar" title="${a.pct}%"><span style="width:${a.pct}%"></span></div>
+        <div class="pct">${a.pct}% &middot; weight ${a.weight}</div>
+        <ul>${a.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>
+        ${a.levels ? `<div class="levels">${a.levels.map(l => `
+          <div class="lvl" title="${STATUS[l.status]}"><b><span class="dot s-${l.status}"></span>Level ${esc(l.id)}</b>
+          <div>${esc(l.name)}</div><div>${esc(l.note)}</div></div>`).join("")}</div>` : ""}
+      </article>`;
+  }
+
+  h += `</div>
+
+    <h2>Remaining work</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Priority</th><th>Status</th><th>Item</th></tr></thead>
+        <tbody>${DATA.remaining.slice().sort((x, y) => x.pri - y.pri).map(r => `
+          <tr><td class="pri">P${r.pri}</td><td>${badge(r.status)}</td><td>${esc(r.text)}</td></tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="two">
+      <section>
+        <h2>Recent milestones</h2>
+        <div class="panel">
+          <ol class="timeline">${DATA.timeline.map(t => `
+            <li><div>${esc(t.text)}</div><div class="meta">${esc(t.date)} &middot; ${esc(t.hash)}</div></li>`).join("")}
+          </ol>
+        </div>
+      </section>
+      <section>
+        <h2>Faithful, not bugs</h2>
+        <div class="panel"><ul class="plain">${DATA.notBugs.map(n => `<li>${esc(n)}</li>`).join("")}</ul></div>
+        <h2>Legend</h2>
+        <div class="panel">
+          <div class="legend">${Object.keys(STATUS).map(s => badge(s)).join("")}</div>
+          <p class="plain" style="padding:0;margin-top:10px;font-size:13px">
+            Bars show each area's estimated completion. P1 is the highest priority.
+            Missing is drawn as a hollow ring so status never relies on colour alone.
+          </p>
+        </div>
+      </section>
+    </div>`;
+
+  document.getElementById("app").innerHTML = h;
+})();
+</script>
+</body>
+</html>
