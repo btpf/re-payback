@@ -105,6 +105,11 @@ pub struct PlayerSession {
     pub foot_health: i32,
     pub respawn_timer: i32,
     pub regen: i32,
+    /// The score at death, given back to the respawned player (Mac
+    /// `amiga_levelloop` @ 10100f50 stores `+0x864` into `DAT_1017c524[p]`
+    /// when the player dies and copies it into the new object's `+0x864`
+    /// on respawn; `GetPlayerScore` @ 10052f80 reads it while down).
+    pub saved_score: i32,
     /// Script-forced respawn square (sx, sy, level).
     pub respawn_square: Option<(usize, usize, usize)>,
     /// Start points used recently (avoid repeats).
@@ -132,6 +137,7 @@ impl Default for PlayerSession {
             foot_health: 100,
             respawn_timer: 0,
             regen: 0,
+            saved_score: 0,
             respawn_square: None,
             recent_starts: Vec::new(),
             others_foot_health: [100; 3],
@@ -915,6 +921,8 @@ fn regen_and_respawn(
                 if session.respawn_timer == 0 {
                     session.respawn_timer = RESPAWN_TICKS;
                 }
+                // The score survives death (§4.5; Mac 10100f50).
+                session.saved_score = obj.score;
                 if obj.state == State::Dead {
                     // The corpse stays; the camera moves to the new player.
                     commands.entity(e).remove::<CameraTarget>();
@@ -997,6 +1005,14 @@ fn regen_and_respawn(
         State::Player,
     ) {
         make_player(&mut commands, e, 0);
+        // "score restored" (§4.5): the new object's +0x864 is the score
+        // stored at death (Mac `amiga_levelloop` @ 10100f50).
+        let score = session.saved_score;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut o) = world.get_mut::<Obj>(e) {
+                o.score = score;
+            }
+        });
         // Trigger type 0x3e (`Trigger_PlayerRespawned` 0xa69c2, called
         // right after the respawn placement).
         triggers.report(crate::mission::kind::RESPAWNED, 0, 0, 0);

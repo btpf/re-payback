@@ -212,11 +212,16 @@ fn watch_end(
     state: Option<Res<bevy::state::state::State<AppState>>>,
     mut bot: ResMut<Bot>,
     players: Query<&Obj, With<CameraTarget>>,
+    session: Res<crate::sim::people::PlayerSession>,
     mut exit: MessageWriter<AppExit>,
     mut wait: Local<u32>,
 ) {
     for o in outcomes.read() {
-        let money = players.iter().next().map_or(0, |p| p.score);
+        // While the player is down, the score stored at death.
+        let money = match players.iter().next() {
+            Some(p) if session.respawn_timer == 0 => p.score,
+            _ => session.saved_score,
+        };
         info!(
             "autoplay: RESULT map {} level {}: {:?} after {} ticks (money {money})",
             spec.map, spec.level, o, clock.0

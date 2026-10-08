@@ -19,7 +19,9 @@
 //!
 //! Extension: after the records this implementation appends [`TRAILER`] and
 //! a u32 of flags: bit 0 random phone missions in Rampage (they change the
-//! simulation), bit 1 the records are the Mac bit stream. The Mac game
+//! simulation), bit 1 the records are the Mac bit stream, bit 2 a
+//! [`RandomSetup`] follows (two more i32: the money goal and the story
+//! progress the random missions were started with). The Mac game
 //! ignores the trailer. A 0x3F3 file without it is a Mac recording: a bit
 //! stream, random missions on (the Mac always plays them). With the trailer
 //! but without bit 1 the records are raw words (this implementation's
@@ -38,6 +40,20 @@ pub const TRAILER: &[u8; 4] = b"PBrm";
 pub const FLAG_RANDOM_MISSIONS: u32 = 1;
 /// Trailer flag: the records are the Mac bit stream.
 pub const FLAG_MAC_STREAM: u32 = 2;
+/// Trailer flag: a [`RandomSetup`] (goal, progress; two i32) follows the
+/// flags.
+pub const FLAG_RANDOM_SETUP: u32 = 4;
+
+/// What the Rampage random missions read from outside the replay at level
+/// start: the money goal (top of the Rampage high-score table for the
+/// police level, `GetHighestScore` @ 100a05a0) and the story progress
+/// (`GetHighestLevelCompleted` @ 1009b580, which limits the vehicles drawn
+/// for the jobs). Both change the simulation, so they are recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RandomSetup {
+    pub goal: i32,
+    pub progress: i32,
+}
 
 /// Weapon field value meaning "no change".
 pub const NO_WEAPON_CHANGE: u8 = 10;
@@ -62,6 +78,9 @@ pub struct Header {
     /// Rampage with random phone missions (Mac `ProcessTrigger_Random`);
     /// false outside Rampage.
     pub random_missions: bool,
+    /// The random missions' outside inputs, when recorded (files before
+    /// [`FLAG_RANDOM_SETUP`] and Mac files have none).
+    pub random_setup: Option<RandomSetup>,
 }
 
 /// One player's input for one frame.
@@ -167,6 +186,11 @@ impl Replay {
             _ => FLAG_RANDOM_MISSIONS | FLAG_MAC_STREAM,
         };
         let random_missions = rampage && flags & FLAG_RANDOM_MISSIONS != 0;
+        let random_setup = if version == 0x3f3 && flags & FLAG_RANDOM_SETUP != 0 {
+            Some(RandomSetup { goal: i32_at(d, end + 8)?, progress: i32_at(d, end + 12)? })
+        } else {
+            None
+        };
         let header = Header {
             version,
             players: f(0)?,
@@ -179,6 +203,7 @@ impl Replay {
             map,
             level,
             random_missions,
+            random_setup,
         };
         let count = f(6)?.max(0) as usize;
         if flags & FLAG_MAC_STREAM != 0 {
@@ -244,7 +269,12 @@ impl Replay {
         out.extend_from_slice(&data);
         out.extend_from_slice(TRAILER);
         let random = if h.rampage && h.random_missions { FLAG_RANDOM_MISSIONS } else { 0 };
-        out.extend_from_slice(&(random | FLAG_MAC_STREAM).to_be_bytes());
+        let setup = if h.random_setup.is_some() { FLAG_RANDOM_SETUP } else { 0 };
+        out.extend_from_slice(&(random | setup | FLAG_MAC_STREAM).to_be_bytes());
+        if let Some(r) = h.random_setup {
+            out.extend_from_slice(&r.goal.to_be_bytes());
+            out.extend_from_slice(&r.progress.to_be_bytes());
+        }
         out
     }
 
@@ -691,6 +721,7 @@ mod tests {
                 map: map.into(),
                 level: 1,
                 random_missions,
+                random_setup: None,
             },
             records,
         }
@@ -725,6 +756,27 @@ mod tests {
         assert_eq!(i32_at(&b, at + 1).unwrap(), 1);
         let bytes = i32_at(&b, at + 5).unwrap() as usize;
         assert_eq!(b.len(), at + 9 + bytes + 8);
+    }
+
+    /// The random missions' goal and progress round-trip in the trailer;
+    /// files without them (older ones, Mac ones) still load.
+    #[test]
+    fn random_setup() {
+        let mut r = sample(true, true, "PROGDIR:Maps/1");
+        r.header.random_setup = Some(RandomSetup { goal: 1_250_000, progress: 3 });
+        let b = r.write();
+        assert_eq!(Replay::parse(&b).unwrap(), r);
+        assert_eq!(&b[b.len() - 8..b.len() - 4], &1_250_000i32.to_be_bytes());
+        // An older trailer (flags only): no setup.
+        let mut old = b[..b.len() - 8].to_vec();
+        let n = old.len();
+        old[n - 1] &= !(FLAG_RANDOM_SETUP as u8);
+        let p = Replay::parse(&old).unwrap();
+        assert_eq!(p.header.random_setup, None);
+        assert_eq!(p.records, r.records);
+        // A Mac file: no trailer at all.
+        let mac = Replay::parse(&b[..b.len() - 16]).unwrap();
+        assert!(mac.header.random_missions && mac.header.random_setup.is_none());
     }
 
     /// Versions 10 / 0x3F2 (fixed 100-byte path at 0x30, level at 0x94).

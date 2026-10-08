@@ -5,12 +5,13 @@
 
 use super::people::{Person, PlayerInputs};
 use super::police::Hurt;
-use super::{Class, Obj, Rng, State, Stick, Trig, VisualRng, wrap};
+use super::{Class, Obj, Rng, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
+use crate::debris::Parts;
 use crate::effects::{Blend, Effects, Tex};
-use crate::hud::{Banner, Texts};
+use crate::hud::{Texts, labels::Labels};
 use crate::level::LevelEntity;
 use crate::mission::{MissionState, Triggers, kind};
 use crate::objects::{ObjectLibrary, SetScenery};
@@ -341,7 +342,7 @@ fn fire_weapons(
     mut triggers: ResMut<Triggers>,
     mission: Res<MissionState>,
     mut crimes: Option<ResMut<super::police::Crimes>>,
-    mut vrng: Option<ResMut<VisualRng>>,
+    mut debris: ResMut<Parts>,
 ) {
     let (Some(mut library), Some(city)) = (library, city) else {
         return;
@@ -478,8 +479,7 @@ fn fire_weapons(
                     ahead,
                     obj.level,
                     &mut set_scenery,
-                    &mut effects,
-                    vrng.as_deref_mut(),
+                    &mut debris,
                 );
                 ars.pose = 2;
             }
@@ -688,8 +688,7 @@ fn break_crate_at(
     pos: IVec3,
     level: usize,
     set: &mut MessageWriter<SetScenery>,
-    effects: &mut Effects,
-    vrng: Option<&mut VisualRng>,
+    debris: &mut Parts,
 ) {
     let (sx, sy) = ((pos.x >> 11) as usize, (pos.y >> 11) as usize);
     if sx >= MAP_SIZE || sy >= MAP_SIZE {
@@ -709,6 +708,7 @@ fn break_crate_at(
         7 => 28,
         _ => 0,
     };
+    let rotation = cube.rotation;
     set.write(SetScenery {
         sx,
         sy,
@@ -717,25 +717,19 @@ fn break_crate_at(
         special: None,
         rotation: None,
     });
-    // `Bang(crate, layer+1, centre, z, angle, 5)` (Mac `CheckForCrate`
-    // @ 100593e0 -> `Bang` @ 100a6dd0, 68k `FUN_000d0670` -> `FUN_000384e8`):
-    // max(2, min(6, 5>>1)) = 2 dust puffs at the centre ± 400 (z ± 150),
-    // drawn from the cosmetic `random3` stream. `Bang` first calls `Split`
-    // (the crate fragments), which the port does not draw yet.
-    if let Some(vrng) = vrng {
-        let (cx, cy) = ((sx * 2048 + 1024) as i32, (sy * 2048 + 1024) as i32);
-        let mut r = |n| vrng.rand(n);
-        for _ in 0..2 {
-            dust_puff(effects, &mut r, IVec3::new(cx - 400, cy - 400, pos.z - 150), level as u8 + 1);
-        }
-    }
+    // `Bang(crate, layer+1, centre, z, rotation·0x1680 >> 8, 5)` (Mac
+    // `CheckForCrate` @ 100593e0 -> `Bang` @ 100a6dd0, 68k `FUN_000d0670`
+    // -> `FUN_000384e8`): the crate's fragments and 2 dust puffs, all from
+    // the cosmetic `random3` stream (`crate::debris`).
+    let centre = IVec3::new((sx * 2048 + 1024) as i32, (sy * 2048 + 1024) as i32, pos.z);
+    debris.bang(centre, level + 1, rotation);
 }
 
 /// One type-3 Dust puff of `Bang` / `CheckForWeapon` / `RespawnWeapons`:
 /// size 1500 + r(1000), v = r(500) − 250 per axis (divided by 3 in
 /// `AddEffect`), pos = `base` + (r(800), r(800), r(300)). Seven draws in
 /// the Mac/68k order (last argument first): size, vz, vy, vx, z, y, x.
-fn dust_puff(effects: &mut Effects, r: &mut impl FnMut(i32) -> i32, base: IVec3, layer: u8) {
+pub(crate) fn dust_puff(effects: &mut Effects, r: &mut impl FnMut(i32) -> i32, base: IVec3, layer: u8) {
     let size = 1500 + r(1000);
     let vz = r(500) - 250;
     let vy = r(500) - 250;
@@ -765,7 +759,7 @@ fn move_projectiles(
     mut set_scenery: MessageWriter<SetScenery>,
     mut triggers: ResMut<Triggers>,
     mut edits: MessageWriter<crate::mapedit::MapEdit>,
-    mut vrng: Option<ResMut<VisualRng>>,
+    mut debris: ResMut<Parts>,
     mut arsenals: Query<&mut Arsenal>,
     mut q: Query<(Entity, &mut Obj, &Projectile)>,
 ) {
@@ -802,8 +796,7 @@ fn move_projectiles(
                 next,
                 obj.level,
                 &mut set_scenery,
-                &mut effects,
-                vrng.as_deref_mut(),
+                &mut debris,
             );
         }
 
@@ -1365,7 +1358,7 @@ fn pickups(
     mut commands: Commands,
     city: Option<Res<City>>,
     texts: Option<Res<Texts>>,
-    mut banner: ResMut<Banner>,
+    mut labels: ResMut<Labels>,
     mut respawns: ResMut<PickupRespawns>,
     mut set: MessageWriter<SetScenery>,
     mut rng: ResMut<Rng>,
@@ -1384,16 +1377,19 @@ fn pickups(
             continue;
         }
         let scenery = city.map.square(sx, sy).cubes[o.level].scenery;
-        let (slot, kind): (Option<usize>, u32) = match scenery {
-            9 => (Some(6), 1),
-            10 => (Some(3), 2),
-            11 => (Some(4), 3),
-            12 => (Some(5), 4),
-            13 => (Some(2), 5),
-            27 => (Some(1), 6),
-            28 => (Some(7), 7),
-            24 => (None, 0x50),
-            34 => (None, 0x51),
+        // (ammo slot, name phrase): kinds 1-7 are 2100-2104, 2106, 2107,
+        // the info pickup (0x50) 2105, the key (0x51) 2108 (Mac
+        // `CheckForWeapon` @ 100597e0).
+        let (slot, phrase): (Option<usize>, u32) = match scenery {
+            9 => (Some(6), 2100),
+            10 => (Some(3), 2101),
+            11 => (Some(4), 2102),
+            12 => (Some(5), 2103),
+            13 => (Some(2), 2104),
+            27 => (Some(1), 2106),
+            28 => (Some(7), 2107),
+            24 => (None, 2105),
+            34 => (None, 2108),
             _ => continue,
         };
         // 2 dust puffs before the sound, from the gameplay `random`: 14
@@ -1402,17 +1398,20 @@ fn pickups(
         for _ in 0..2 {
             dust_puff(&mut effects, &mut |n| rng.rand(n), base, o.level as u8 + 1);
         }
+        // Every kind plays the pickup sound and floats its name up from
+        // the square centre at the player's z (`AddLabel`, hud::labels).
         if let Some(slot) = slot {
             ars.ammo[slot] += PICKUP_AMMO[slot];
-            commands.spawn(Sound::once(
-                id::PICKUP_WEAPON,
-                1e6,
-                14000.0,
-                SoundPos::At(o.posf()),
-            ));
         }
+        commands.spawn(Sound::once(
+            id::PICKUP_WEAPON,
+            1e6,
+            14000.0,
+            SoundPos::At(o.posf()),
+        ));
         if let Some(t) = &texts {
-            banner.show_for(o.player, t.global(0x834 + kind - 1));
+            let centre = IVec3::new((sx * 2048 + 0x400) as i32, (sy * 2048 + 0x400) as i32, o.pos.z);
+            labels.add(centre, t.global(phrase));
         }
         set.write(SetScenery {
             sx,

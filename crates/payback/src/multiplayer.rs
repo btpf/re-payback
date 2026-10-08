@@ -97,6 +97,9 @@ pub struct Match {
     /// Death timers (`DAT_012a65e0[p]`).
     pub respawn: [i32; 4],
     pub regen: [i32; 4],
+    /// Score at death, restored on respawn (`DAT_1017c524[p]`, Mac
+    /// `amiga_levelloop` @ 10100f50).
+    pub score: [i32; 4],
     /// Once decided: the winner, or -1 for a draw.
     pub result: Option<i32>,
 }
@@ -411,11 +414,14 @@ fn deaths_and_respawns(
         if matches!(obj.state, State::Dead | State::Removed) {
             // The corpse stays; the view waits for the respawn.
             deaths.push((p, last.0.get(&e).copied().flatten()));
+            game.score[p as usize] = obj.score;
             commands.entity(e).remove::<CameraTarget>();
             obj.player = None;
             continue;
         }
         alive_at.push(obj.posf());
+        // Kept current, so a player gone without a corpse keeps it too.
+        game.score[p as usize] = obj.score;
         // +1 health every 250 ticks (on-foot health while driving).
         let regen = &mut game.regen[p as usize];
         *regen += 1;
@@ -466,6 +472,12 @@ fn deaths_and_respawns(
             State::Player,
         ) {
             people::make_player(&mut commands, e, p as u8);
+            let score = game.score[p];
+            commands.queue(move |world: &mut World| {
+                if let Some(mut o) = world.get_mut::<Obj>(e) {
+                    o.score = score;
+                }
+            });
             alive_at.push(pos);
         }
     }

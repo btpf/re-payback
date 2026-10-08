@@ -14,6 +14,7 @@
 //! with alpha = max(src)/255, so it is reproduced exactly by the overlay.
 
 pub mod icons;
+pub mod labels;
 pub mod loading;
 pub mod paint;
 
@@ -24,7 +25,14 @@ use crate::level::{GameMode, LevelSpec};
 use crate::sim::Obj;
 use crate::sim::combat::Arsenal;
 use crate::sim::people::PlayerSession;
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::{
+    asset::embedded_asset,
+    prelude::*,
+    render::render_resource::{AsBindGroup, RenderPipelineDescriptor},
+    shader::ShaderRef,
+    ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialKey, UiMaterialPlugin},
+    window::PrimaryWindow,
+};
 use icons::{Font, HudIcons, Icon};
 pub use paint::{Blend, CANVAS_H, Painter, blank, blank_sized, canvas_width};
 use paint::{for_each_glyph, text_len};
@@ -270,6 +278,10 @@ impl Texts {
 #[derive(Resource)]
 struct Canvas {
     image: Handle<Image>,
+    /// The subtract plane under the HUD (software panels, [`Pen::fade`]).
+    sub: Handle<Image>,
+    /// Its pixels as drawn this frame, uploaded by [`upload_plane`].
+    sub_px: Vec<u8>,
     w: usize,
     h: usize,
     frame: u32,
@@ -280,35 +292,59 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "subtract.wgsl");
         app.init_resource::<HudData>()
             .init_resource::<Dialog>()
             .init_resource::<BigTitle>()
             .init_resource::<Banner>()
             .init_resource::<Language>()
             .init_resource::<Texts>()
-            .add_plugins(loading::plugin)
+            .add_plugins((loading::plugin, labels::plugin, UiMaterialPlugin::<SubtractPlane>::default()))
             .add_systems(Startup, setup)
             .add_systems(PreUpdate, load_global_texts)
             .add_systems(OnEnter(crate::level::AppState::Playing), load_level_texts.in_set(crate::level::LevelLoaded))
             .add_systems(OnExit(crate::level::AppState::Playing), reset_hud)
             .add_systems(FixedUpdate, (collect, tick_dialog, tick_title, tick_banner))
-            .add_systems(PostUpdate, draw);
+            .add_systems(PostUpdate, (draw, upload_plane).chain());
     }
 }
 
-fn setup(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
+fn setup(
+    mut commands: Commands,
+    data: Res<GameData>,
+    mut images: ResMut<Assets<Image>>,
+    mut planes: ResMut<Assets<SubtractPlane>>,
+) {
     let icons = HudIcons::load(&data);
     commands.insert_resource(HudIcons2x(icons.doubled(&icons::Average::load(&data))));
     commands.insert_resource(icons);
     let w = 320;
     let image = images.add(blank(w));
+    let sub = images.add(blank(w));
     commands.insert_resource(Canvas {
         image: image.clone(),
+        sub: sub.clone(),
+        sub_px: Vec::new(),
         w,
         h: CANVAS_H,
         frame: 0,
         minimap: None,
     });
+    // Under the HUD canvas.
+    commands.spawn((
+        MaterialNode(planes.add(SubtractPlane { plane: sub })),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        GlobalZIndex(-1),
+        Visibility::Hidden,
+        HudNode,
+    ));
     commands.spawn((
         ImageNode::new(image),
         Node {
@@ -324,9 +360,47 @@ fn setup(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<
     ));
 }
 
-/// The HUD overlay node (hidden outside levels).
+/// The HUD overlay nodes (hidden outside levels): the canvas and its
+/// subtract plane.
 #[derive(Component)]
 pub struct HudNode;
+
+/// The software renderer's subtract panels (`Draw2DEffect(FadeDarken…,
+/// …, 0x10000)`: Alpha.256 table 1, `max(d − s, 0)`): a full-window plane
+/// whose texels are subtracted from the view under the HUD canvas. The
+/// subtraction is on the linear frame (the final pass then snaps to the
+/// palette), where the original subtracts palette values (rendering.md
+/// "Palette output", approximate like the effects' table 1).
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct SubtractPlane {
+    #[texture(0)]
+    #[sampler(1)]
+    plane: Handle<Image>,
+}
+
+impl UiMaterial for SubtractPlane {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://payback/hud/subtract.wgsl".into()
+    }
+
+    fn specialize(descriptor: &mut RenderPipelineDescriptor, _key: UiMaterialKey<Self>) {
+        use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+        if let Some(target) = descriptor.fragment.as_mut().and_then(|f| f.targets[0].as_mut()) {
+            target.blend = Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::ReverseSubtract,
+                },
+                alpha: BlendComponent {
+                    src_factor: BlendFactor::Zero,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+            });
+        }
+    }
+}
 
 /// UI language: the middle token of `Phrases/Global.<language>.phrases`
 /// as found on disk (`DAT_012a63d4`). Changing it reloads the global
@@ -598,17 +672,68 @@ pub fn hud_canvas(physical: UVec2, hires: bool) -> (usize, usize, bool) {
 /// bilinear 2× quads in hardware (`DrawIcon__FP4Iconii` @ 10085300).
 struct Pen<'p, 'a> {
     p: &'p mut Painter<'a>,
+    /// The subtract plane (RGBA like the canvas), see [`SubtractPlane`].
+    sub: &'p mut [u8],
     /// The icons as loaded for this mode (lo-res or software-doubled).
     icons: &'p HudIcons,
     hi: bool,
     /// Hardware hi-res: lo-res icons drawn ×2 bilinear.
     bilinear: bool,
+    /// Hardware (Warp3D) renderer.
+    hardware: bool,
 }
 
 impl Pen<'_, '_> {
     /// Offset scale: 2 in hi-res.
     fn k(&self) -> i32 {
         if self.hi { 2 } else { 1 }
+    }
+
+    /// `Draw2DEffect(tex, x0, y0, x1, y1, 0x10000)` (Mac @ 100a8210 ->
+    /// `drawGroundAlpha`; OS4 `FUN_0103500c`): the 64×64 texture
+    /// stretched over (x0, y0)–(x1, y1), u += 0x3FFFFF/(w + 1) per pixel
+    /// (16.16), v += 0xFC0/(y1 − y0) per row (6 fraction bits), through
+    /// table 1: the texel's palette colour is subtracted from the view
+    /// (the subtract plane). Warp3D blends `(7, 8)` instead, with the
+    /// texture as loaded: `FadeDarken` inverted with alpha max/2
+    /// (`API_3D_Set_Invert`), `FadeDarken2` black with alpha max
+    /// (`API_3D_Set_Shadow`; `InitGraphics` @ 1008d110).
+    fn fade(&mut self, which: usize, x0: i32, y0: i32, x1: i32, y1: i32) {
+        let tex = &self.icons.fade[which];
+        if tex.px.is_empty() {
+            return;
+        }
+        let (w, h) = (self.p.w as i32, self.p.h() as i32);
+        let du = 0x3FFFFF / (x1 - x0 + 1).max(1);
+        let dv = 0xFC0 / (y1 - y0).max(1);
+        let pal = self.p.pal;
+        let mut v = 0;
+        for y in y0..=y1 {
+            let row = ((v >> 6) as usize).min(tex.h - 1);
+            v += dv;
+            if !(0..h).contains(&y) {
+                continue;
+            }
+            let mut u = 0;
+            for x in x0..=x1 {
+                let col = ((u >> 16) as usize).min(tex.w - 1);
+                u += du;
+                let c = tex.px[row * tex.w + col] as usize;
+                if !(0..w).contains(&x) || c == 0 {
+                    continue;
+                }
+                let rgb = [pal[c * 3], pal[c * 3 + 1], pal[c * 3 + 2]];
+                let m = rgb[0].max(rgb[1]).max(rgb[2]);
+                let i = (y as usize * self.p.w + x as usize) * 4;
+                if !self.hardware {
+                    self.sub[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                } else if which == 0 {
+                    self.p.px[i..i + 4].copy_from_slice(&[255 - rgb[0], 255 - rgb[1], 255 - rgb[2], m / 2]);
+                } else {
+                    self.p.px[i..i + 4].copy_from_slice(&[0, 0, 0, m]);
+                }
+            }
+        }
     }
 
     fn icon(&mut self, icon: &Icon, x: i32, y: i32, blend: Blend) {
@@ -653,6 +778,8 @@ fn draw(
     title: Res<BigTitle>,
     banner: Res<Banner>,
     texts: Res<Texts>,
+    labels: Res<labels::Labels>,
+    view: Query<(&Camera, &GlobalTransform), With<crate::camera::GameCamera>>,
 ) {
     let Some(lo) = icons else { return };
     let physical = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
@@ -668,10 +795,15 @@ fn draw(
     if (canvas.w, canvas.h) != (w, h) {
         canvas.w = w;
         canvas.h = h;
-        if let Some(mut img) = images.get_mut(&canvas.image) {
-            *img = blank_sized(w, h);
+        for handle in [&canvas.image, &canvas.sub] {
+            if let Some(mut img) = images.get_mut(handle) {
+                *img = blank_sized(w, h);
+            }
         }
     }
+    let mut sub = std::mem::take(&mut canvas.sub_px);
+    sub.clear();
+    sub.resize(w * h * 4, 0);
     let Some(mut img) = images.get_mut(&canvas.image) else {
         return;
     };
@@ -682,11 +814,13 @@ fn draw(
         w,
         pal: &data.palette,
     };
-    let mut pen = Pen { p: &mut p, icons: set, hi, bilinear };
+    let hardware = crate::render_mode::is_hardware();
+    let mut pen = Pen { p: &mut p, sub: &mut sub, icons: set, hi, bilinear, hardware };
     if hud.multiplayer {
         let label = texts.global(2189);
         let views = Views { title: &title, banner: &banner, label: &label, frame };
         views.draw(&mut pen, &hud.views, physical);
+        canvas.sub_px = sub;
         return;
     }
     let ic = pen.icons;
@@ -694,6 +828,21 @@ fn draw(
     let xmax = w as i32 - 1;
     let ymax = h as i32 - 1;
     let cx = (xmax >> 1) + 1;
+
+    // Floating labels (`DoLabels__Fsiiii` @ 10094f20), drawn in the view
+    // before the HUD: font 2 at (sx − 7·len/2, sy + 3) of the projected
+    // point, the pitch doubled in hi-res but not the centring offset.
+    if let (Ok((cam, eye)), Ok(win)) = (view.single(), window.single()) {
+        let size = win.size();
+        let origin = cam.logical_viewport_rect().map_or(Vec2::ZERO, |r| r.min);
+        for l in &labels.0 {
+            let at = crate::world::object_to_render(l.pos.as_vec3());
+            let Ok(p) = cam.world_to_viewport(eye, at) else { continue };
+            let p = (p + origin) / size * Vec2::new(w as f32, h as f32);
+            let x = p.x.floor() as i32 - ((7 * text_len(&l.text)) >> 1);
+            pen.text(&ic.them, &l.text, x, p.y.floor() as i32 + 3, 7, Blend::Lighten);
+        }
+    }
 
     // `DrawGraphics__FiP6Objectisi` @ 100929e0 (OS4 `FUN_01019bd8`).
     let blink = frame & 2 != 0;
@@ -814,7 +963,7 @@ fn draw(
     // (hi-res −68, 22 apart; the scroll is not doubled).
     if let Some(speaker) = dialog.open {
         let top = ymax - 1 - 40 * k * dialog.anim / 15;
-        pen.p.darken(0, top, xmax, ymax);
+        pen.fade(0, 0, top, xmax, ymax);
         if dialog.anim >= 15 {
             pen.icon(&ic.speakers[speaker as usize], 2, ymax - 39 * k, Blend::Plain);
             let n = dialog.lines.len() as i32;
@@ -837,6 +986,17 @@ fn draw(
         let x = cx - ((k * title.pitch * n) >> 1);
         let y = ((ys(h as i32) * title.y) >> 12) - 11;
         pen.text(&ic.big, &title.text.to_uppercase(), x, y, title.pitch, Blend::Lighten);
+    }
+    canvas.sub_px = sub;
+}
+
+/// Copy the subtract plane drawn by [`draw`] into its image.
+fn upload_plane(canvas: Res<Canvas>, mut images: ResMut<Assets<Image>>) {
+    if let Some(mut img) = images.get_mut(&canvas.sub)
+        && let Some(px) = img.data.as_mut()
+        && px.len() == canvas.sub_px.len()
+    {
+        px.copy_from_slice(&canvas.sub_px);
     }
 }
 
@@ -885,7 +1045,7 @@ fn draw_banner(pen: &mut Pen, banner: &Banner, cx: i32) {
         let r = 149 - t;
         (16 * r / d, 16 * r / d - 14 * k)
     };
-    pen.p.darken(cx - 80 * k, 0, cx + 80 * k, h);
+    pen.fade(1, cx - 80 * k, 0, cx + 80 * k, h);
     let tx = cx - ((7 * k * text_len(&banner.text)) >> 1);
     let ic = pen.icons;
     pen.text(&ic.you, &banner.text, tx, ty, 7, Blend::Lighten);
@@ -918,13 +1078,22 @@ impl Views<'_> {
             let (x0, y0) = (sx(x), sy(y));
             let (vw, vh) = (sx(rw).clamp(1, w - x0.min(w - 1)), sy(rh).clamp(1, h - y0.min(h - 1)));
             let mut buf = vec![0u8; vw * vh * 4];
+            let mut plane = vec![0u8; vw * vh * 4];
             let mut sub = Painter { px: &mut buf, w: vw, pal: pen.p.pal };
-            let mut sp = Pen { p: &mut sub, icons: pen.icons, hi: pen.hi, bilinear: pen.bilinear };
+            let mut sp = Pen {
+                p: &mut sub,
+                sub: &mut plane,
+                icons: pen.icons,
+                hi: pen.hi,
+                bilinear: pen.bilinear,
+                hardware: pen.hardware,
+            };
             self.view(&mut sp, i, v, vw as i32, vh as i32, h as i32);
             for row in 0..vh {
-                let src = &buf[row * vw * 4..(row + 1) * vw * 4];
                 let at = ((y0 + row) * w + x0) * 4;
-                pen.p.px[at..at + vw * 4].copy_from_slice(src);
+                let span = row * vw * 4..(row + 1) * vw * 4;
+                pen.p.px[at..at + vw * 4].copy_from_slice(&buf[span.clone()]);
+                pen.sub[at..at + vw * 4].copy_from_slice(&plane[span]);
             }
         }
     }
@@ -945,7 +1114,7 @@ impl Views<'_> {
         // Kills box: FadeDarken (0, y − 5)–(5 + (len + 3)·7k + 5, y + 13k).
         let y = ymax - 13 * k;
         let len = text_len(self.label);
-        pen.p.darken(0, y - 5, 5 + (len + 3) * 7 * k + 5, y + 13 * k);
+        pen.fade(0, 0, y - 5, 5 + (len + 3) * 7 * k + 5, y + 13 * k);
         let s = format!("{} {}", self.label, v.kills);
         pen.text(&ic.them, &s, 5, y, 7, Blend::Lighten);
         if self.banner.view.is_none_or(|b| b as usize == i) {

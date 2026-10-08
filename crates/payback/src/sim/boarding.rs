@@ -383,6 +383,8 @@ fn walk_to_door(
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut session: ResMut<PlayerSession>,
+    mut labels: ResMut<crate::hud::labels::Labels>,
+    mode: Res<crate::level::GameMode>,
     mut walkers: Query<
         (Entity, &mut Obj, &mut Stick, &mut Boarding, Option<&Arsenal>, Has<Touched>),
         (With<Person>, Without<Vehicle>),
@@ -501,7 +503,10 @@ fn walk_to_door(
                 }
                 v.wanted = p.wanted.max(floor);
             }
-            v.score = p.score + if police { 1500 } else { 1000 } * session.multiplier;
+            let pay = if police { 1500 } else { 1000 } * session.multiplier;
+            v.score = p.score + pay;
+            // Its label at the vehicle (`AddLabelPercent`, hud::labels).
+            labels.add_score(v.pos, pay, mode.is_multiplayer());
             if v.state != State::Parked {
                 // A driven car throws its driver out; a stopped one
                 // (state 5, e.g. a police car whose cop got out) has no one

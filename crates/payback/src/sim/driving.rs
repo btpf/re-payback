@@ -11,10 +11,11 @@
 
 use super::collide;
 use super::people::PlayerInputs;
-use super::{Obj, State, Stick, Trig, wrap};
+use super::{Obj, Rng, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
+use crate::effects::{Blend, Effects, Tex};
 use crate::mapedit::MapEdit;
 use crate::mission::{Triggers, kind};
 use crate::objects::{ObjectLibrary, SetScenery};
@@ -168,6 +169,8 @@ fn drive(
     mut triggers: ResMut<Triggers>,
     mut edits: MessageWriter<MapEdit>,
     mut set_scenery: MessageWriter<SetScenery>,
+    mut rng: ResMut<Rng>,
+    mut effects: ResMut<Effects>,
     mut q: Query<(
         Entity,
         &mut Obj,
@@ -179,6 +182,9 @@ fn drive(
 ) {
     let (Some(city), Some(library)) = (city, library) else { return };
     let mut glass = Vec::new();
+    // Snowmen knocked down this tick (the original clears the cell at
+    // once, so later circles and vehicles no longer meet it).
+    let mut snowmen: Vec<(usize, usize, usize)> = Vec::new();
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((e, mut obj, veh, mut d, stick, is_player)) = q.get_mut(e__) else { continue };
         let t = &TYPES[veh.kind];
@@ -476,6 +482,34 @@ fn drive(
         }
         for b in bumps {
             if b.id == SNOWMAN {
+                if snowmen.contains(&(b.sx, b.sy, b.level)) {
+                    continue;
+                }
+                snowmen.push((b.sx, b.sy, b.level));
+                // 5 type-1 `Dust` puffs (table 0, 600 + r(300)) from the
+                // gameplay `random`, 7 draws each, last argument first: at
+                // the square centre ± (100, 400), z = the front circle's
+                // ground (+0x8c8) ± 150, v = (±150, ±50, ±50) / 3 (Mac
+                // `AddCollideObj` @ 10055c70 at 100565f0, OS4
+                // `FUN_01045288`).
+                for _ in 0..5 {
+                    let size = 600 + rng.rand(300);
+                    let vz = rng.rand(100) - 50;
+                    let vy = rng.rand(100) - 50;
+                    let vx = rng.rand(300) - 150;
+                    let z = h[4] + rng.rand(300) - 150;
+                    let y = (b.sy * 2048 + 0x270) as i32 + rng.rand(800);
+                    let x = (b.sx * 2048 + 0x39c) as i32 + rng.rand(200);
+                    effects.add(
+                        1,
+                        Tex::Dust,
+                        Vec3::new(x as f32, y as f32, z as f32),
+                        Vec3::new(vx as f32, vy as f32, vz as f32),
+                        size as f32,
+                        obj.level as u8 + 1,
+                        Blend::Add,
+                    );
+                }
                 set_scenery.write(SetScenery {
                     sx: b.sx,
                     sy: b.sy,

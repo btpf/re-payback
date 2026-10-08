@@ -821,6 +821,67 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   flares are red, amber and green. No sun flare.
 * **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47; the Mac has no `Blood.dark` and keeps its own `Blood` at night, see `mac_version.md`). `Bubble` is loaded but unused. FadeDarken*,
   HealthBar are HUD textures.
+* **Debris** (CONFIRMED: Mac `Split` @ 100a78b0 = OS4 `FUN_01035438`, `Detonate`
+  @ 100550c0, `Bang` @ 100a6dd0 = OS4 `FUN_01035730`, the part loop at the top of
+  `UpdateEffects` @ 100aa1f0, `DrawPart` @ 100794c0): a separate list of 4 × 500 parts
+  (0x38 bytes: model, face, x, y, z, vx, vy, vz, 3 angles, 3 spins; Mac base
+  `_DAT_1017c900 + list·0x38 + i·0xe0`, count `_DAT_1017cf2c[list]`). `Split(model, list,
+  x, y, z, vx, vy, vz, roll, pitch, heading)` adds one part per face (1..n), at the face
+  centroid of the ×16 vertices; a person (`+0x8165`/OS4 `+0x4909` set) only its first
+  20 faces, at ±500 at random. Velocity `v + r(250) − 125` (z: `vz − r(250) − 250`;
+  people r(100), ±50, −100), spins `r(250) − 125`; all from `random3`. `Detonate`
+  (object blown apart: `DoCollideStuff` health < −70, `do_Person`, `do_Weapon`) splits
+  the object **twice** into list `level + 1` with half its velocity and its angles
+  (+0xc roll, +0x10 pitch, +0x14 heading); `Bang` (crate, `CheckForCrate` @ 100593e0)
+  splits the crate at the square centre with zero velocity and angle
+  `rotation·0x1680 >> 8`, then adds its 2 Dust puffs. Per frame, per part: a part below
+  the street (z > 0x57e4) is removed (the last takes its place) and leaves, for a
+  person, a type-8 `Blood` splat (150 + r(200), table 3) in list − 1, else three type-6
+  smoke puffs (`Dust` with the shadow flag, table 1, 400 + r(200), v = (±50, ±50,
+  −r(100))/3) at z 0x57e4; otherwise `pos += v·ticks`, below the street 1 in 3 bounce
+  (`z = 0x57e4, vz = −vz/2`), `vz += 50` (per frame), angles `+= spin·ticks` mod 0x1680,
+  and per tick 1 in 3 a trail puff (people: type 6 `Blood` table 3, 150 + r(50), ±25;
+  else type 1 smoke, table 1, 250 + r(100), ±50; both v = (r(20), r(20) − 10,
+  10 − r(20))/3). Parts outside the view rectangle are removed too. `DrawPart` draws the
+  face around its centroid rotated roll (X–Z), pitch (Y–Z), heading (X–Y) in `>> 8`
+  integer steps (people `/0x300`: a third the size), at the part, as a **flat black
+  triangle** (software `Plain` colour 0; Warp3D RGB 0, alpha 1), a mode-5 face (slot 0)
+  as a black line; skipped when nearer than depth 6000 or off the 320×200 screen.
+  Port: `debris.rs` (no view-rectangle removal or near cull; split once when the
+  simulation leaves an object at health < −70, after the tick's combat).
+* **Snowman** (CONFIRMED, Mac `AddCollideObj` @ 10055c70 at 100565f0, OS4
+  `FUN_01045288`): a non-person meeting scenery 0xfe clears the cell and throws 5 type-1
+  **`Dust`** puffs (table 0, i.e. white-additive "snow"; there is no snow texture)
+  of 600 + r(300), at (square centre x + r(200) − 100, centre y + r(800) − 400,
+  front-circle ground +0x8c8 + r(300) − 150), v = (r(300) − 150, r(100) − 50, r(100) − 50)/3, list
+  `level + 1`, from the **gameplay** `random` (7 draws each). Port: `sim/driving.rs`.
+* **Floating labels** (CONFIRMED: Mac `AddLabel` @ 10094c10, `AddLabelPercent`
+  @ 10094d40, `DoLabels` @ 10094f20, called from `DrawView` @ 1006eb80 after the
+  flares): up to 500 texts at a world point, life 60 ticks, moving 32 units north
+  (−y) per tick. Drawn per view with `DisplayTextAlpha` in font 2 (`Them`), table 3,
+  at `(sx − 7·len/2, sy + 3)` of the point projected like an object (depth
+  `camH·16 − 0x100 + z`); the pitch 7 doubles in hi-res but the centring offset does
+  not. `AddLabelPercent(x, y, z, 2, n)` writes `"%d"`, only in single player and only
+  when |n| > 10. Callers: kills at the player (`CheckHitObject` @ 100542d0, 2500 / 1500 ×
+  multiplier; not the Copkiller bonus), carjacks at the vehicle (`GetInOutVehicles`,
+  1500 / 1000 ×), "Irony bonus!" at the player (`CheckForCollisions`, 10000 ×), the
+  script `AddScore` at the player (`AddPlScore` @ 10052630). Explosion damage and
+  punches have no label. `AddLabel` shows the pickup's name (2100–2104, 2106, 2107 for
+  kinds 1–7, 2105 info, 2108 key) at the square centre and the player's z
+  (`CheckForWeapon` @ 100597e0); the port used to show it in the vehicle-name banner.
+  Port: `hud/labels.rs` (single view only; the Irony label is not wired yet).
+* **HUD panels** (CONFIRMED, Mac `DisplayMessage` @ 1008f840, `DisplayVehicleName`,
+  `DrawKills`, `Draw2DEffect` @ 100a8210 → `drawGroundAlpha`; `InitGraphics` loads the
+  textures): the message box and kills box stretch `FadeDarken`, the vehicle banner
+  `FadeDarken2`, over the rectangle (u += 0x3FFFFF/(w+1) per pixel, v += 0xFC0/(y1−y0)
+  per row) through table 1, **subtracting** the texel colour (≈(195,155,47) for
+  FadeDarken) from the view, the same in the rotating view. Bright walls therefore turn
+  dark blue rather than grey. Warp3D blends (7, 8) with the texture as converted:
+  FadeDarken inverted with alpha max/2 (`API_3D_Set_Invert`), FadeDarken2 black with
+  alpha max (`API_3D_Set_Shadow`). Port: `hud/mod.rs` `Pen::fade` and a subtract
+  plane under the HUD canvas (`SubtractPlane`, ReverseSubtract on the linear frame).
+  The old port drew a fixed 2/3 dark overlay, which barely darkened the near, bright
+  walls of the rotating view.
 
 Lifetimes are in game ticks (`DAT_0114c6a0` = ticks elapsed this frame; a tick is
 1/25 s on 68k (2 DateStamp ticks) and 1/30 s on OS4 and the Mac (the port's rate), CONFIRMED in `people.md` §1.1).

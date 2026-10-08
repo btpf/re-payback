@@ -244,6 +244,11 @@ fn start_random(world: &mut World, spec: &crate::level::LevelSpec, police: u8) {
     let progress = world
         .get_resource::<crate::frontend::progress::Profile>()
         .map_or(0, |p| p.cups.iter().position(|&c| c == 0).unwrap_or(6) as i32);
+    // Both come from outside the game (high-score file, profile) and
+    // change the simulation: recorded in the replay, and the recorded
+    // values used on playback.
+    let payback_formats::replay::RandomSetup { goal, progress } =
+        crate::replay::random_setup(world, payback_formats::replay::RandomSetup { goal, progress });
     *world.resource_mut::<MissionState>() = MissionState {
         city: 3,
         ..default()

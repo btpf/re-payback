@@ -500,6 +500,9 @@ else:                                               // drowned
     term is accumulated doubled and halved here), not the relative velocity (Mac `CheckForCollisions` @ 1006a150,
     CONFIRMED). It applies only when the victim's damage filter (+0x8ac Mac) is −1. Vehicles take base>>5.
   - The player on foot takes base>>3; NPC people take base>>1.
+  - A person is hurt only by a non-person whose speed (+0x890 Mac) is above 50, or above 100 when the victim is
+    the player (state 2); person–person contacts never hurt. The damage is applied once per pair after the
+    sub-step loop, and the person's speed is zeroed (Mac `CheckForCollisions` @ 1006a150, CONFIRMED).
   - More than 10 damage plays scream 0x25–0x27 and blood effects 8/9.
   - Death from this shows "Flattened!" (2021).
   - If the killing car is the one this ped was pulled out of (car id `+0x498` == ped `+0x340`): "Irony bonus!"
@@ -520,6 +523,11 @@ else:                                               // drowned
 - When health < 1, state becomes **7 (dead)**: the person lies flat with all input ignored.
 - For the player, `respawn timer DAT_0034c1c8[p] = 0x50` (**80 ticks = 3.2 s**) and the score is stored in
   `DAT_0034c1d8[p]`.
+  CONFIRMED on the Mac: `amiga_levelloop` @ 10100f50 (drowning/health checks), `CheckForCollisions` @ 1006a150
+  (run over) and `do_Person` @ 1013fbd0 (busted) store `+0x864` into `DAT_1017c524[p]` with the timer, and
+  `GetPlayerScore` @ 10052f80 returns that stored score while the timer runs. **There is no money penalty for
+  dying:** the respawn copies the stored score back (below). Port: `PlayerSession::saved_score` (single player)
+  and `Match::score` (multiplayer); `Script::money` reads the stored score while the player is down.
 - Messages (phrase IDs):
 
 | ID | Message | Cause |
@@ -539,7 +547,8 @@ else:                                               // drowned
 3. Otherwise:
    - The old player object, if not dead, gets state 5.
    - A new **MaleNormal** is created.
-   - Fields: state 2, frames 0/11, +0x344 = 0, player number, score restored.
+   - Fields: state 2, frames 0/11, +0x344 = 0, player number, score restored. (Mac `amiga_levelloop` @ 10100f50: `+0x864 = DAT_1017c524[p]`,
+     CONFIRMED; the same in multiplayer.)
    - Health is the new object's 100. The object is zero-filled, so weapons (fists only), ammo and wanted level
      start at 0 (C: 68k `FUN_000ec686` respawn ~127750, `FUN_0003feb2`; the same at level start).
 4. Position (`FUN_0106ef6c`):

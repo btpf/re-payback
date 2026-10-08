@@ -31,7 +31,7 @@ use crate::objects::ObjectLibrary;
 use crate::sim::{Obj, Rng};
 use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
 use bevy::prelude::*;
-use payback_formats::replay::{Header, Input, NO_WEAPON_CHANGE, Record, Replay, VERSION};
+use payback_formats::replay::{Header, Input, NO_WEAPON_CHANGE, RandomSetup, Record, Replay, VERSION};
 use std::path::PathBuf;
 
 /// The recording buffer is 150000 bytes (one u16 per record); the
@@ -293,9 +293,28 @@ fn begin(
             map: map_path(&spec),
             level: spec.level as i32,
             random_missions: random_missions.0,
+            // Filled in by `random_setup` when the random missions start.
+            random_setup: None,
         },
         records: Vec::new(),
     });
+}
+
+/// The random missions' outside inputs (money goal from the high-score
+/// table, story progress from the profile): when playing back a replay that
+/// recorded them, the recorded values; otherwise `computed`, which goes
+/// into the recording. Older replays without them play with `computed`.
+pub fn random_setup(world: &mut World, computed: RandomSetup) -> RandomSetup {
+    let mut st = world.resource_mut::<ReplayState>();
+    let mode = st.mode;
+    match st.replay.as_mut() {
+        Some(r) if mode == Mode::Play => r.header.random_setup.unwrap_or(computed),
+        Some(r) if mode == Mode::Record => {
+            r.header.random_setup = Some(computed);
+            computed
+        }
+        _ => computed,
+    }
 }
 
 /// Level end: keep the recording as the last game.
@@ -554,12 +573,61 @@ mod tests {
                 map: "PROGDIR:Maps/2".into(),
                 level: 1,
                 random_missions: true,
+                random_setup: None,
             },
             records: vec![],
         };
         let (spec, mode) = launch_of(&r).unwrap();
         assert_eq!((spec.map.as_str(), spec.level), ("2", 1));
         assert_eq!(mode, GameMode::Rampage { police: 4 });
+    }
+
+    /// Recording stores the random missions' goal and progress; playback
+    /// uses the stored ones whatever the files say now; an older replay
+    /// without them plays with the current values.
+    #[test]
+    fn random_setup_recorded() {
+        let mut header = Header {
+            version: VERSION,
+            players: 1,
+            controllers: [KEYBOARD, -1, -1, -1],
+            required_kills: 5,
+            duration: 0,
+            seed: 9,
+            rampage: true,
+            police: 2,
+            map: "PROGDIR:Maps/1".into(),
+            level: 0,
+            random_missions: true,
+            random_setup: None,
+        };
+        let now = RandomSetup { goal: 900_000, progress: 6 };
+        let mut world = World::new();
+        world.insert_resource(ReplayState {
+            mode: Mode::Record,
+            replay: Some(Replay { header: header.clone(), records: vec![] }),
+            ..default()
+        });
+        assert_eq!(random_setup(&mut world, now), now);
+        let st = world.resource::<ReplayState>();
+        assert_eq!(st.replay.as_ref().unwrap().header.random_setup, Some(now));
+
+        let then = RandomSetup { goal: 1_500_000, progress: 0 };
+        header.random_setup = Some(then);
+        world.insert_resource(ReplayState {
+            mode: Mode::Play,
+            replay: Some(Replay { header: header.clone(), records: vec![] }),
+            ..default()
+        });
+        assert_eq!(random_setup(&mut world, now), then);
+
+        header.random_setup = None;
+        world.insert_resource(ReplayState {
+            mode: Mode::Play,
+            replay: Some(Replay { header, records: vec![] }),
+            ..default()
+        });
+        assert_eq!(random_setup(&mut world, now), now);
     }
 
     #[test]
@@ -581,6 +649,7 @@ mod tests {
                 map: map_path(&user),
                 level: 1,
                 random_missions: false,
+                random_setup: None,
             },
             records: vec![],
         };

@@ -74,6 +74,8 @@ fn contacts(
     mut effects: ResMut<Effects>,
     mut hurt: MessageWriter<Hurt>,
     session: Res<PlayerSession>,
+    mut labels: ResMut<crate::hud::labels::Labels>,
+    mode: Res<crate::level::GameMode>,
     mut q: Query<
         (Entity, &mut Obj, Has<Vehicle>, Has<Person>, Has<CameraTarget>, Option<&mut Drive>),
         Without<Projectile>,
@@ -221,6 +223,9 @@ fn contacts(
     for (e, player) in irony {
         if let Ok((_, mut o, ..)) = q.get_mut(e) {
             o.score += 10_000 * session.multiplier;
+            // Its label at the car (Mac `CheckForCollisions` @ 1006a150:
+            // `AddLabelPercent(car pos, 2, mult·10000)`).
+            labels.add_score(o.pos, 10_000 * session.multiplier, mode.is_multiplayer());
         }
         if let Some(t) = &texts {
             title.show_for(player, t.global(2027));

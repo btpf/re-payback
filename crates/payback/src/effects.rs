@@ -26,8 +26,10 @@
 //! - deletion of records outside the view rectangle (the simulation has no
 //!   view; records still expire through size and z);
 //! - type 15's looping 13 Flames sound (the per-type dynamic lights of OS4
-//!   `FUN_01036574` are in `crate::lighting`);
-//! - debris fragments (`FUN_01035438`), a separate list;
+//!   `FUN_01036574` are in `crate::lighting`).
+//!
+//! Debris (`FUN_01035438`, Mac `Split`) is a separate list, updated after
+//! the effects: `crate::debris`.
 //!
 //! Rendering: every (view, layer, blend) triple, plus one lens-flare pass per
 //! layer, is one mesh rebuilt each frame on the view's render layer from
@@ -579,7 +581,7 @@ impl Plugin for EffectsPlugin {
 /// One tick of the effect lists. Their random numbers come from the
 /// cosmetic generator (`random3` in Mac `UpdateEffects` @ 100aa1f0), so
 /// effects never move the game's sequence.
-fn update_effects(
+pub(crate) fn update_effects(
     mut effects: ResMut<Effects>,
     mut flash: ResMut<ScreenFlash>,
     rng: Option<ResMut<VisualRng>>,

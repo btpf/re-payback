@@ -68,6 +68,8 @@ fn score_kills(
     session: Res<PlayerSession>,
     texts: Option<Res<Texts>>,
     mut title: ResMut<BigTitle>,
+    mut labels: ResMut<crate::hud::labels::Labels>,
+    mode: Res<crate::level::GameMode>,
     mut player: Query<(Entity, &mut Obj), With<CameraTarget>>,
 ) {
     for k in killed.read() {
@@ -75,7 +77,11 @@ fn score_kills(
         if k.victim == pe || last.0.remove(&k.victim).flatten().is_none() {
             continue;
         }
-        p.score += if k.police { POLICE } else { CIVILIAN } * session.multiplier;
+        let pay = if k.police { POLICE } else { CIVILIAN } * session.multiplier;
+        p.score += pay;
+        // Its label at the player (`AddLabelPercent`, hud::labels); the
+        // Copkiller bonus has none.
+        labels.add_score(p.pos, pay, mode.is_multiplayer());
         if !k.police {
             continue;
         }

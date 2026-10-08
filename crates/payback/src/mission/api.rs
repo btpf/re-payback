@@ -350,15 +350,26 @@ impl<'w> Script<'w> {
         self.world.get_mut::<Obj>(p)
     }
 
+    /// `GetPlayerScore` (Mac @ 10052f80): while the player is down
+    /// (respawn timer running) the score stored at death.
     pub fn money(&mut self) -> i32 {
+        let session = self.world.resource::<PlayerSession>();
+        if session.respawn_timer > 0 {
+            return session.saved_score;
+        }
         self.player_obj().map(|o| o.score).unwrap_or(0)
     }
 
-    /// `AddMoney(n)`: n × the bonus multiplier.
+    /// `AddMoney(n)`: n × the bonus multiplier, with its label at the
+    /// player (`AddPlScore` @ 10052630 -> `AddLabelPercent`).
     pub fn add_money(&mut self, n: i32) {
         let mult = self.world.resource::<PlayerSession>().multiplier;
-        if let Some(mut o) = self.player_obj() {
-            o.score += n * mult;
+        let multiplayer = self.world.get_resource::<crate::level::GameMode>().is_some_and(|m| m.is_multiplayer());
+        let Some(mut o) = self.player_obj() else { return };
+        o.score += n * mult;
+        let pos = o.pos;
+        if let Some(mut labels) = self.world.get_resource_mut::<crate::hud::labels::Labels>() {
+            labels.add_score(pos, n * mult, multiplayer);
         }
     }
 

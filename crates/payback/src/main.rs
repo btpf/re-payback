@@ -21,6 +21,7 @@ mod autoplay;
 mod camera;
 mod city;
 mod data;
+mod debris;
 mod effects;
 mod frontend;
 mod hud;
@@ -89,7 +90,7 @@ fn main() -> AppExit {
             sim::SimPlugin,
             (audio::AudioPlugin, music::MusicPlugin),
             water::WaterPlugin,
-            (effects::EffectsPlugin, weather::WeatherPlugin),
+            (effects::EffectsPlugin, weather::WeatherPlugin, debris::DebrisPlugin),
             hud::HudPlugin,
             frontend::FrontendPlugin,
             mission::MissionPlugin,

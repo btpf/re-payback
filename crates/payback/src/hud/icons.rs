@@ -218,6 +218,10 @@ pub struct HudIcons {
     pub lights: Vec<Icon>,
     pub blobs: Vec<Icon>,
     pub checkpoint: [Icon; 2],
+    /// `EffectTextures/FadeDarken` (message box, kills box) and
+    /// `FadeDarken2` (vehicle-name banner), 64×64, stretched over panels
+    /// (`Draw2DEffect`); never doubled.
+    pub fade: [Icon; 2],
 }
 
 impl HudIcons {
@@ -243,6 +247,7 @@ impl HudIcons {
             lights: all(&self.lights),
             blobs: all(&self.blobs),
             checkpoint: [f(&self.checkpoint[0]), f(&self.checkpoint[1])],
+            fade: self.fade.clone(),
         }
     }
 
@@ -297,6 +302,12 @@ impl HudIcons {
                 Icon::load(data, "Checkpoint.red", 54, 54),
                 Icon::load(data, "Checkpoint.blue", 54, 54),
             ],
+            fade: ["FadeDarken", "FadeDarken2"].map(|n| {
+                let px = data.read(&format!("EffectTextures/{n}")).unwrap_or_default();
+                let mut px = px.get(..64 * 64).map_or_else(Vec::new, <[u8]>::to_vec);
+                px.resize(64 * 64, 0);
+                Icon { w: 64, h: 64, px }
+            }),
         }
     }
 }

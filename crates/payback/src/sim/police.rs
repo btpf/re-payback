@@ -472,6 +472,8 @@ fn bust(
         commands.entity(pe).insert(super::boarding::PullOut);
     }
     session.respawn_timer = 80;
+    // Mac `do_Person` stores the score with the timer (`DAT_1017c524`).
+    session.saved_score = p.score;
     if let Some(t) = texts {
         title.show(t.global(2017));
         dialog.begin(Speaker::Lips);
