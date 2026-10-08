@@ -67,7 +67,7 @@ differ / Mac only / Amiga only.
 | General | 4 | 4 | 4 | `Alpha.256` differs; Mac ships `Gouraud.256` |
 | Icons | 452 | 4 | 3 | Title screens differ |
 | Phrases | 6 | 8 | 10 | Text changes; French phrases; fewer languages than Amiga |
-| UserMaps | 4 | 3 | 163 | Many bundled user maps |
+| UserMaps | 4 | 3 | 163 | 163 files = 32 bundled community maps (31 playable; one is the editor's test map) |
 | Videos | 0 | 0 | 4 | MPEG-1/2 intro, high and low quality |
 | Sounds | 74 | 0 | 2 | Samples identical |
 | Maps | 14 | 1 | 4 | `2.thumb` differs; `.scores` files shipped |
@@ -82,6 +82,18 @@ with 8-bit masks; `payback_formats::icon::mac_app_icon`), embedded by
 ## Findings
 
 The full comparison report is `mac_differences.html` in the repository root
-(git-ignored, local only). Per-area research notes are in `analysis/mac/*.md`.
+(git-ignored, local only; regenerate with `python analysis/mac/build_report.py`).
+Headlines:
+- The Mac game code is the same C source as the Amiga OS4 build.
+- There's no higher frame rate: a 30 Hz tick, a 30 fps cap in game and 60 fps
+  menus.
+- About 20 bug fixes.
+- New random phone missions in Rampage.
+- Pedestrians keep to the pavement.
+- People models have their origin at the feet.
+- 225 cube textures were repainted.
+- `Alpha.256` is rebuilt from the final palette.
+- A 72 s MPEG intro film.
+- The sound samples are identical. Per-area research notes are in `analysis/mac/*.md`.
 Confirmed facts get merged into the relevant `docs/re/*.md` notes, citing the
 Mac function name and address (e.g. `drawCubeTop_None` @ `100c8160`).
