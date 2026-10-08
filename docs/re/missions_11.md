@@ -152,7 +152,7 @@ Handler11(ev):
 
 The phone handlers all start with `KillAllPhones(); Dialog_Begin(0); Say2(briefing); End`.
 Speaker 0 is the phone; the mission-time voice is speaker 2, and the passengers in M3/M4 are
-speaker 1 (speaker meaning INFERRED). In the helpers M2/M3/M9 the phone event calls the
+speaker 1. CONFIRMED: the argument only selects the HUD icon (0 Phone, 1 Lips, 2 Mobile, 3 Pager, 4 Info; `0x21e00`/`0x22300`); the voice is always the same. In the helpers M2/M3/M9 the phone event calls the
 helper with ev = −1, which falls into the helper's `default:` branch = mission setup.
 
 Pseudocode notation: `T(ev,type,a,b,c,d)` = `AddMissionTrigger`; `K(ev)` = `KillMissionTrigger`;
@@ -238,7 +238,7 @@ within range of the block). Block centre B = (0x28400,0x38400) = (80,112), floor
 
 ```
 0x65 (picked up): D(2, 3 "Ok, now put it down next to the apartment block. <Press fire once to place the bomb.>")
-                  T(0x66, 0x22, 8)               // player uses weapon 8 (= places the bomb) [weapon id INFERRED]
+                  T(0x66, 0x22, 8)               // player places the remote bomb (weapon 8, CONFIRMED)
                   T(0x67, 0x0f, B, 0)            // player within 0x1000 of B
 0x67 (at block):  near = 1; D(2, 6 "Now drop the bomb."); T(0x6e, 0x1c, B)    // player leaves ±0x1800
 0x6e (left):      near = 0; D(2, 47 "You're too far away - move closer."); T(0x67, 0x0f, B, 0)
@@ -303,7 +303,7 @@ city. We've decided to kidnap him. His house is heavily guarded… slip in unnot
 Setup (`default:` branch `0xb8be6`):
 ```
 SetCube(0x38,0x72,1, 0x200,0x200, 0,0,0); SetCube(0x38,0x73,1, 0x200,0x200, 0,0,0)
-      // remove cube level 1 at (56,114),(56,115); in the map these are slope-4 cubes with a genlocked face [INFERRED: fence gap = sneak entrance]
+      // remove cube level 1 at (56,114),(56,115) (slope 0 = not drawn, not solid; CONFIRMED); in the map these are slope-4 cubes with a genlocked face [INFERRED: fence gap = sneak entrance]
 SetFaceTop(0x38,0x73,0, 1,0x20e,1); SetFaceTop(0x39,0x73,0, 1,0x20b,1)
 T(0x15e, 0x06)                                         // death
 CreateActor(0x12d, -12, 0x1ac00,0x38c00 /*(53,113)*/, 0, 0, 0)    // patrol pair, guard A
@@ -646,7 +646,7 @@ shows only its low byte), which is not a real difference. Real differences:
 * `PedHelper_b448e(newId, vehicleId, pedModel(<0), p4)` spawns ped `~pedModel` with
   id `newId` stepping out of the vehicle with id `vehicleId`. It is used for passengers
   leaving (M3 brother, M4 wife/instructor, M5 brother from the boot). CONFIRMED structure;
-  p4 (0/1) is probably the door side (INFERRED).
+  p4 is the side: 0 = right (the player's own exit side), non-zero = left (`0xdb196`, CONFIRMED).
 * `Actor_Follow(id, -1)` makes id follow the player (`+0x41a = 1`). `-2` (any other negative)
   clears the follow. `Actor_Follow(id, other)` follows actor `other`. CONFIRMED (`0xb2072`).
 * `0x11a354` is written by the level code (mission/slot index), not by the phone system.
@@ -656,19 +656,22 @@ shows only its low byte), which is not a real difference. Real differences:
 
 ## 8. Open questions
 
-1. Type 0x22 with a = 8 (M1 "bomb placed"): which weapon index 8 is (the remote bomb?). INFERRED from phrase 3.
-2. M5 counting: when a gangster boards the car (type 0x3d completes), is the ped actor
-   removed in a way that fires its type-9 trigger 0x21c? If so, `killed` would be
-   over-counted. Needs the AI state 0x13 completion code (`0xa6ae2`).
-3. M3: exact effect of the `SetCube`/`SetFaceTop` edits at (56..57,114..115). The map has
-   slope-4 cubes with genlocked faces there. A fence gap or back entrance is likely but unverified.
+1. ~~Type 0x22 with a = 8~~ Resolved: 8 = the remote bomb, sent when it is placed; the bomb
+   carries the `SetProjectileId` id (CONFIRMED, `0xa6c62` in `0xe3a58`, `0xefece`).
+2. ~~M5 counting~~ Resolved: no over-count. Boarding (`0xa6ae2`) sets the ped to state 6, removed
+   by `0xdc5ac` → `0xcf290`, which never calls `0xa653a`; type 9 is not fired. CONFIRMED.
+3. M3: the `SetCube` edits remove the cubes (CONFIRMED); the map has slope-4 cubes with
+   genlocked faces there, so a fence gap / back entrance is likely, but an in-game look is
+   still needed.
 4. M1: the visual meaning of the `SetFaceTop(...,0x1dd)` ring around the demolished block
    (texture 0x1dd is also the ground texture of (107,81) and (56,114)).
-5. Speaker ids 0/1/2 of `Dialog_Begin`: here 0 = phone briefing, 1 = passenger/NPC,
-   2 = boss voice (INFERRED).
+5. ~~Speaker ids~~ Resolved: `Dialog_Begin(icon)` only selects the HUD icon (0 Phone, 1 Lips,
+   2 Mobile, 3 Pager, 4 Info); the voice is always SqueakyVoice. CONFIRMED (`0xb40ec` → `0x21e00`).
 6. RC bonus: whether the "Kill frenzy" HUD clock conflicts with a mission's own type-5 timer
    (M2 75 s, M6 90 s) when both run. `Trigger_GetTimerSeconds` uses the first type-5 trigger.
 7. The helper `default:` branches (M2/M3/M9) rebuild the mission on any unknown event.
    Harmless in practice, but a reimplementation should handle setup only for ev = −1.
-8. Ped model indices −7/−9/−10/−12 → ped models 6/8/9/11. Which skin each is
-   (wife, instructor, brother, guards) was not checked.
+8. Ped models 6/8/9/11: 6 PedMale1 (white + blue), 8 PedMale2 (red + white), 9 PedMale3 (all
+   blue), 11 PedMale5_shotgun (dark blue + white, holds a shotgun). All are recolours of the
+   male body; there is no female model, so the "wife" is a male recolour (CONFIRMED, load order
+   `0xd7874`). Which body part each colour is on is not checked.

@@ -58,24 +58,88 @@ docker run --rm -v "$PWD:/work/impl" payback-re analyzeHeadless /tmp/p p68k \
 | `FUN_010024fc` | OS4 | Warp3D texture conversion; reads palette at `0x011490b8` |
 | `FUN_000d7874` | 68k | loads all object models; scenery table `0x348000` |
 
-## Open questions
+## Reverse-engineering notes
 
-- Sloped cubes: which edge `height1` belongs to; how much they raise the
-  cubes above. Current guess in `crates/payback/src/city.rs`.
-- Texture orientation and the meaning of the flip bit on side faces.
-- Square flags bits other than `0x20`; header `variant` field.
-- `.route`, `.mini`, `.vehicles`, `.textures`, `Human.motion` formats.
-- Object face `mode`/`param` (shading? environment mapping?).
-- Sound sample rates; the reflection (water) effect; night remapping.
-- The mission script API and how scripts are entered.
+Facts are marked CONFIRMED (with the original function address) or INFERRED.
+
+| Note | Covers |
+|---|---|
+| `docs/formats.md` | data file formats (maps, objects, textures, palette, phrases, sounds, companion files) |
+| `docs/re/rendering.md` | city renderer, slopes, faces, camera, water, weather, lighting, effects, object face modes |
+| `docs/re/vehicles.md` | vehicle table, physics, damage, AI drivers, traffic |
+| `docs/re/people.md` | player and pedestrians on foot, `Human.motion`, collision, boarding, AI states |
+| `docs/re/combat_police.md` | `.route` graph, police and wanted level, weapons, projectiles, explosions, scoring |
+| `docs/re/frontend_menus.md` | title, menus, config, saves, replays, multiplayer, rampage, `.thumb`/`.mini` |
+| `docs/re/frontend_audio.md` | fonts and icons, HUD layout, sound table and mixer, CD audio, intro video |
+| `docs/re/script_api.md` | mission script loading, trigger types, script API |
+| `docs/re/missions_00.md` … `missions_21.md` | the six level scripts, one note per level |
+| `docs/re/open_questions.md` | every open or INFERRED item across the notes, with its status |
+
+## Status (2026-10-08, `12698b5`)
+
+The reimplementation is playable end to end. All six story levels are ported
+from the 68k mission code and an automated bot (`--autoplay`) completes each
+of them; replays are deterministic (`analysis/scratch/replay/check.sh` reports
+MATCH). `progress.html` (local, git-ignored) has the per-area estimates.
+
+| Area | State | Code (`crates/payback/src/`) |
+|---|---|---|
+| Data formats | done; every shipped file parses in the tests | `payback-formats`: `map`, `obj`, `texture`, `palette`, `phrases`, `sound`, `motion`, `route`, `flc`, `replay`, `scores` |
+| City rendering | done: cubes and slopes, face types, water, weather, lens flares, Gouraud lighting, night headlights, rotating view, motion blur, palette snap, per-view effects in split screen | `city`, `water`, `weather`, `lighting`, `camera`, `postfx`, `shaders/` |
+| Objects and effects | done: scenery, pickups, animated scenery, particles, decals, parked vehicles (`.vehicles`) | `objects`, `effects`, `parked` |
+| People | done: player and pedestrians, motion, collision, boarding, drowning, respawn | `sim/people`, `sim/collide`, `sim/boarding`, `sim/ai` |
+| Vehicles | done: models, paint, liveries and shine, damage looks, physics, traffic, AI drivers | `vehicles`, `sim/driving`, `sim/contact`, `sim/traffic`, `sim/vehicle_ai` |
+| Combat and police | done: weapons, projectiles, explosions, pickups, hit money, wanted level, route pursuit, roadblocks, scoring | `sim/combat`, `sim/police`, `sim/pursuit`, `sim/score` |
+| Missions | done: trigger engine, script API, map edits, levels 00/01/10/11/20/21 | `mission/`, `mission/levels/`, `mapedit` |
+| Front end and HUD | done except the startup loading bar: menus, level select, results, pause, saves, high scores, intro video | `frontend/`, `hud/`, `intro` |
+| Audio | done except CD music (no tracks available): software mixer with pan and Doppler | `audio` |
+| Rampage, replays, multiplayer | done: rampage with high scores, record/play replays, 2–4 player split screen | `rampage`, `replay`, `multiplayer` |
+| Tooling | `--screenshot`, `--record`/`--play`, `--autoplay`, `--fast` | `main`, `replay`, `autoplay` |
+
+In progress in the working tree (not yet committed): a switchable hardware
+(Warp3D) render mode (`render_mode`); graphics options for renderer,
+resolution and window mode (`frontend/display`); key and gamepad redefinition
+(`frontend/bindings`); user maps (`frontend/usermaps`); staged level loading
+that fills the loading bar; in-car arrest, script police order 0x15 and
+multiplayer hijacking.
 
 ## Roadmap
 
-1. ~~Formats: maps, objects, textures, palette, phrases~~
-2. ~~Render the city and scenery in Bevy~~
-3. Player on foot: `Human.motion` animation, movement, collision with cubes
-4. Vehicles: physics (decompile handling code), entering/exiting, damage
-5. Pedestrians and traffic (square flags, routing)
-6. Weapons, pickups, police and wanted level
-7. Mission script API; reimplement the six level scripts
-8. Front end: menus, phrases/HUD, sound, CD audio, saves, replays
+Done: formats; city and scenery rendering; player on foot; vehicles;
+pedestrians and traffic; weapons, pickups, police and wanted level; the
+mission script API and all six level scripts; front end, HUD, sound, saves,
+replays; rampage and multiplayer; the rotating-view and motion-blur options.
+
+Remaining, by priority:
+
+1. Land the work in progress listed above (simulation fixes, hardware render
+   mode, graphics options, bindings, user maps).
+2. Framebuffer blends (effects, alpha tops, additive faces) are done in linear
+   light and snapped to the palette at the end; mode 0x14 (`CD.obj`, 50 %) is
+   drawn opaque.
+3. Front end: the startup loading bar (`startup.size`, 68k `FUN_000cc0c2`);
+   the repeat-last-message action; the `.vehicles` city flags for traffic on
+   user maps.
+4. Script `AddSound`: the last argument is the sound's z, not an audible range
+   (`script_api.md` §5); audibility is `vol / d²` only. (Trigger 0x42 is
+   RC-car-only, so level 21's rocket-car line never fires; the port already
+   never reports it.)
+5. Close the remaining questions in `docs/re/open_questions.md`.
+
+Not planned: CD music (no audio tracks are available); the shipped version-3
+replays, which the original also rejects.
+
+## Open questions
+
+The full list, with status and the evidence still needed, is in
+`docs/re/open_questions.md`. The questions this page used to list are resolved:
+
+| Question | Answer |
+|---|---|
+| Sloped cubes: which edge `height1` belongs to | `rendering.md` §1 (CONFIRMED) |
+| Texture orientation and the side-face flip bit | `rendering.md` §2 (CONFIRMED) |
+| Square flag bits; header `variant` | `formats.md` maps (CONFIRMED except bit `0x80`); `variant` = weather |
+| `.route`, `.mini`, `.vehicles`, `.textures`, `Human.motion` formats | `formats.md` companion files (CONFIRMED) |
+| Object face `mode`/`param`; Obj header `flag` | `formats.md` objects, `rendering.md` §10 (CONFIRMED) |
+| Sound sample rates, water reflection, night remapping | `frontend_audio.md` §4, `rendering.md` §3–4 |
+| Mission script API and entry | `script_api.md` §1–5 (CONFIRMED) |

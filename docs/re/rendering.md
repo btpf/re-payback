@@ -5,7 +5,7 @@ below are OS4 unless marked 68k). The OS4 port contains three renderers sharing 
 code path: the original **software** (chunky, Amiga) renderer, a Warp3D **hardware**
 path (`DAT_0114c7d8 != 0`) and the **rotating view** (`DAT_0114c7dc != 0`). The
 software / non-rotating path is what the Amiga game shows by default and is the
-reference here; the other two are mentioned where they clarify intent.
+reference here; the hardware renderer is §11.
 
 Tags: **CONFIRMED** = traced in code (and checked against data where possible);
 **INFERRED** = consistent with code/data but not fully traced.
@@ -246,8 +246,8 @@ every pixel writes `T[a·256 + b]` with the table pointer `DAT_0114c440 + 0x4000
 iterations); then `DAT_0114c6bc` flips and the next frame renders into the other
 buffer. So the visible frame is `T4[previous][current]`, the nearest palette colour to
 the average of the last two rendered frames (no feedback). The port does the same in
-the final pass (it keeps each pixel's palette index of the previous frame); it renders
-the software look regardless of the renderer.
+the final pass (it keeps each pixel's palette index of the previous frame); in the
+hardware render mode (§11) neither the snap nor the blur runs.
 
 Cube Alpha tops: `FUN_01036044(tex, x0,y0,x1,y1, 0x40000)` temporarily adds 0x40000
 to the current table pointer `DAT_0114c440` and draws with `FUN_0112bfdc`
@@ -280,7 +280,7 @@ over ice (map 1, on a zero-height cube 1 above the Reflect ice), `RoofWindow.chu
 * Other Reflect textures (`Ice.chunky`, map 1) use the same displacement but do not
   scroll.
 * Water tops are always lit "fully lit" (light 0x80) under Gouraud.
-* Warp3D path (for reference): the background is a 320×256 texture sampled at
+* Warp3D rotating view (§11.4 has the non-rotating formulas): the background is a 320×256 texture sampled at
   `u,v = 128 + 8·(screen offset from centre rotated by camera yaw)/f + wobble`, where
   wobble = `sin(((x+y)·16 + scroll)·90 units)·k/16384` per vertex (`FUN_010920d8`
   ~line 3020). The "CloudsReflect" *object* texture (cars/glass) is unrelated to
@@ -857,3 +857,187 @@ plain mode 4 faces, and the night headlight polygon, go into an additive overlay
 and mode 5 faces into a line-list overlay (1-pixel lines), drawn as child entities of
 the object (`sync_overlays`); the main mesh keeps a degenerate triangle in their place.
 Additive blending happens in linear colour rather than palette space.
+
+---
+
+## 11. Hardware (Warp3D) renderer
+
+The launcher (PaybackSetup, config field 19) starts the OS4 build with
+`DAT_0114c7d8 != 0`: every renderer function then takes its Warp3D branch. Sources:
+`analysis/ghidra_os4/decompiled.c`; the scratch extracts in `analysis/scratch/hw/`
+(city, lighting) and `analysis/scratch/hw2/` (effects, objects, front end).
+
+### 11.1 The Warp3D layer (`API_3D_*`, 0x01001eb8–0x01005000)
+
+* `FUN_01001eb8` opens `Warp3D.library` v2 and its `main` interface (`DAT_0114c3dc`);
+  `W3D_CheckDriver()` (+0x60) must report `W3D_DRIVER_3DHW` (bit 2), otherwise
+  hardware rendering is off. Failures elsewhere ("Unable to load textures to 3D card",
+  "Can't lock hardware", `FUN_01041864`) also fall back to software. CONFIRMED.
+* Interface offsets used (CONFIRMED from the call shapes, names INFERRED from the
+  Warp3D function order): +0x50 `CreateContext`, +0x54 `DestroyContext`, +0x5c
+  `SetState(ctx, state, action)`, +0x60 `CheckDriver`, +0x64 `LockHardware`, +0x68
+  `UnLockHardware`, +0x80 `AllocTexObj`, +0x84 `FreeTexObj`, +0x90 `SetFilter`, +0x9c
+  `UpdateTexImage`, +0xa4 `DrawLine`, +0xa8 `DrawPoint`, +0xac `DrawTriangle`, +0xbc
+  `SetBlendMode`, +0xc0 `SetDrawRegion`, +0x130 `SetCurrentColor` (W3D_Color, 4 floats).
+  `SetTexEnv`, `SetFogParams`, `SetZCompareMode`/`AllocZBuffer` are never called.
+* State bits (INFERRED from Warp3D.h; action 1 = enable, 2 = disable, deduced from the
+  screen clear in `FUN_0101a7dc`, which disables 0x100 around a black flat quad):
+  0x100 TEXMAPPING, 0x200 PERSPECTIVE, 0x400 GOURAUD, 0x2000 BLENDING, 0x4000 FOGGING,
+  0x40000/0x80000 anti-aliasing/dithering. `API_3D_Init` (`FUN_01002024`) sets
+  0x80000 1, 0x400 2, 0x100 1, 0x200 2, 0x40000 1, 0x4000 2, 0x2000 2, then
+  `SetDrawRegion` and `SetBlendMode(2, 2)`. The renderer toggles GOURAUD, PERSPECTIVE,
+  TEXMAPPING and BLENDING per primitive, caching them in `DAT_0114c3d8` / `3d6` / `3d4`.
+  **No Z buffer** (state 0x800 is never touched; painter's order as in software), **no
+  fog**, no gamma ramp.
+* Blend modes: only `(2, 2)` = ONE/ONE (additive, the default) and `(7, 8)` =
+  SRC_ALPHA/ONE_MINUS_SRC_ALPHA (set around alpha primitives, then restored).
+  CONFIRMED (72 call sites).
+* Triangles: `FUN_0100499c` (perspective), `FUN_01004b84` (affine), `FUN_01004d6c`
+  (simple) clip to the screen and call `DrawTriangle`. W3D_Vertex is 0x40 bytes,
+  x, y, z, w, u, v …, colour (r, g, b, a floats) at +0x20. **Perspective correction
+  only for the cube side walls** (`FUN_010a4004` and the other wall functions) and the
+  rotating-view radar; tops, objects and effects are affine. CONFIRMED.
+* Textures (`FUN_010024fc`, cached by `FUN_01004398`, at most 3000): sizes are rounded
+  up to powers of two ≤ 256 and resampled **nearest**; every texture gets
+  `SetFilter(2, 2)` = LINEAR/LINEAR, i.e. **bilinear, no mipmaps**. The texture
+  environment is never set (MODULATE, INFERRED: the Gouraud values below only make
+  sense multiplied). Conversion flags (setters `FUN_01002478…010024f0`):
+
+  | flag (setter) | format |
+  |---|---|
+  | none, power-of-two size | **A1R5G5B5**, palette RGB, index 0 transparent |
+  | `c3be` (`FUN_010024cc`) | the same, forced (icons, HUD) |
+  | none, other sizes / `c3c4` (`FUN_010024a8`) | ARGB32, alpha = max(R, G, B) |
+  | `c3cc` (`FUN_01002478`) | black, alpha = max(R, G, B) (smoke `Dust`, shadows) |
+  | `c3c8` (`FUN_01002490`) | each non-zero channel → 255, alpha = max (`Blood`) |
+  | `c3c6` (`FUN_0100249c`) | pure green, alpha = max (gas) |
+  | `c3c2` (`FUN_010024b4`) | inverted RGB, alpha = max / 2 (front end) |
+  | `c3c0` (`FUN_010024c0`) | black, alpha 0x32, index 0 → 0 (tree shadows) |
+  | `c3bc` (`FUN_010024d8`) | RGB, alpha 0x7f (cube textures `Ice2`, `RoofWindow`) |
+  | `c3ba` (`FUN_010024e4`) | 24-bit RGB source (`.chunky2`, `TitleScreen.w3d`) |
+  | `c3b8` (`FUN_010024f0`) | RGB − 64 per channel (night objects, `FUN_01003578`) |
+
+  So the hardware look is **true colour, bilinear, 15-bit textures**: no palette, no
+  `Alpha.256` / `Gouraud.256` tables, no final palette snap.
+
+### 11.2 Options
+
+* **Gouraud forced on**: LoadConfig `FUN_0104199c` sets `DAT_0114c2fc = 1` when
+  `DAT_0114c7d8 != 0` (config field 19 read right after field 17, `DAT_0114c2fc`).
+  CONFIRMED.
+* **Motion blur refused**: the pause menu (`FUN_0101a7dc`, case 3) does not toggle it
+  under Warp3D; `FUN_01042f00` only blends the two chunky buffers in software (the
+  buffers are not even allocated, `FUN_0104feb0`). CONFIRMED.
+
+### 11.3 City lighting (`FUN_010766c8`, `FUN_010920d8`)
+
+* Base light (CONFIRMED, §4 table): day lit 0xbe, shadow 0x80, slope step 0x30; night
+  lit R, G 0x20 / B 0x30, shadow R, G 0x0c / B 0x10, step 0x20. Lit Reflect tops 0xbe
+  on all channels. The `.CubeTextureRemapList`, the voxel shadow test, the lamps
+  (`FUN_0106c904`) and the dynamic lights are the same as in software, except that
+  **the dynamic lights are not halved by day** (`FUN_0106ba08` halves only when
+  `DAT_0114c84c == 0 && DAT_0114c7d8 == 0`). CONFIRMED.
+* **Jitter** (hardware only, after the slopes, CONFIRMED): for every cube slot of
+  squares x, y = 1…126, `d = FUN_0103ac94(16) − 8` is added to all three channels of
+  top corner 0 of (x, y), 1 of (x−1, y), 2 of (x, y−1) and 3 of (x−1, y−1) — the four
+  corners meeting at grid point (x, y), so the jitter is seamless — and a second `d`
+  likewise to the bottom corners 4…7; negative results become 0. `FUN_0103ac94` is the
+  shared game generator, so a hardware map load consumes 2·126·126·3 extra random
+  numbers before play.
+* Drawing (CONFIRMED, `FUN_010920d8` ~0x01092a00, walls `FUN_010a4004` etc.): vertex
+  colour = `min(L, 255) · (1/256)` per channel (`DAT_0113457c` = 0.00390625), alpha
+  1; the texture is modulated by it, so 0xbe ≈ 0.74 of the texture by day, the shadow
+  0.5, and night 0.125 (lamps and lights brighten towards the plain texture). Each top
+  is two triangles, (NE, NW, SW) and (NE, SW, SE); colours are interpolated linearly
+  per triangle (no `& 0xF8` steps).
+* Face types: Normal opaque (the A1R5G5B5 colour key is not tested); Genlocked and
+  Alpha with BLENDING on and `(7, 8)` (genlocked: the filtered colour-key alpha; Alpha
+  tops: `Ice2` / `RoofWindow` carry alpha 0x7f, a 50 % blend). No cube face is
+  additive. CONFIRMED.
+* **Night**: `FUN_0106ecf0` still darkens the chunky cube textures in place, but the
+  card's copies are not reloaded, so on the card the cube textures stay undarkened and
+  the night is only the low vertex colours (INFERRED from the upload order: cube
+  textures go to the card at load, `FUN_0106b7a0` / `FUN_01071dac`). Objects: the
+  darkened ones are re-uploaded with `c3b8` (RGB − 64), the `.dark` swaps as in
+  software (`FUN_010bf310`). CONFIRMED.
+
+### 11.4 Water (Reflect tops, non-rotating view; `FUN_010920d8` ~line 3020)
+
+* Texture: the background `Clouds.chunky2` / `Stars.chunky2` (`FUN_0106e564` opens
+  the name with the last character patched to '2'): 320×256 24-bit RGB, converted to a
+  256×256 texture (nearest), bilinear. **No sky or background quad is drawn.**
+* Per vertex (CONFIRMED; constants `DAT_01134568` = 8.0, `DAT_0113456c` = 128.0,
+  `DAT_01134570` = 1/16384):
+
+  ```
+  k = sin[i]                                   # 5760-entry table, amplitude 256
+  i = ((g·16 + scroll)·90) mod 5759            # #Water (scroll = DAT_0114c87c)
+  i = (g·1440) mod 5759                        # other Reflect textures
+  g = the corner's grid x + y
+  u = 128 + 8·((cos·dx + sin·dy) >> 8)/fx + 255·k/16384
+  v = 128 + 8·((cos·dy − sin·dx) >> 8)/fy + 255·k/16384
+  colour = clamp(L + (k >> 3), 0, 255)/256     # L = the corner's Gouraud light
+  ```
+
+  dx, dy = the vertex's screen position minus the centre (`c330`, `c32c`), fx, fy as
+  in §6; cos/sin are fixed table entries ≈ (256, 0) here (the rotating view uses the
+  yaw, §6). So the reflection is the true-colour sky magnified about 2× (half the
+  picture across the screen), gently wobbling, and lit like the city. Nothing else
+  draws the background (INFERRED: no other `.chunky2` texture use was found).
+
+### 11.5 Effects, flares, weather (`FUN_01033d50`, `FUN_01034804`, `FUN_010360fc`)
+
+* Alpha.256 tables become blend modes (CONFIRMED): tables 0, 2, 4, 9, 10 → ONE/ONE
+  with a white current colour (the 50 % "average" sprites are additive too); tables 1
+  and 3 → `(7, 8)` with the converted textures (smoke / shadow black with alpha =
+  max(rgb), blood saturated, gas green, dirt RGB with alpha = max); tables 5–8 → ONE/ONE
+  with a red / (1, 1, 0) / green / blue current colour. Snow: additive `Dust`.
+* Rain: `DrawLine` streaks and `DrawPoint` splashes, colour (1, 1, 1, 0.4) under
+  `(7, 8)`. Palette flash (`FUN_0103ad6c`): a full-screen ONE/ONE quad of colour
+  `flash/255` after the HUD. Fades: a black quad with alpha.
+* **Lens flares are never occlusion-tested** (the software overdraw test reads the
+  chunky screen). CONFIRMED.
+* Shadows: people the black `Shad` sprite (alpha = max); vehicles 8 triangles of the
+  `shadow` page, black, alpha = max, `(7, 8)`; model shadows black at alpha 0.3, tree
+  faces through `Tree2.clone` / `tanne.clone` (`c3c0`, alpha 0x32, index 0
+  transparent). CONFIRMED.
+
+### 11.6 Objects (`FUN_010c101c`)
+
+Never Gouraud-lit (GOURAUD off). Mode 1 flat colour (current colour), 2 opaque, 3
+colour-keyed, 4 and the other non-0x10 modes ONE/ONE (headlight beams, lamp cones),
+5 lines. Shine faces: 0x12 opaque, 0x14 / 0x28 ONE/ONE, 0x11 the opaque face plus
+`CloudsReflect` ONE/ONE (software: table 9, `d + s − 32`), the others `(7, 8)`.
+CONFIRMED.
+
+### 11.7 Front end
+
+`Icons/TitleScreen.w3d` is a raw 256×256 24-bit RGB picture (196 608 bytes), loaded
+with `c3ba` by `FUN_010138dc` and drawn full-bright, stretched over the screen;
+menus draw over a black clear, fades are alpha quads (`FUN_0101a7dc`). The port's
+front end is `crates/payback/src/frontend/` (display options agent).
+
+### 11.8 Port (`crates/payback/src/render_mode.rs`)
+
+`RenderMode { Software, Hardware }` follows `Settings::hardware` (`Saves/Payback.cfg`
+`hardware = 0|1`); `--hardware` / `--software` override. Switching at runtime relights
+the city and rebuilds the chunks (like the Gouraud toggle), swaps the atlases and
+materials. Implemented: Gouraud forced on; hardware base light, jitter and undimmed
+day lights (`lighting.rs`); modulated, per-triangle Gouraud, A1R5G5B5 bilinear texels
+repeated in their tile, undarkened night cube textures, blended genlocked faces
+(`shaders/city.wgsl`); the water formulas above (`water.rs`, `shaders/water.wgsl`);
+effect blend modes, converted effect atlas, unoccluded flares (`effects.rs`);
+bilinear 15-bit object textures, night −64, additive CloudsReflect (`objects.rs`);
+no palette snap and no motion blur (`postfx.rs`, the flash stays additive).
+Approximate or not done:
+
+* the jitter uses a local generator, not the game's, so replays stay valid across
+  render modes (the original's hardware load shifts the game RNG);
+* all blending runs in linear light on an sRGB target (Warp3D blends the 16-bit
+  framebuffer values); the framebuffer is not quantised to 15/16 bits;
+* rain in hardware: 0.4 white added instead of an alpha 0.4 blend; effect and object
+  atlases filter bilinearly across neighbouring atlas tiles at sprite edges;
+* object shine modes 0x14 / 0x28 additive and the `(7, 8)` shine modes, the shadow
+  textures (`Tree2.clone`, `shadow` page), fades: still drawn as in software;
+* the rotating-view hardware water turns the UVs with the yaw (sign INFERRED); wall
+  triangles split along the same diagonal as tops (INFERRED).

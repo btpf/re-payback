@@ -426,7 +426,7 @@ After the step, in the people branch: `if floor <= z: vz = 0; on_ground = 1; if 
 is handled in §4.4).
 
 - **There is no jump control** (C).
-- **No fall damage was found** (I). Landing just snaps to the floor.
+- **No fall damage** (C: no writer of health `+0x34a` depends on vz). Landing just snaps to the floor.
 - People step down any height and fall at 32 z/tick². That is 2 h-units/tick², about 1250 h-units/s² at 25 Hz, or
   roughly 5 cubes/s².
 - If you hit a ceiling while rising (vz < 0) and a cube above would be entered, the position is restored and
@@ -509,7 +509,8 @@ else:                                               // drowned
    - The old player object, if not dead, gets state 5.
    - A new **MaleNormal** is created.
    - Fields: state 2, frames 0/11, +0x344 = 0, player number, score restored.
-   - Health is the new object's 100. Weapons and wanted level start fresh (I).
+   - Health is the new object's 100. The object is zero-filled, so weapons (fists only), ammo and wanted level
+     start at 0 (C: 68k `FUN_000ec686` respawn ~127750, `FUN_0003feb2`; the same at level start).
 4. Position (`FUN_0106ef6c`):
    - **If a script has set a respawn square** (`FUN_0106ef24(x, y, level)`; −1 = none), use that square's centre.
    - Otherwise pick a random start point from the LoadMap list, avoiding the last 4 used (19 retries).
@@ -711,6 +712,13 @@ When it is fully open and the player's +0x33c ≤ 0:
      - Score += 1000/1500 × multiplier.
    - Buses (`model+0x4930 ≠ 0`) play passenger scream 0x4c.
    - The player's carjack counter +0x460 increments.
+   - **Multiplayer, another player driving** (`DAT_0114c7c8 ≠ 0` and vehicle state 2; OS4 `FUN_01052a4c`
+     ~0x010536f0): no wanted level, score or carjack count. The victim is put out by the normal exit
+     `FUN_01052398` (§6.3: on foot at the door with his weapons, score and stored on-foot health) and
+     knocked down, +0x494 = 50 ticks; his remote-controlled RC-car body, if any, is killed (health −71).
+     He keeps playing on foot. (If the exit fails, a boat over water on both sides, the hijack still
+     goes ahead.) Port: `boarding::walk_to_door` → `boarding::eject`; debug `--multiplayer 2 --map 0
+     --hijack-test`.
 4. **If not a hijack**, the vehicle inherits the person's wanted level (+0x330) and score (+0x384).
 5. The person's data is copied to the vehicle:
    - player number +0x4ac
@@ -801,7 +809,13 @@ Boat exits keep prev_pos = the exit point.
 Exiting a moving car gives the person no extra velocity: speed starts at 0 (I).
 
 Separately, ejected drivers and peds spawned by `FUN_01052714` start with frames 0/11 and stand at
-`1.2·(person.r − veh.0x48f4)` on alternating sides (`DAT_0114c628` toggles each call).
+`1.2·(person.r − veh.0x48f4)` on alternating sides (`DAT_0114c628` toggles each call; toggled value 0 =
+the right/door side, 1 = the left). The toggle is set to 1 by the hijack code right before its call
+(so hijacked drivers always land on the door side), by the cop drop-off, at level start, and by the
+main loop right before every frame's `Trigger_Update` (OS4 ~49717 `*local_54 = 1`; 68k ~127806
+`DAT_0034c1b0 = 1`). So the first scripted alternating exit of a frame (`Ped_ExitVehicle`
+`0xb43d4`/`0xb4414` → `0xdb03e`) is on the **driver's door side**, the second on the other side.
+(CONFIRMED)
 
 ---
 
@@ -953,7 +967,7 @@ The two builds differ in alignment. In 68k, ints between 0x2e6 and 0x41e sit 2 b
 | +0x18/1c/20 | same | motion frame N, frame P, blend |
 | +0x24 | same | model pointer (swapped for weapon/fire/punch poses) |
 | +0x2fa/2fe/302 | +0x2fc/300/304 | vx, vy, vz (per tick) |
-| +0x2ee | +0x2f0 | wander target heading (I) |
+| +0x2ee | +0x2f0 | wander target heading of state-3 peds (C): starts as the spawn heading, snapped to the nearest 90°, turned toward at ±16/tick. Negative = countdown; past −50 (blocked, or off squares with flag 0x20) it picks heading + 90° + rand(180°). Scripts set −1 (68k `FUN_000e3a58` ~122305–122345, `FUN_000b42b8`). |
 | +0x30e | +0x310 | door waypoint 0..5 |
 | +0x326 | +0x328 | turn rate (±100) |
 | +0x32e | +0x330 | wanted level |
@@ -985,10 +999,20 @@ The two builds differ in alignment. In 68k, ints between 0x2e6 and 0x41e sit 2 b
 
 ## 9. Open questions
 
-- The exact helicopter exit sequence (+0x49c/+0x49e) and whether exiting is refused above some speed. None was
-  found for cars.
 - The feet-below-floor offset (§2.3) should be confirmed against a screenshot.
-- Atan helper `FUN_00094b44` (68k): output convention (0..0x167f, measured from +y) is inferred from usage.
-- Whether instances are zero-initialised (`FUN_0103a73c` / `FUN_0003feb2`). This affects a fresh ped's first
-  wander turn.
-- Fall damage: none found. Explosions throw people via vz (combat doc).
+- Whether you can climb out of the rivers anywhere (§4.4): the step limit is confirmed; a map scan for banks
+  within 64 h-units of the water surface is still needed.
+
+Resolved:
+
+- ~~Helicopter exit~~ (C: 68k `FUN_000db2e4` ~116985–117008, OS4 `FUN_01052a4c` ~43335–43348). OS4 +0x49c =
+  engine on (68k +0x498), OS4 +0x49e = exit armed (68k +0x49a). The use key: engine on → engine off and armed;
+  engine off and not armed → engine on (takes off); engine off and armed → get out. There is no speed or height
+  check for any vehicle, so a mid-air bail-out is possible (with no fall damage). Not the same fields as the
+  68k +0x49c/+0x49e of script_api.md (controls enabled, racing-line flag).
+- ~~Atan helper~~ (C) `FUN_00094b44(u = x − tx, v = y − ty)` returns the heading from the object to the target,
+  0..0x167f, measured from +y toward +x (sin ↔ x, cos ↔ y); a zero argument is replaced by 1.0; table
+  `FUN_0003fd32`. OS4 `FUN_010bcc18`.
+- ~~Zero-initialised instances~~ (C) 68k `FUN_0003feb2` = malloc + memset 0, OS4 `FUN_0103a73c` = calloc. A
+  fresh ped's first wander turn does not depend on it: +0x2ee starts as the spawn heading.
+- ~~Fall damage~~ (C) none: no health writer depends on vz. Explosions throw people via vz (combat doc).

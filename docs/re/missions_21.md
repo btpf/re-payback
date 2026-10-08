@@ -151,7 +151,7 @@ Notation: `AMT(ev, type, a, b, c, d)` = `AddMissionTrigger`. `Say2(n)` means
 `Dialog_Begin(spk); Dialog_Say2(n); Dialog_End()` with `spk` = 2 unless stated.
 `FAIL(p)` = `Dialog_Begin(2); Say2(p); End; ShowMessage(2028); Unlock21()`.
 `WIN(p, $)` = `Dialog_Begin(2); Say2(p); End; AddMoney($); ShowMessage(2022); Unlock21()`.
-Speaker 0 is used for phone briefings, 1 for the player's own lines (INFERRED from the text).
+Speaker 0 is used for phone briefings, 1 for the player's own lines. (The argument only selects the HUD icon, 0 Phone / 1 Lips; CONFIRMED, script_api.md §5.)
 
 ### M1: The kidnapping (slot 1, start event 100) 68k `0xc9c76` + `0xc7a06..0xc80fe`
 
@@ -251,7 +251,7 @@ ev 201  (got in)                                                             @0x
   Say2(20) "Crap! It's got an alarm - it'll blow if you don't get it to us within 50 seconds."
   AMT(202, 0x04, 107, 3, 1, 1)   // our garage, door +x of (107,3), North
   AMT(210, 0x0e)                 // left vehicle
-  AMT(205, 0x42)                 // player uses the vehicle's special/boost control (INFERRED, see §8)
+  AMT(205, 0x42)                 // accelerate held while remote-controlling an RC car: never true in the rocket car (CONFIRMED, see §8)
   AMT(251, 0x05, 50)             // 50 s countdown
 
 ev 205  Dialog_Begin(1); Dialog_Say1(21) "Holy Shhhhiiiii...!!"; Dialog_End()   (one-shot) @0xc825e
@@ -274,7 +274,7 @@ ev 300                                                                       @0x
   KillAllPhones()
   Dialog_Begin(0); Say2(28) "So you fancy yourself as a bit of hotshot... The track's in the West of the city."
   CreateActor(10, model 27, 0x1c00, 0x21728, 0, angle 0, colour 1)   // sq (3,66)
-  Actor_SetFlag49c(10, 0)        // INFERRED: car held (cannot drive) until "Go!"
+  Actor_SetFlag49c(10, 0)        // Actor_SetControls: the player's car is held until "Go!" (CONFIRMED)
   AMT(1, 0x08, 10)               // get in -> starts the countdown
   AMT(10, 0x06)                  // player dead      -> ev 10
   AMT(10, 0x09, 10)              // car 10 destroyed -> ev 10
@@ -287,12 +287,12 @@ ev 1   Say2(29) "Ok, here we go!"                                           @0xc
        CreateActor(14, 27, 0x1c00, 0x2272c, 0, 0, colour 5)    // (3,68)
        CreateActor(15, 27, 0x2400, 0x21f34, 0, 0, colour 6)    // (4,67)
        Actor_SetAggro(11,100); (12,100); (13,100); (14,99); (15,99)
-       SetTimerMode(0)                                         // start lights stage 0 (INFERRED)
+       SetTimerMode(0)                                         // SetStartLights: both lights off (CONFIRMED)
        AMT(2, 0x11 hidden timer, 2)
 ev 2   SetTimerMode(1); AMT(3, 0x11, 1)
 ev 3   SetTimerMode(2); AMT(4, 0x11, 1)
 ev 4   Say2(30) "Go!"; SetTimerMode(3); Actor_SetFlag49c(10, 1); Race21(-1); AMT(5, 0x11, 1)
-ev 5   SetTimerMode(-1); SetTimerMode2(1, 3)                   // HUD "lap 1 / 3" (INFERRED)
+ev 5   SetTimerMode(-1); SetTimerMode2(1, 3)                   // SetLapDisplay: HUD "Lap 1 of 3" (CONFIRMED)
 ev 6..9, 11.. (incl. 10000..10004, 20000..20005): Race21(ev)   @0xc8636
 ev 10  (player dead or car 10 destroyed) KillAllMissionTriggers(); SetTimerMode(-1); SetTimerMode2(-1,3);
        Actor_Release(10..15)
@@ -320,7 +320,7 @@ Race21(-1):
   for r in 0..4:                    // AI racer id 11+r
      wp[r] = 0
      AMT(10000+r, 0x32 drive-to-with-speed, 11+r, WP[0].x, WP[0].y, WP[0].speed)
-     Actor_Set386(11+r, WP[0].v386 - 30*r)       // +0x386, INFERRED: AI speed cap; later grid slots are slower
+     Actor_Set386(11+r, WP[0].v386 - 30*r)       // +0x386 hard speed clamp (CONFIRMED); later grid slots are slower
   for c in 0..5:                    // car id 10+c (c=0 is the player's car)
      prog[c] = 0; lap[c] = 1; finished[c] = 0
      AMT(20000+c, CP[0].type, 10+c, CP[0].value)
@@ -361,7 +361,7 @@ ev 400                                                                        @0
   KillAllPhones()
   Dialog_Begin(0); Say2(40) "Fry thinks the cops have got him under surveillance. Go check it out."
   CreateActor(400, model 7 (vehicle), 0x3bc00, 0x2134, 0, angle 0, colour 6)   // sq (119,4)
-  Actor_SetFlag49c(400, 0)              // INFERRED: parked
+  Actor_SetFlag49c(400, 0)              // Actor_SetControls 0: only matters if the player drives the van (it won't move); AI ignores it (CONFIRMED)
   AMT(401, 0x09, 400)                   // van destroyed
   AMT(420, 0x2e, 400)                   // van attacked first (or destroyed), arrow
   AMT(421, 0x1b, 400)                   // van crew sees the player
@@ -421,7 +421,7 @@ ev 504  AMT(505, 0x17, 502, 0xfc00, 0x37400)           // -> (31,110)           
 
 ev 510  (player got into any vehicle)                                         @0xc8cee
   AMT(511, 0x0e left-vehicle)
-  AMT(512, 0x0c, 500)                 // Nick walks to and boards the player's vehicle (INFERRED meaning of type 0x0c)
+  AMT(512, 0x0c, 500)                 // Nick walks to and boards the player's vehicle (type 0x0c, CONFIRMED)
   if 0x2fba44 == 1: Dialog_Begin(2); Dialog_Say1(50) "Wait for Nick."; End
   else 0x2fba44 = 1                   // since 510 is never re-armed, phrase 50 is never shown (see §8)
 
@@ -558,7 +558,7 @@ ev 740  (50 s up: truck explodes)                                             @0
      for x in 124..126, y in 64..68: SetCube(x,y, cube 1, h1 0x200, h2 0x200, scenery 0, byte0 0, flags 0)
      for x in 124..127, y in 64..68:
         SetCube(x,y, cube 2, 0x200, 0x200, 0, 0, 0)
-        if Random(1) == 0:                              // always true if the Random table is < 512 (INFERRED)
+        if Random(1) == 0:                              // always true: the shipped table is 0..511 (CONFIRMED)
            Explosion(x*0x800 + Random(0x800), y*0x800 + Random(0x800), 0x4268 + Random(1500), 0, 3000)
      SetFaceTop(124,69, cube 0, type 1, tex 0xd0, flip 1); same for (125,69), (126,69)
      if 0x2fba50 == 0: Say2(76) "I love the smell of burning napalm in the morning!"
@@ -586,7 +586,7 @@ ev 800                                                                        @0
      SetScenery(x,y, cube 1, scenery 6 Crate, byte0 0x2c, byte4 3)
      AMT(e, 0x25 cell-scenery-cleared, x, y, 1)          // arrow; e = 801 + (x-55)*3 + (y-96)
      e += 1
-  SetFlag34c28c(1)              // unknown render/HUD flag (read in 0xe12a8), cleared below
+  SetFlag34c28c(1)              // ShowCheckpointMarker: flashing marker over the current arrow target (cycles over the 12 crates), cleared below
   AMT(850, 0x06)                // player dead
   AMT(830, 0x05 countdown, 10)  // phone self-destruct clock
   0x11a354 = 8
@@ -669,21 +669,28 @@ cleared, triggers 510/710 not re-armed) are **already in the CD script**.
 * **`Actor_Follow(id, -1)`** = follow the player (`+0x41a = 1`). **`(id, -2)`** = stop
   following. CONFIRMED.
 * **Trigger 0x0c:** used here as "Nick boards the player's vehicle". It fires when he is inside,
-  and Nick's ped disappears. Strengthens the INFERRED meaning. **Trigger 0x42:** called from
-  vehicle control code (`0xe9644` area, model flag `+0x4904` plus control input
-  `0x34c158[]`). It fires when the player uses the vehicle's special/boost control. Here it
-  triggers the rocket car's "Holy Shhhh" line. INFERRED.
-* **`Actor_Set386`:** used as a per-actor AI speed cap. Race values 200–550 (−30 per grid slot),
-  van 150 near the garage and 1000000 after hijack. INFERRED.
-* **`Actor_SetFlag49c(id, 0/1)`:** 0 on the race car until "Go!" and on the parked surveillance
-  van. INFERRED: 0 = AI vehicle held / not driving.
-* **`SetTimerMode(0..3, -1)`** = race start-light stages 0,1,2 then 3 "Go" (−1 off).
-  **`SetTimerMode2(lap, 3)`** = lap display "lap n of 3" (−1 off). INFERRED from the race flow.
-* **`SetScenery` 5th/6th args** are raw cell bytes `+0` and `+4` of the in-memory cube. They are
-  not simply the file's special/rotation: the game writes `0x59` back when removing the
-  briefcase, while the file byte0 of (86,43) is `0x20`. Reproduce them byte-for-byte.
-* `Random(n)` = `n * table[++i] >> 9` (`0x3fc8c`). `Random(1)` is 0 when table entries are
-  < 512, so M7's `Random(1) == 0` test always passes and every roof cell explodes. INFERRED.
+  and Nick's ped disappears (state 6, no type-9 event). CONFIRMED. **Trigger 0x42:**
+  `0xa6d26` is called from one place, the RC-car branch of `0xe3a58` (68k decompile ~124072):
+  model `+0x4904 != 0`, the player remote-controlling it (`0x3480a0[+0x4aa]`), accelerate
+  (`0x34c158[]`) held. The rocket car (model 24) has no `+0x4904`, so in Update 7 ev 205 and
+  its "Holy Shhhh" line **never fire**. CONFIRMED.
+* **`Actor_Set386`:** hard speed clamp `+0x386` (default 1,000,000) in the on-foot branch and at
+  the common vehicle point `0xea8c6`, so it also limits the player while he drives the van.
+  Race values 200–550 (−30 per grid slot), van 150 near the garage and 1000000 after hijack.
+  CONFIRMED.
+* **`Actor_SetFlag49c(id, 0/1)`** = `Actor_SetControls`: read only in the player-driven branch
+  of `0xe3a58`; 0 zeroes the player's steering and throttle. It holds the player's race car
+  until "Go!"; on the surveillance van it matters only if the player takes it over. AI drivers
+  ignore it. CONFIRMED.
+* **`SetTimerMode(n)`** = `SetStartLights` (`0xb47b8` → `0x366b6`): 0 both off, 1 red, 2 red +
+  red, 3 green + green, −1 hidden; Beep1/Beep2. **`SetTimerMode2(lap, 3)`** = `SetLapDisplay`
+  (`0xb47ca` → `0x36718`): "Lap %d of %d" at (5,45) while lap > 0, Beep3 on lap > 1. CONFIRMED.
+* **`SetScenery` 5th/6th args** are cell `+0` = rotation (file byte 1, 256 = full turn) and
+  `+4` = special (file byte 0 & 0x1f). The `0x59` written back for the briefcase is its
+  rotation, not the file's byte 0. CONFIRMED.
+* `Random(n)` = `n * table[++i] >> 9` (`0x3fc8c`). The shipped `General/RandomNumbers` holds
+  0..511, so `Random(1)` is always 0, M7's `Random(1) == 0` test always passes and every roof
+  cell explodes. CONFIRMED.
 * **M5 bug:** alive flags `0x2fba30..3c` are never cleared, so Nick is always told to attack
   gang ped 510, even after 510 is dead. 68k and OS4 agree. CONFIRMED.
 * **M5:** trigger 510 (player-in-vehicle) is never re-armed. After the first exit (ev 511),
@@ -695,12 +702,12 @@ cleared, triggers 510/710 not re-armed) are **already in the CD script**.
 * **M6:** the success path closes `SetFaceE(124,67,1,…)`, but the door opened at ev 624 was
   `SetFaceW`. If the van reached the garage door and was then hijacked, the west door stays open.
 * **M1 text:** phrase 2 says the phone is in the "South-East corner", but phone 4 is at
-  (126,14), the north-east corner under the North = −y convention. Text quirk, or the
-  convention needs re-checking.
+  (126,14), the north-east corner under the North = −y convention, which the game's own
+  minimap uses (north marker at the top, OS4 `FUN_01018954`). A text error in the phrase.
 * The init clears `0x2fb220` before `RefreshPhones()`, so this level never shows the
   generic intro phrase. Phrase 1 is said directly instead.
 
-### OS4 call names in `0x010df934` (matched against the 68k calls; INFERRED)
+### OS4 call names in `0x010df934` (matched against the 68k calls; INFERRED, except `FUN_010cde90` SetScenery, `FUN_010cddc8` SetCube and `FUN_010d152c` ShowCheckpointMarker, CONFIRMED)
 
 `FUN_010d100c` AddTrigger (with tracked-list bookkeeping inlined) · `FUN_010d26b8` AddMissionTrigger ·
 `FUN_010d28ac` KillMissionTrigger · `FUN_010f46b8` KillTrigger · `FUN_010ce5e8` CreateActor ·
@@ -714,11 +721,19 @@ M5 counters `0x0114c958/5c/60/64`, alive flags `0x01379b5c..68`.
 
 ## 9. Open questions
 
-1. Exact AI meaning of `+0x386` (speed cap?) and `+0x49c` (hold/drive flag?).
-2. `SetFlag34c28c` (`0x34c28c`, read in render loop `0xe12a8` with `0x34c288/90/94`): what it
-   displays during the M8 crate phase (crate marker / camera?).
-3. Trigger type 0x42 exact condition (which control, which vehicles).
-4. Meaning of the in-memory cell bytes `+0` and `+4` written by `SetScenery` (0x85, 0x9c, 0x59, 0x2c, rot 3).
-5. Vehicle model names for 0, 6, 7, 8, 19, 23, 24, 27, and pedestrian models 11 and 15 (table `0x348120` / `0x3480e0`).
-6. Whether `Random`'s table can reach ≥ 512. If it can, M7's explosions are not every cell.
-7. Phone 4 "South-East" vs map position (north-east): check the axis convention.
+All resolved (CONFIRMED, 68k Update 7):
+
+1. ~~`+0x386` / `+0x49c`~~ `+0x386` is a hard speed clamp (also on the player's vehicle);
+   `+0x49c` is "controls enabled", read only for the player-driven vehicle (§8).
+2. ~~`SetFlag34c28c`~~ `ShowCheckpointMarker`: during M8 a flashing Checkpoint.red/blue icon
+   is drawn over the current arrow target, which cycles every 20 ticks over the 12 roof crates
+   (floor 1).
+3. ~~Trigger 0x42~~ Accelerate held while remote-controlling an RC car (`+0x4904`); never in
+   the rocket car, so ev 205 is dead code in Update 7.
+4. ~~Cell bytes `+0`/`+4`~~ Rotation and special (script_api.md §5).
+5. ~~Model names~~ Vehicles 0 Mundaneo, 6 Fjord, 7 Van, 8 Limo, 19 Truck, 23 Boat, 24 Rocket
+   car, 27 Vapour GT (`vapour racer.obj`); peds 11 PedMale5_shotgun (dark blue + white),
+   15 PedMale7_shotgun (dark red + white).
+6. ~~`Random` table~~ Max 511: every M7 cell explodes.
+7. ~~Phone 4~~ The game's minimap uses north = −y at the top; (126,14) is north-east, so the
+   phrase is wrong.

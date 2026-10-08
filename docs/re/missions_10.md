@@ -140,7 +140,7 @@ on ev 1 (phone answered, 0x11a354 == -1):
     KillAllPhones()
     Dialog(0): phrase 2
     CreateActor(10, model 18 pug racer, (0x3ac00,0x2400) sq (117,4), floor 0, angle 0x10e0, colour 1)
-    Actor_SetFlag49c(10, 0)                  // INFERRED: car locked/held until the start
+    Actor_SetFlag49c(10, 0)                  // Actor_SetControls: the player's car is held until "Go!" (CONFIRMED)
     AddMissionTrigger(1, 0x08, 10)           // player gets into car 10 → ev 1 again (now in slot 0)
     AddMissionTrigger(10, 0x06)              // player dead/arrested → ev 10
     AddMissionTrigger(10, 0x09, 10)          // car 10 destroyed → ev 10
@@ -154,7 +154,7 @@ slot 0:
     CreateActor(13, 18, (0x38c00,0x1c00) sq(113,3), 0, 0x10e0, colour 4)
     CreateActor(14, 18, (0x39400,0x2400) sq(114,4), 0, 0x10e0, colour 5)
     CreateActor(15, 18, (0x3a400,0x1c00) sq(116,3), 0, 0x10e0, colour 6)
-    Actor_SetAggro(11,100); (12,100); (13,99); (14,98); (15,95)   // INFERRED: opponent skill
+    Actor_SetAggro(11,100); (12,100); (13,99); (14,98); (15,95)   // opponent driver skill (CONFIRMED)
     SetTimerMode(0)                          // HUD start lights icons/lights_0
     AddMissionTrigger(2, 0x11, 5)            // 5 s
   ev 2: SetTimerMode(1); AddMissionTrigger(3, 0x11, 1)
@@ -615,14 +615,16 @@ rectangles. Differences found in the main function (helpers not diffed):
 
 ## 12. Open questions
 
-1. Type 0x12 is used with a 4th argument `d = 1` (M100 0x78/0xad/0xb6, M600's Ike uses −1). Its meaning is not in
-   `script_api.md`.
-2. Does type 0x09 ("actor destroyed/removed") fire when an actor is removed by a type 0x12 arrival (M100 contacts,
-   M600 Ike) or by a type 0x04 garage drop-off (M200's truck 0xc9, M500's van 0x1f6)? If it did, M200 would fail on
-   delivery through the 0xfa trigger, so presumably it does not. Needs checking in `0xa653a` callers.
-3. `Actor_SetFlag49c(10, 0/1)` in the race: probably "controls locked until the start". Only writes of `+0x49c`
-   were found.
-4. `Actor_SetAggro` values 100/100/99/98/95 for race opponents: probably driving skill or speed.
-5. The `AddSound` argument semantics for M200 (`vol 0x3d0900`, `period 0x206c`, range 20000) are from the API
-   signature and are unverified.
+1. ~~Type 0x12 4th argument~~ Resolved: ignored in Update 7 (Add sets only state 0x0e and the goal from b, c;
+   68k `0xb2b12`, OS4 `0x010cfa80`). Probably left over from the CD scripts. CONFIRMED.
+2. ~~Type 0x09 on removal~~ Resolved: no. `0xa653a` is called only on death or destruction; a type 0x12 arrival
+   (`0xa6b5a` → state 6) and a type 0x04 drop-off (state 6 inside `0xa4a68`) never call it. M200 delivery is safe.
+   CONFIRMED.
+3. ~~`Actor_SetFlag49c(10, 0/1)`~~ Resolved: `Actor_SetControls`. `+0x49c` is read only in the player-driven
+   branch of `0xe3a58`; 0 zeroes the player's steering and throttle, so it holds the player's car (id 10) on the
+   grid until "Go!". No effect on AI drivers. CONFIRMED.
+4. ~~`Actor_SetAggro` values~~ Resolved: `+0x346` is driver skill (vehicles.md §6.2, script_api.md §5). 95–100
+   never brake for corners or stop at lights; 99/100 also skip the look-ahead. CONFIRMED.
+5. ~~`AddSound` for M200~~ Resolved: (sample 0x3a Hiss, vol 0x3d0900 = 4,000,000, 0x206c = 8300 Hz, x, y,
+   z 20000). Loudness `vol / d²`: full within ~1 square, silent beyond ~3.6. CONFIRMED.
 6. The CD race, M500 and M600 helpers were not compared with Update 7.

@@ -204,7 +204,7 @@ both depend only on all three shotgun kills being made from behind the line. The
 limit fails on the 6th throw. 68k addresses: `0xb9c86` (0x65), `0xb9ce0` (0x66), `0xb9e14`,
 `0xb9e5a`, `0xb9ea2/0xb9fa4/0xba0a6` (0x6f–0x71), `0xba1a8` (0x72), `0xba2b6` (0x73),
 `0xba486` (0x76), `0xba522/0xba608/0xba6f0` (0x7c–0x7e), `0xba7d6` (0x96), `0xba858` (0xb4).
-CONFIRMED (code), meaning of type 0x25/0x22 firing moment INFERRED.
+CONFIRMED (code). Type 0x22 fires when the grenade is thrown (on releasing fire, after the ammo is taken), so the 6th throw fails before it can hit anything; type 0x25 on the crate cell fires when the grenades are **picked up**, not when the crate is smashed (script_api.md §3.2, CONFIRMED).
 
 ### M9 — slot 9, ev 900, phone 3: limo time trial — 68k `0xbb9cc` (base 0x385)
 ```
@@ -290,7 +290,7 @@ ev 0x193 (taxi delivered): KillAllMT; Dialog_Begin(1)
 ev 0x1c2 (death): KillAllMT; Say(2,2); Set11a734(-1); ShowMessage(2028); UnlockPhones()
 ```
 `Set11a734(m)` (68k `0xb4284`) sets `0x11a734`. The traffic spawner then spawns model *m*
-whenever no actor of that model exists (INFERRED from `0x111803`). This guarantees that a taxi
+whenever no actor of that model exists (CONFIRMED: spawner `0xcf5cc`, script_api.md §5). This guarantees that a taxi
 appears in traffic. No timer. CONFIRMED (`0xbc642`, `0xbc6c4`, `0xbc72e`, `0xbc7d2`).
 
 ### M3 — slot 3, ev 300, phone 12: bus to Jon's garage (bridge jump) — 68k `0xbe160` (base 0x12e)
@@ -404,7 +404,7 @@ ev 0x1f9 (bomb goes off): KillAllMT; Actor_Kill(0x1f5)
 ev 0x226 (death or van destroyed): KillAllMT; Actor_Release(0x1f5); FAIL(19)
 ```
 CONFIRMED (`0xbe902`, `0xbca84..0xbcdfc`; explosion loop `0xbccae`, cube loop `0xbcd4a`).
-`0xb4296` arguments are (x, y, z, owner, size) (INFERRED names).
+`0xb4296` arguments are (x, y, z, layer, size): the 4th is a particle layer (scripts pass 0), not an owner (CONFIRMED, script_api.md §5).
 
 ### M10 — slot 10, ev 1000, phone 17: escort the boss's red limo — 68k `0xbb308` (base 0x3e9)
 ```
@@ -431,7 +431,7 @@ limo route (type 0x17 on 0x3e9; arrival event -> next waypoint):
   -> 0x3f1 (0x26400,0x29400)(76,82) -> 0x3f2 (0x24c00,0x29400)(73,82)
   on ev 0x3ee additionally: if kills <= 1: Actor_Attack(0x3ea,0x41,0x3e9); Actor_Attack(0x3eb,0x41,0x3e9)
                             Say(2,93 "Shit, look out!")     // ambush
-ev 0x3f2 (limo arrived): PedInVeh_b4414(0x3ec, 0x3e9, -10)  // boss (pedmale3, id 0x3ec) gets out of the limo (INFERRED)
+ev 0x3f2 (limo arrived): PedInVeh_b4414(0x3ec, 0x3e9, -10)  // boss (pedmale3, id 0x3ec) gets out of the limo (0xdb03e; CONFIRMED)
   KillMT(0x41b); KillMT(0x413); KillMT(0x414); KillMT(0x415)
   T(0x41b,9,0x3ec); T(0x3f3,0x12,0x3ec,0x25c00,0x274e8)      // boss walks in at (75,78), removed
 ev 0x3f3: Actor_Release(0x3e9,0x3ea,0x3eb); KillAllMT; Say(2,94 "Nicely done. Here's one hundred and twenty five grand.")
@@ -450,6 +450,23 @@ fails (each: Actor_Release(0x3e9,0x3ea,0x3eb); KillAllMT; FAIL(n)):
 ```
 The same phrase 92 is used when the boss ped is killed after leaving the limo. Faithful.
 CONFIRMED (`0xbe75c`, `0xbb388..0xbb99e`).
+
+**Arrival and the boss's exit** (checked against the decompile, CONFIRMED):
+- The limo is a script actor with skill 0, so it cruises in the lowest band (about 80–150; vehicles.md §6.2).
+  It "arrives" when its bonnet is within `2·1000` (Manhattan) of the last waypoint; `0xa6640` then sets state
+  4, which gives **no input at all**: no brake, so the limo coasts on from about 100 and rolls to a stop.
+  The original does exactly this; the port matches.
+- `PedInVeh_b4414(0x3ec, 0x3e9, -10)` creates the boss through `0xdb03e`, which places him `1.2·(192 +
+  half-width)` to one side at the door's longitudinal position (2/3 of the limo's length ahead of its centre),
+  facing away from the car. The side comes from the toggle `0x34c1b0`, which the main loop sets to 1 right
+  before every frame's trigger update (68k `FUN_000ec686` ~127806; OS4 ~49717). The first exit of a frame
+  therefore flips it to 0, the **driver's door side** (model −X, the right). That is the road side of a car
+  driving on the left. The port used to start this toggle at the other side and never reset it, so the boss
+  got out on the kerb side. Fixed: `MissionState::exit_toggle` is reset every frame.
+- The boss then walks straight to (75,78) (goto-and-vanish 0x12). He has no protection from traffic, so a
+  passing car faster than 50 can still run him over (fail 92). In port test runs that car was a pursuing police
+  car (the bot was wanted). This is faithful: nothing in the original stops or steers cars around him.
+
 
 ### M0 — slot 0, ev 20, phone 15: getaway driver (bank job) — 68k `0xbcf88` (base 0x1e)
 State: `near`=[2fba44] (player near the pickup/bank), `inCar`=[2fba50], `robbed`=[2fba4c]
@@ -470,7 +487,7 @@ ev 0x29 (back in): KillAllMT; Say(1,4); T(0x4b,6); T(0x4c,9,0x32); T(0x4d,9,0x33
 ev 0x34 (near them): if cnt==1:
   KillAllMT; Say(1,9 "Glad you could make it!")
   T(0x4e,6); T(0x4c,9,0x32); T(0x4d,9,0x33)
-  T(0x35,0x0c,0x32); T(0x36,0x0c,0x33)   // Ron/Trey walk to and board the player's car (INFERRED)
+  T(0x35,0x0c,0x32); T(0x36,0x0c,0x33)   // Ron/Trey walk to and board the player's car; they vanish on boarding, no type-9 event (CONFIRMED)
   T(0x4e,9,5000); T(0x2a,0x0e); T(0x1e,0x19,0x32)   // player > 33000 from Ron
   cnt=0; inCar=1; near=1
 ev 0x1e (drove away): KillMT(0x35); KillMT(0x36); T(0x1f,0x0d,0x32); T(0x1f,0x0d,0x33)
@@ -492,7 +509,7 @@ ev 0x38 (left car en route): KillAllMT; Say(1,10); T(0x4b,6); T(0x4e,9,5000); T(
 ev 0x39 (back in): KillAllMT; Say(1,13 "Quit messing about and take us to the bank!")
   T(0x4b,6); T(0x38,0x0e); T(0x37,0x0f,0x2cc00,0x25c00,0)
 ev 0x3a (stopped at bank): KillAllMT; Say(1,12 "Wait here!")
-  PedInVeh_b43d4(0x32,-10); PedInVeh_b43d4(0x33,-11)   // Ron & Trey get out of the player's car (INFERRED)
+  PedInVeh_b43d4(0x32,-10); PedInVeh_b43d4(0x33,-11)   // Ron & Trey get out of the player's car (`0xdb03e`, CONFIRMED)
   T(0x4e,6); T(0x4e,9,0x32); T(0x4e,9,0x33); T(0x3d,0x0e)
   T(0x3b,0x12,0x32,0x2a5bc,0x26400)   // Ron walks in (84,76), removed on arrival
   T(0x3c,0x12,0x33,0x2a5bc,0x25c00)   // Trey walks in (84,75)
@@ -611,22 +628,29 @@ tank, destroying it is no longer a failure (0x794 is not re-armed). CONFIRMED (`
   `0x11372`/`0x11390`/`0x113c0`.
 
 ## 6. Open questions
-1. `SetFlag34c28c(b)` (`0xb4360`): set during M1 and M9. The renderer (`0x120069`) then draws
-   something at (`0x34c288`,`0x34c294`) on floor `0x34c290`. Possibly a 3D target marker or
-   the range's "white line". Unverified.
-2. Exact firing moment of type 0x22 ("player fires weapon a"): at trigger pull/throw? This
-   decides whether the 6th grenade can still count.
-3. Type 0x25 on the crate cell: fires when the crate is smashed or when the contents are
-   picked up? Phrase 112 implies pickup.
-4. `PedInVeh_b43d4(id,m)` / `PedInVeh_b4414(id,veh,m)`: assumed to make a passenger (ped
-   model ~m, script id `id`) get out of the player's car / of vehicle `veh`. Check
-   `0xdb03e`/`0xdb196`.
-5. Type 0x0c on Ron/Trey: assumed "walk to and board the player's vehicle". Are the peds
-   removed when they board?
-6. `SetCube(x,y,1,0x200,0x200,0,0,0)` over (26..30,61..70): the visual result (collapsed or
-   burnt house) is unverified. Also, which map squares form the house.
-7. `AddSound` argument meanings (100000000 / 16000 / 20000) for the alarm are taken raw.
-8. Colour indices (1, 4, 6, 7) → paint tables `0x348198/0x3481b8`. The phrases say yellow
-   Mundaneo = 6, red limo = 4, white Pug = 7 (INFERRED from the phrases).
-9. The init cones (ids 100000–100003 at (22,92),(22,95),(42,92),(42,95)) are never used.
-   Their purpose is unknown.
+1. ~~`SetFlag34c28c(b)`~~ Resolved: `ShowCheckpointMarker` (`0xb4360` → `0xefef0`). While
+   on, a flashing Checkpoint.red/blue icon is drawn at the current HUD-arrow target
+   (`0x34c288/94/90`, written each tick by `0xeff2a` from the active arrow triggers; −1 =
+   none). In M1 that is the crate at (14,60). CONFIRMED.
+2. ~~Firing moment of type 0x22~~ Resolved: sent when the projectile is created, after the
+   ammo is taken; a grenade on releasing fire. The 6th grenade fails at the throw. CONFIRMED
+   (`0xa6c62` in `0xe3a58`).
+3. ~~Type 0x25 on the crate cell~~ Resolved: fires on **pickup** (`0xd0988` sets scenery 0);
+   smashing a full crate only turns it into the item (`0xd0670`). CONFIRMED.
+4. ~~`PedInVeh_b43d4` / `PedInVeh_b4414`~~ Resolved: they spawn ped model ~m with script id
+   `id` beside the player's vehicle / vehicle `veh` through `0xdb03e` (alternating sides, see
+   M10 above and people.md §6.3).
+5. ~~Type 0x0c on Ron/Trey~~ Resolved: they walk to and board the player's vehicle, are set
+   to state 6 and removed next frame (`0xdc5ac` → `0xcf290`) without a type-9 event. CONFIRMED.
+6. ~~`SetCube(x,y,1,0x200,0x200,0,0,0)` over (26..30,61..70)~~ Resolved: slope 0 removes cube 1
+   there, which is the pitched roof (slopes 3/5) of a 5×10 house; the house stays, open on
+   top. CONFIRMED (`0xb48d8`, map 0 data).
+7. ~~`AddSound` arguments~~ Resolved: (vol 100000000, 16000 Hz, x, y, z = 20000 street level);
+   see script_api.md §6.
+8. ~~Colour indices~~ Resolved: paint index 0 black, 1 blue, 2 green, 3 purple/orange,
+   4 red, 5 silver, 6 yellow, 7 white (`0x348198` Shine.*, `0x3481b8` Cardef.*, loaded at
+   ~`0xed682`). Matches the phrases. CONFIRMED.
+9. The init cones (ids 100000–100003 at (22,92),(22,95),(42,92),(42,95)) are never used
+   again; the exe's built-in level 00/01 inits (`0xb91dc`, `0xb9324`) create the same four.
+   They stand at both ends of the elevated road over the canal (x 22–43, y 90–96, gap at
+   x 31–33): probably a road-closure decoration. INFERRED; needs an in-game look.

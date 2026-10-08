@@ -104,9 +104,11 @@ functions `0x43f0e` (level start, called at `0xee326`) and `0x43c96` (respawn, c
 loader resets it to (−1,0,0) at `0xedec8`. Level 20 sets (12,20,1), so **every respawn is
 in the cell**. At the end (event 200003) it sets (−1,0,0).
 
-Order caveat (INFERRED): the initial player placement at `0xee326` precedes the
-`Mission_Init` call at `0xeea3a` in the main-loop code. The very first spawn therefore
-probably uses the map's first start point, which on map 2 is presumably the cell.
+Order (CONFIRMED): the initial player placement `0x43f0e` (called at `0xee326`) runs before
+`Mission_Init` (`0xeea3a`), while the spawn point `0x26c040` is still −1 from the loader reset
+(`0xedec8`). It therefore uses the level's start square collected by LoadMap (`0x4ad62`):
+scenery 0, flags 0x20, special = level + 2. In `Maps/2.map` special 2 is (12,20) cube 1, the
+cell, the same square `SetSpawnPoint` sets. (Level 21's special 3 is (74,43,0).)
 
 ### 1.2 Actors created by `Guards_Event(-1)` (68k `0xb5920`, first branch; CONFIRMED)
 
@@ -207,8 +209,8 @@ Notes:
 * Type 0x39 fires only for the *controlled* player and requires the floor match. Type 0x3a
   has no floor argument, so changing floor inside the same XY area does not fire 100100.
   The other floor's 0x39 trigger is still armed, though, and switches `cur` directly.
-* Init never calls `SetAmbience`, so the level starts with the engine default
-  (INFERRED: 3).
+* Init never calls `SetAmbience`, so the level starts with the engine default 3, set once
+  at level start in `0xec686` (CONFIRMED).
 * The cell (floor 1) lies inside rect 10 (6–25 × 13–20), so the first frame triggers
   100010 → 2 layers.
 
@@ -253,7 +255,7 @@ switch (ev) { ... below ... default: return; }                        // ev 0 (g
 
 Dialogue notation: `D(s, SayN(p))` = `Dialog_Begin(s); Dialog_SayN(p); Dialog_End()`.
 Speaker 1 is used for the player's own lines (Say1 style) and for the accomplice (Say2).
-Speaker 2 is the gang on the radio (INFERRED).
+Speaker 2 is the gang on the radio. (The speaker argument only selects the HUD icon: 1 Lips, 2 Mobile; CONFIRMED, script_api.md §5.)
 
 ### 3.1 The accomplice and the cell
 
@@ -452,7 +454,7 @@ to 68k `0x11a358–0x11a643` (checked).
   −1 = use map start points. Used by `0x43f0e` (start) and `0x43c96` (respawn).
 * **`SetAmbience` (`0xb4c58`) is really `SetVisibleLayers(n)`**: number of cube layers the
   renderer draws (roof cut-away), plus rain volume 0xff/0x7f.
-* `0x30` / `0x31` are used on peds. `0x17` on a helicopter works as "fly to" (INFERRED).
+* `0x30` / `0x31` are used on peds. `0x17` on a helicopter works as "fly to" once `Heli_TakeOff` has started the rotors (`+0x498 = 1`; CONFIRMED, script_api.md §5).
 * Vehicle model indices (load order in `0xd7874` → `0x348120+4*m`): 0 Mundaneo, 1 Pug,
   2 Diblo, 3 Bus, 4 Vapour, 5 Pug GTI, 6 Fjord, 7 Van, 8 Limo, 9 Police, 10 Scooby,
   11 Tank, 12 Evo, 13 Taxi, 14 IceCreamVan, 15 Pickup, 16 HotRod, **17 Helicopter**,
@@ -463,14 +465,18 @@ to 68k `0x11a358–0x11a643` (checked).
 
 ## 7. Open questions
 
-1. Does the first spawn use (12,20,1)? Placement at `0xee326` seems to run before
-   `Mission_Init` (`0xeea3a`). If so, map 2's first start point must be the cell; this has
-   not been checked against the map's start-point list.
-2. `AddSound` arg 4 = 1000000000: exact meaning (volume/priority/duration) for
-   `FUN_000170ce`.
-3. `Actor_Siren` on the helicopter: is it a visual/sound effect, or a no-op if the model
-   lacks the `+0x4928` flag?
-4. Whether `SetAmbience` is reset by the engine on respawn. After a reset the player
-   respawns inside rect 10, which re-fires only if that rect's trigger is armed.
+1. ~~First spawn~~ Resolved: yes, (12,20,1). It runs before `Mission_Init` and uses the
+   map's level-start square (special = level + 2 = 2), which is the cell. CONFIRMED.
+2. ~~`AddSound` arg 4 = 1000000000~~ Resolved: loudness numerator, `A = vol / d²` (full volume
+   within ~15.5 squares, audible to ~57: nearly map-wide); the last argument is z (19000).
+   CONFIRMED (`FUN_000170ce`, script_api.md §5).
+3. ~~`Actor_Siren` on the helicopter~~ Resolved: these are `Heli_TakeOff`/`Heli_Land`
+   (`0xb4666`/`0xb46dc`). On a model with the 68k `+0x4928` "flies" flag they switch the
+   rotors (`+0x498`); elsewhere they do nothing. TakeOff is required for the "fly to the
+   helipad" order. CONFIRMED.
+4. ~~`SetAmbience` on respawn~~ Resolved: `0x34c078` is written only by `SetVisibleLayers`
+   (`0xefd60`) and once at level start (`0xec686`); respawn (`0x43c96`) does not reset it.
+   Rect 10's trigger is still armed unless the player died inside rect 10, and then the
+   layer count is already 2, so the result is consistent either way. CONFIRMED.
 5. The boat (1000) has no script role. Confirm it is just an escape option, and whether the
    garage trigger 0x40 at floor 0 works from a boat.

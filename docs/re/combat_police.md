@@ -4,9 +4,17 @@ Reverse-engineering notes for the Payback reimplementation. They cover the route
 police, weapons, pickups, effects, damage and scoring.
 
 Sources: 68k Update 7 `Payback.exe` (`analysis/ghidra_68k`, flat image at 0x10000) and the OS4
-port (`analysis/ghidra_os4`). The OS4 main per-object update (`FUN_0105f594`, the counterpart
-of 68k `FUN_000e3a58`) did not decompile. So the AI, firing and projectile flight come from
-the 68k build only. Everything else is cross-checked in both builds.
+port (`analysis/ghidra_os4`). The OS4 main per-object update (`FUN_0105f594`, 39680 bytes, the
+counterpart of 68k `FUN_000e3a58`) does not decompile; the AI, firing and projectile flight are
+inlined in it, so they come from the 68k build. OS4 landmarks inside it, by disassembly [C]:
+fire sounds Minigun 0x1062a4c, Pistol 0x1062c14, Shotgun 0x1062ddc, FireMissile 0x1066024,
+Flamethrower 0x1068050, Punch 0x1067fb8; projectile spawns (`bl FUN_01046ee4`) petrol 0x1061a44,
+minigun 0x1062a90, pistol 0x1062c58, shotgun 0x1062e24/0x1062f30, missile 0x106603c, bomb
+0x1067468, grenade 0x1067df0; Ricochet 0x1060280/0x10671b8; GrenadeBounce 0x1067b0c..0x1068bf4;
+AI steering atan calls 0x1064050..0x1065750; cop drop-off `FUN_01052714` at 0x1064b44; drowning
+0x1063c90. Helpers: atan `FUN_010bcc18`, siren `FUN_0105e02c` (68k `FUN_000e2a50`), PanicPeds
+`FUN_010435f4` (68k `FUN_000ccabe`), heli steering `FUN_010ccc5c`, LOS `FUN_010707f0`.
+Everything else is cross-checked in both builds.
 
 Each fact is tagged **[C]** CONFIRMED (read in code, or verified against the data) or **[I]**
 INFERRED. Scratch notes with more line references are in
@@ -44,12 +52,13 @@ INFERRED. Scratch notes with more line references are in
   | 0–9 | 0 Explosion, 1 Engine, 2 Skid, 3 CarHorn, 4 Footstep.stone, 5 Thud, 6 ShipHorn, 7 Burp, 8 Ambulance, 9 CarStart |
   | 10–19 | 10 Heartbeat, 11 Siren, 12 Squelch, 13 Flames, 14 TelephoneRing, 15 LongAaah, 16 SqueakyVoice, 17 FireMissile, 18 GrenadeBounce, 19 Minigun |
   | 20–29 | 20 PickupWeapon, 21 ShotgunFire, 22 GarageDoor, 23 Bleep, 24 TickTock, 25 MissionFail, 26 MissionComplete, 27 TankEngine, 28 BigGunFire, 29 Ricochet |
-  | 30–39 | 30 HitScenery, 31 ThumpingMusic, 32–34 ChangeSelection(1–3), 35 Footstep.grass, 36 Footstep.metal, 37–39 Ow1–3 (but see the note below) |
-  | 40–59 | 40 Doorslam, 41 Flamethrower, 42 Click, 43 Splash, 47 ObjectAppear, 53 Pistol, 59 Punch_Hit |
+  | 30–39 | 30 HitScenery, 31 ThumpingMusic, 32 ChangeSelection, 33 ChangeSelection2, 34 Footstep.grass, 35 Footstep.metal, 36 Footstep.sand, 37–39 Ow1–3 |
+  | 40–59 | 40 Doorslam, 41 Flamethrower, 42 Click, 43 Splash, 45 ChangeSelection3, 47 ObjectAppear, 50–52 Footstep.sand (snow, slush, ice), 53 Pistol, 59 Punch_Hit |
+  | 65 | Footstep.water |
   | 75–76 | 75 Thud2, 76 Screams |
 
-  Note on ids 35–39: the list order is …Footstep.grass, Footstep.metal, Footstep.sand, Ow1–3…,
-  and the code uses `37 + rand(3)` for "Ow". So the exact ids of the footstep entries are [I].
+  The step sound is the top-face texture's `+0x1040` field (default 4 stone); ids 50–51 leave
+  footprints (68k `FUN_000e3a58` ~122786). [C]
 
 ### Object fields (68k offset; OS4 +2)
 
@@ -324,6 +333,10 @@ shunt, carjack, murder, firearms, criminal damage, speeding, GBH. It uses ", " b
 if wanted < 3: state = 3
 else: target = player; skill = wanted + (aggr < 4 ? 0x5c : 0x5e); if state not in (9,11): state = 10
 ```
+Script orders 0x14 (flee, trigger 0x43) and 0x15 (drive-to, trigger 0x44) are overwritten by this, so a
+scripted police car drops its order (the arrival trigger never fires): traffic below wanted 3, pursuit
+from 3. Goto 0x0f (triggers 0x17/0x32) is exempt. Port: `select_pursuers` resets such an `Ai` order to
+ambient. None of the shipped scripts gives 0x43/0x44 to a police car (their only targets are vans). [C]
 
 **Route following (states 8/10)** [C]:
 - Own node is `+0x3bc` (9999 → take the nearest node to self).
@@ -378,7 +391,7 @@ squares of the spawn edge.
 
 Requirements:
 - The square has bit 0x40, x in 1..0x7e and y in 1..0x7e.
-- In-memory cube byte +8 is non-zero (the port tests "top face visible" instead [I]).
+- In-memory cube byte +8 (the slope byte) is non-zero: the cube exists (slope 0 = Off is neither drawn nor solid). The port tests the slope.
 - The square and its 4 neighbours are unoccupied.
 - The run is extended in both directions while the neighbours have 0x40; only the first square is tested
   for occupancy.
@@ -434,6 +447,21 @@ CrimeSummary(player, arrested=1)   // "You are charged with ..."
 message 2017 "Busted!"; player.+0x490 = 1e9 (frozen); sound 37+rand(3)
 ```
 A death takes the same path, with the "You committed" summary and a death phrase (§7).
+
+**Arrested while driving** (68k ~121975–121996). The cop stands at the driver's door and opens it
+100·ticks per frame (the player's own door-closing pulls it back by 50·ticks). When it reaches 0x370
+and no death timer is running:
+```
+if rcBody[p] != -1: obj[rcBody[p]].health = -71; rcBody[p] = -1   // DAT_003480a0: the body left
+                                                                  // standing while driving the RC car
+FUN_000dab40(p)            // the normal exit (people.md §6.3): the player is pulled out on foot at the
+                           // door, the car is left in state 5 with its door open (0x370)
+deathTimer = 80; savedScore = score; CrimeSummary(new person, 1); message 2017;
+newPerson.+0x490 = 1e9; sound 37+rand(3)
+```
+So the **person** is the one frozen, beside the parked car; the car itself is not harmed. Port:
+`police::bust` marks the car `PullOut`; `boarding::use_pressed` runs the shared exit `eject` and
+freezes the new person (`Busted`, state dead) for the respawn.
 
 When the timer expires (68k `FUN_000ec686` ~127679; OS4 `FUN_010692bc` ~49630):
 - lives −1 and multiplier = 1;
@@ -607,15 +635,20 @@ never hits its own shooter.
 - **Grenade / bomb:** no damage; they bounce off.
 
 **Hits on scenery.** A projectile entering a square with a scenery object stops there. Bullets,
-pellets, missiles and petrol also break a crate on that square. A missile hitting scenery is only
-removed; whether it explodes is not confirmed [I]. Vehicles driving into a **snowman**
+pellets, missiles and petrol also break a crate on that square. A missile hitting scenery is
+removed **without exploding** (68k `FUN_000cdfdc` ~111148, OS4 `FUN_01045288` ~36606 only set
+state 6, which `FUN_000dc5ac` removes before its explosion pass); a missile explodes only on a
+cube wall/ground (`FUN_000e3a58` ~121863 → health 0 → `FUN_000cda5e`) or an object. [C] Vehicles driving into a **snowman**
 (+0x4908 0xfe) destroy it.
 
 ### 3.4 Flamethrower and buildings
 
 Petrol leaves short-lived ground-fire effects (type 0xf), which deal **no damage**. **No
 "building on fire" state exists**: cubes cannot burn. [I, from the absence of any writer] The
-object texture `burnt` exists; its trigger was not traced [I].
+object texture `burnt` is drawn on any object whose burn timer (OS4 +0x33c) is ≥ 1 (renderer OS4
+`FUN_010c101c`, 68k `FUN_000974a0`). The timer is set to 100 when a vehicle is wrecked (OS4
+`FUN_01044b70` = 68k `FUN_000cda5e`) or a person is ignited (`FUN_01056c58` / `FUN_000de0b6`), and
+parked at 15 when it runs out (OS4 `FUN_010542b8` ~44100), so wrecks and corpses stay burnt. [C]
 
 ## 4. Pickups
 
@@ -629,7 +662,8 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
   distance test. A vehicle checks every square under its 3×3 footprint loop and also breaks
   crates there.
 - Only model types 1..99 qualify. Radar (100), briefcase (23, no type) and phones are not pickups
-  in this code; their effect is mission-script logic [I].
+  in this code. Phones are script triggers 0x01/0x07; nothing in either exe tests radar
+  (`+0x4908 == 100`). [C; briefcase not traced further]
 - Effects of a pickup: 2 sparkle particles; for types < 0x50, PlaySound(20 PickupWeapon, 0, 1e6,
   14000).
 - A floating message at the square centre shows phrase `0x834 + type − 1`.
@@ -644,7 +678,7 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 | 5 shotgun | 13 | +20 (= 10 shots) | 2104 |
 | 6 pistol | 27 | +30 | 2106 |
 | 7 bomb | 28 (bigbomb) | +1 | 2107 "Remote-triggered bomb (1)" |
-| 0x50 info | 24 | sound + 2105 "Information" | text comes from the script [I] |
+| 0x50 info | 24 | sound + 2105 "Information" | scripts react through trigger 0x25 (cell scenery becomes 0) and show their own text [C] |
 | 0x51 key | 34 | sound + 2108 "Key" | |
 
 **Respawn.**
@@ -730,7 +764,8 @@ min(nfaces, 20)). Spawner: OS4 `FUN_01035438`, 68k `FUN_00038f44`.
 - Per update: gravity vz += 50. At ground z 22500: 1/3 chance to bounce (vz = −vz/2), else removed.
 - Trail: person fragments leave blood puffs, others Dust2 smoke.
 - On removal: a blood pool (persons) or 3 dust puffs.
-- `TankBits` is only a texture-name lookup used for tank debris [I].
+- `TankBits` has nothing to do with debris: it is the one object texture exempt from the night
+  `.dark` texture swap/darkening (OS4 `FUN_010bf310`, 68k `FUN_00095efa`). [C]
 
 ### 5.2 Explosions [C]
 
@@ -824,8 +859,11 @@ objects [I purpose].
 - **Scenery** (non-person): `dmg = (dvx²+dvy²) >> 12`.
 - **Ground:** vz > 160 plays 30 HitScenery and bounces with `vz = 128 − |vz|/4`. **No fall
   damage.**
-- **Water:** 43 Splash (volume T·8000/20000). Models with +0x4904 are destroyed (−71). **No
-  drowning damage for people was found** [I], even though phrase 2018 "Drowned!" exists (open).
+- **Water:** 43 Splash (volume T·8000/20000). Models with +0x4904 are destroyed (−71). A
+  **person** in water sinks 24 z/tick; at z ≥ 27000 the person is removed (state 6, not via
+  health) and, for the player, the respawn timer starts with 2018 "Drowned!"; in multiplayer it
+  costs one kill. Entering water clamps the burn timer to 1 (puts a fire out). [C: 68k
+  `FUN_000e3a58` ~122505–122585 and ~125836, OS4 0x1063c90/0x1063edc; people.md §4.4]
 
 **Collide grid** (`AddCollideObj` OS4 `FUN_01045288` / 68k `FUN_000cdfdc`; `RemoveCollideObj`
 OS4 `FUN_01046778`; `RemoveAllCollideObj` OS4 `FUN_01047848`):
@@ -887,7 +925,7 @@ player-owned object, i.e. attacker `+0x344 >= 0` and victim `+0x344 == -1`;
 | Punch an NPC | 500 |
 | Run someone over / ram (vehicle collision) | min(6000, vmax²>>9), vmax = max of abs(vx), abs(vy) of the impact velocity scaled by mass ratio |
 | Burning (flamethrower/fire contact): per tick damage = min(health+0x47, ticks·3000/mass), ≥1 | damage × 32 (OS4 `FUN_01056c58` ~l.46400) |
-| Other projectile impacts (several branches) | min(8000, k/dist) (INFERRED: k = impact energy) |
+| Bullet/pellet hits by a player-owned shot on a non-player | min(8000, k/T), k = 400000 minigun / 200000 pistol / 800000 shotgun pellet (= 40 × the health-damage numerator), T = target toughness `model+0x48ec` (not a distance); × multiplier [C: 68k `FUN_000de0b6` ~119024–119125, ~119455–119500; OS4 `FUN_01056c58` ~46548] |
 | Irony bonus (phrase 2027): a player kills someone with the vehicle that belonged to the victim (`victim+0x340 == killer+0x498`) | 10000 |
 | Script `AddScore` | n |
 
@@ -943,9 +981,21 @@ player-owned object, i.e. attacker `+0x344 >= 0` and victim `+0x344 == -1`;
 ## 8. Open questions
 
 - The algorithm the map editor uses for the `.route` next-hop table: BFS matches 99.98 %
-  (§1). Use BFS.
-- Ammo and weapons at level start and after respawn (mission scripts / object defaults).
-- Drowning ("Drowned!") and the `burnt` texture trigger.
-- Whether a missile that hits scenery (not a cube wall) explodes.
-- OS4 addresses of the main AI, firing and projectile code (`FUN_0105f594` did not decompile).
-- Rampage end condition besides game over (`DAT_0114c7c4`).
+  (§1). Use BFS. (Needs the map editor reverse-engineered.)
+- The route node `used` byte value 1 (§1): no reader, so "leftover editor flag" stays [I].
+
+Resolved:
+
+- ~~Ammo and weapons at level start and after respawn~~ The player object is freshly allocated and
+  zero-filled: fists only, no ammo, wanted 0, both at level start and after every respawn; only
+  the score is restored. Weapons come only from pickups; no script gives the player weapons.
+  [C: 68k `FUN_000ec686` ~127150 / ~127750 via `FUN_000cf11e`, `FUN_0003feb2`]
+- ~~Drowning and `burnt`~~ §6 Water and §3.4. [C]
+- ~~Missile hitting scenery~~ Removed without exploding (§3.3). [C]
+- ~~OS4 addresses~~ No separate functions: everything is inlined in `FUN_0105f594`; landmarks in
+  the header of this note. [C]
+- ~~Rampage end condition~~ None besides the obvious: in rampage (`DAT_0114c7c6`) the mission
+  script is neither loaded nor ticked, so "level complete" never happens; the game ends at game
+  over (lives 0), on quitting from the pause menu, or at the demo build's 9000-tick time-out. At
+  game end `DAT_0114c7c4` = the rampage flag (key-file build only) enables the high-score check,
+  whether the player lost or quit. [C: OS4 `FUN_010692bc` ~50022, `FUN_0102ca08` ~23421]

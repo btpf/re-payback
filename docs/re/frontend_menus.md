@@ -143,6 +143,27 @@ Index 9 becomes cup_bronze/silver/gold (`DAT_0117bbf8[rating−1]`) once an over
 | 4 | none | "Set sound volume" 2054 | Volume 0..100 in steps of 10 (`FUN_01006558`/`64`), drawn as a 10-piece LoadingPiece bar |
 | 5 | questionmarks | "Graphics options" 1600 | Sub-items "Gouraud shading" 1601 (`DAT_0114c2fc`) and "Rotating view" 1602 (`DAT_0114c7dc`, needs `DAT_0114c2f4`); 1603 is not used |
 
+Graphics options details (C, `FUN_0101a7dc`):
+- Sub-items 1601 at y = 0x6e/200 and 1602 at 0x79/200, each phrase + On 2081 / Off 2080. Up/down moves the sub-selection `local_5c`.
+- Under hardware rendering (`DAT_0114c7d8 != 0`) the sub-selection starts on "Rotating view" (`local_5c = DAT_0114c7d8 != 0`) and moving up from it leaves the sub-items, so Gouraud cannot be selected.
+- Gouraud is drawn dimmed with `FUN_0100cc78` (each glyph pixel through the 50 % blend with colour 0, `alpha + 0x40000`) when `DAT_0114c2f8 == 0` (Gouraud not available) or under hardware rendering; otherwise with `FUN_0100bb94`.
+- Turning Gouraud on when `DAT_0114c2f8 == 0` is refused (sound 0x2d). On: `FUN_01042060`, `FUN_010792dc` (relight). Off: `FUN_01042060`, `FUN_01074cbc`, `FUN_01079c54`.
+- Rotating view can only be turned on when `DAT_0114c2f4 != 0`, else refused.
+- Item 3 (Motion blur): under hardware rendering the toggle is refused (sound 0x2d); otherwise `FUN_01042308`.
+- LoadConfig `FUN_0104199c` forces Gouraud on (`DAT_0114c2fc = 1`, `DAT_0114c310 = 0x100`) when field 19 (hardware) is set.
+
+Reimplementation (`crates/payback/src/frontend/display.rs`). The original chose the renderer and the screen mode in PaybackSetup; here they are menu items:
+- The pause menu's item 5 has five sub-items: 1601 Gouraud shading, 1602 Rotating view, 1603 "Hardware acceleration: " On/Off (the unused phrase; toggles `Settings::hardware`), then "Resolution: <w>x<h>" and "Window mode: Windowed / Windowed borderless / Fullscreen" (English, no phrases). The added lines continue 11/200 apart from 0x79. Fire steps the selected item.
+- Hardware on forces Gouraud on and motion blur off; Gouraud is then dimmed and skipped. Motion blur is refused under hardware. The resolution is dimmed and skipped in borderless fullscreen, which uses the desktop size.
+- Resolution cycles through the monitor's video modes, common window sizes that fit on the monitor (640×512 … 2560×1440), the window's current size and the saved size, smallest first. In Windowed it sets the window's physical size; in Fullscreen it picks the monitor's video mode of that size with the highest refresh rate.
+- The main menu has an added item 8 "Graphics options" (1600, questionmarks model, before "Quit game"). It opens a screen laid out like CD Audio Setup: title 1600, the five items from y = 60/200 14 px apart, "Done" 2148 at 170/200. Fire or right steps an item, left steps it back, Esc or Done saves.
+- Under hardware rendering (`RenderMode`, which follows `hardware` unless `--hardware`/`--software` force it), the front end also follows the original's Warp3D path:
+  - The pause menu clears to black every frame: no frozen game picture and no FadeDarken3 panel.
+  - The Motion blur label is "Motion blur: " + 0x820 ("Off") regardless of state, drawn dimmed (`FUN_0100cc78`).
+  - Menu backgrounds use `TitleScreen.w3d` (256×256 raw RGB, inferred R,G,B order) stretched over the screen at full brightness, also on sub-screens. Software uses the 50 % copy `DAT_0117b6b4` there, which hardware never builds.
+  - The level-start screen `FUN_010247e4`, which hardware skips, has no equivalent in the front end.
+- Saved in `Saves/Payback.cfg` as `hardware = 0|1`, `resolution = <w>x<h>` and `window_mode = windowed|borderless|fullscreen`. They are applied live, and at start-up the window is created from them. `--resolution <w>x<h>` and `--window-mode <mode>` override the saved values without saving them.
+
 **Credits `FUN_010206bc(input, back, first=2200, speed=2, skippable=1, stopY=0x2e, hold=100)`.**
 - The demo nag uses (2400, 3, 0, 0x46, 0x96).
 - Line markup:
@@ -230,7 +251,7 @@ Index 9 becomes cup_bronze/silver/gold (`DAT_0117bbf8[rating−1]`) once an over
 
 ## 6. Config `S:Payback.config` (C load `FUN_0104199c`, save `FUN_01041510`)
 
-The config is mostly written by `PaybackSetup`. Screen modes and resolutions are chosen there, not in game (I). Layout, all u32 big-endian unless noted:
+The config is mostly written by `PaybackSetup`. Screen modes and resolutions are chosen there, not in game (I). The reimplementation offers them in game instead (§3, Graphics options). Layout, all u32 big-endian unless noted:
 
 | # | Field | Notes |
 |---|---|---|
@@ -265,7 +286,11 @@ Total 656 bytes.
 - Title 2469. 11 columns, scrolled horizontally with easing `p = (7p + target) >> 3`.
 - Columns 0..2: "Single player" 2455 with Keyboard 2167 / PSX 2164 / CD32 2165.
 - Columns 3..10: "Multiplayer" 2456 with PSX/CD32 for (k−3)>>1.
-- Action rows at y = (50 + 10i)/200, key names from `FUN_0103c690` (phrases 1500–1534). Redefine prompt 2468 (press 0 to disable). Done 2148 / Cancel 2192 at 180/200.
+- Action rows at y = (50 + 10i)/200, key names from `FUN_0103c690` (phrases 1500–1534; 0 = "-?-"). Redefine prompt 2468 (press 0 to disable). Done 2148 at 170/200, Cancel 2192 at 180/200 (C).
+- Action labels right-aligned at x = 130. The columns are drawn into a view from x = 135 (0x87) to the right edge, column k centred at 90 + p + 100k in it (C).
+- Selection (C): `column*11 + action` (0..120), Done 0x79, Cancel 0x7a (the start). Up: from Done to 10 (column 0, last action), from Cancel to Done, from an action's first row to Cancel, else −1. Down: from an action's last row to Done, Done → Cancel, Cancel → 0, else +1. Left/right: ±11, wrapping over the columns (not on Done/Cancel). Scroll target −100·column, 0 on Done/Cancel. Edits go to a local copy of the 11×11 table; Done copies it back, Cancel drops it.
+- Fire on an action: the screen is replaced by 2468 (wrapped at 80/200) and 2119 "(Press escape to cancel.)" at 110/200 − 5, the fire key must be released, then `FUN_01040790(column)` reads the binding (C): raw key 0x45 Esc → cancel (select sound); raw 0x0A ('0') → 0 (disabled); raw 1–9, 0x0B ('-'), 0x0C ('='), 0x19 ('P') → refused (sound 0x2d); any other raw key < 0x80 is accepted for the keyboard column only; pad columns wait for a pad button (lowlevel `ReadJoyPort` / PSX port).
+- Reimplementation: 10 columns (single-player keyboard and gamepad, multiplayer keyboard key sets 1–4, multiplayer gamepad of players 1–4), `crates/payback/src/frontend/bindings.rs`; saved as `key.*`, `pad.*`, `mp<n>.key.*`, `mp<n>.pad.*` in `Saves/Payback.cfg`.
 
 **CD Audio Setup `FUN_0102dd30`:**
 - Title 2131. "Device:" 2140 + name (2138 if unknown) and "Unit:" 2141 (2139 if unknown) at H/4.
@@ -381,6 +406,7 @@ Both are single-player. In each, the tick values add up exactly to the header du
 | `ReloadObjectTextures.size` | 0x3519C |
 
 - LoadMap calls DrawProgress(50000) and (30000).
+- Reimplementation: a level started from the menus loads in stages, one per frame (`level::LevelLoad`), with `map.size` as the unit and microseconds of work as DrawProgress units; the calibrated value is written to `Saves/map.size` (read before `General/map.size`). `--load-delay <ms>` (debug) idles between stages.
 - `FUN_0100b288(x, y, filled, total)` is a separate segment-bar helper (`LoadingPiece2` = empty piece) with no callers in OS4. The pause-menu volume bar draws its own 10 pieces inline.
 
 ## 11. `.thumb`, `.mini`, icon format (C)
@@ -391,8 +417,12 @@ Both are single-player. In each, the tick values add up exactly to the header du
 - `LoadCityPreview(n)` `FUN_01027164`: n < 3 → `PROGDIR:Maps/n.thumb`; otherwise user map `DAT_01170808[n−3]` + ".thumb" into `DAT_0117f8d0`. Used by the multiplayer and Rampage city rows.
 
 **User maps (`FUN_0100a1d4` / `FUN_01009e88`):**
-- `UserMaps/*.map`, skipping `test.map`, max 2000.
-- Paths in `DAT_01170808`, display names in `DAT_01172748`, count `DAT_01170804`.
+- `UserMaps/*.map`, skipping `test.map`, max 2000 ("AddUserMap(): Too many user maps...").
+- Paths in `DAT_01170808` (`PROGDIR:UserMaps/<name>` without `.map`), display names in `DAT_01172748` (`<name>`), count `DAT_01170804`.
+- `FUN_01009ff8(city)`: 0..2 → `PROGDIR:Maps/0..2`, 3.. → user map city−3 (C). `FUN_0100a064(path)` is the reverse (−1 if unknown).
+- The Rampage and multiplayer city rows (`FUN_0102a428`, `FUN_0102b2c8`) cycle 0 .. count+2: a built-in city c+1 is skipped while city c's last level (`DAT_0117aecc[c*2]`) has no cup; user maps are always offered. A configured city ≥ 3 that no longer exists becomes 0 (C). The row shows the user map's name.
+- The shipped data has one: `UserMaps/The Killing Zone` (.map/.mini/.route/.thumb, no `.vehicles`), plus `test.map`.
+- Reimplementation (`frontend/usermaps.rs`): searched in the game data's `UserMaps/`, next to the executable and in the working directory; `LevelSpec.map` holds the path for a user map; scores go to `Saves/UserMaps/<name>.scores` for maps inside the game data, next to the map otherwise.
 
 **`.mini`:**
 - 65×65 8bpp. Loaded at the end of LoadMap as `FUN_010727f0("<map>.mini")`.

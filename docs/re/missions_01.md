@@ -15,7 +15,7 @@ as `(x>>11, y>>11)`. Angles: 0x1680 = 360°. Time: 30 ticks = 1 s.
 | Shutdown extras | `Mission_Shutdown` `0xca322` | — |
 | Legacy CD script | `Maps/01.script`, `main` = `script01:0x11704` | |
 
-Map: city 0 → `Maps/0.map` (INFERRED from the phone positions below, which match exactly).
+Map: city 0 → `Maps/0.map` (CONFIRMED: level index 1 → city 1>>1 = 0, script_api.md §7; the phone positions below match).
 
 OS4 function ↔ 68k API used by this level (CONFIRMED by comparing the two handlers):
 `010d100c` AddTrigger, `010d26b8` AddMissionTrigger, `010d28ac` KillMissionTrigger,
@@ -66,7 +66,7 @@ CreateActor(100001, 1001, 0xb400, 0x2f800, 0, 0, 0)    // cone (22,95)
 CreateActor(100002, 1001, 0x15400,0x2e000, 0, 0, 0)    // cone (42,92)
 CreateActor(100003, 1001, 0x15400,0x2f800, 0, 0, 0)    // cone (42,95)
 for sx in 0x1a..0x1e: for sy in 0x3d..0x46:            // squares x 26-30, y 61-70
-    SetCube(sx, sy, 1, 0x200, 0x200, 0, 0, 0)            // flatten/remove cube level 1 (INFERRED: opens a passage)
+    SetCube(sx, sy, 1, 0x200, 0x200, 0, 0, 0)            // slope 0: removes cube 1 = the pitched roof of the house at (26..30,61..70) (CONFIRMED)
     // loop counter is the global 0x2fba08 (left = 0x1f afterwards; reset before use by missions)
 RefreshPhones()                         // first call -> Dialog_Begin(2) Say2(2) End
 ShowMessage(14)                         // level phrase 14 "Answer the phone" (big centre text)
@@ -84,7 +84,7 @@ Special objects `0x30c3c0[m−1000]`: 0 barrier, **1 cone**, 2 dummy.
 
 Phone positions in `Maps/0.map` (scenery 14 with special n; GetPhoneCoords table
 `0x279ef0` is filled while loading, a later square overwrites an earlier one — phone 6
-exists twice, at (10,37) and (55,91); the later one, (55,91), wins — INFERRED from load order):
+exists twice, at (10,37) and (55,91); the later one, (55,91), wins — CONFIRMED: the loader loops x outer, then y, then cube, last write wins):
 
 | Phone | Square | Used by |
 |---|---|---|
@@ -258,7 +258,7 @@ on ev 200:
     state = 2; A = 0      // A = "alarm ringing"
 
 state 2:
-  ev 0xd2..0xdc (a window broken, INFERRED meaning of type 0x2a):
+  ev 0xd2..0xdc (a glass window driven through; type 0x2a, CONFIRMED):
       if A != 0: return
       A = 1
       for e in 0xd2..0xdc: KillMissionTrigger(e)
@@ -368,7 +368,7 @@ state 4:
       SetScenery(0x28, 0x3f, 0, 0, 0x59, 0)
       Say(35)
       AddMissionTrigger(0x192, 0x2c, 0x29df4, 0xa400, 0)        // on foot at drop-off (83,20)
-      SetFlag34c28c(1)                                           // see open questions
+      SetFlag34c28c(1)                                           // ShowCheckpointMarker: flashing marker over the drop-off
   ev 0x192 (dropped off):
       SetScenery(0x53, 0x14, 0, 23, 0xb2, 0)                     // briefcase now lies at (83,20)
       SetFlag34c28c(0)
@@ -693,36 +693,38 @@ events, coordinates, phrases and rewards are identical.** Differences are struct
 * **Type 0x2b** = vehicle actor `a` **falls into water**: `0xa6a12` is called from the vehicle
   physics (`FUN_000e0e46`, `FUN_000e109e`) when the vehicle's z reaches the water level, sets
   `+0x44a = 1` and plays sound 0x2b (splash). Used here as "car dumped in the sea".
-  (INFERRED from code + phrases 22/23; replaces "wrecked/set on fire".)
+  (CONFIRMED, script_api.md §3.2; replaces "wrecked/set on fire".)
 * **Type 0x0c** confirmed in use as "pedestrian walks to and boards the player's vehicle"
-  (prisoners boarding the bus, phrase 74 "Wait here for them all to get in"). INFERRED.
-* **Type 0x2a** used on glass (face type 3) shop-window cells; fires when that window is
-  smashed (INFERRED, phrase 16).
+  (prisoners boarding the bus, phrase 74 "Wait here for them all to get in"). CONFIRMED.
+* **Type 0x2a** used on glass (face type 3) shop-window cells; fires when a vehicle drives
+  through that window (cube collision `0x446b8` clears the slope byte +8; CONFIRMED).
 * `0xb43d4(id, pedModel)` = `Ped_ExitPlayerVehicle`: creates ped `~pedModel` with script id
   `id` getting out of the player's current vehicle (`+0x448 = 1`). `0xb4414(newId, vehId,
   pedModel)` = `Ped_ExitVehicle`: same from the first actor with id `vehId` (driver bails out).
-* `0xb4360(b)` → `0xefef0` stores `0x34c28c`; the renderer (`~0xe1890`) then draws something
-  at world (`0x34c288`, `0x34c294`, floor `0x34c290`) only if `0x34c288 >= 0` (default −1).
+* `0xb4360(b)` → `0xefef0` stores `0x34c28c` (`ShowCheckpointMarker`); the renderer then draws a
+  flashing Checkpoint.red/blue icon at the current HUD-arrow target (`0x34c288`, `0x34c294`,
+  floor `0x34c290`, set each tick by `0xeff2a`) when `0x34c288 >= 0`. CONFIRMED.
 * The mission state variable of this level is `0x11a354` itself (= slot index), written
   by the level handler at mission start, not by KillAllPhones.
 * Special object model 1001 = `objects/misc/cone.obj` (special table index 1).
-* `SetScenery` (`0xb21a6`) 5th/6th args: 5th → cell byte `+0` (probably rotation), 6th → cell
-  `+4` (special/phone number) — see open question 2.
+* `SetScenery` (`0xb21a6`) 5th/6th args: 5th → cell byte `+0` = rotation, 6th → cell `+4` =
+  special (crate contents / phone number). CONFIRMED (open question 2).
 
 ## 8. Open questions
 
-1. `SetFlag34c28c(1)` during the briefcase carry (mission 4): what is drawn, and is
-   `0x34c288` ever ≥ 0 in level 01? (Default −1 → probably nothing visible.)
-2. SetScenery argument order: `0xb21a6(sx,sy,cube,p4,p5,p6)` writes p4 → runtime cell `+1`
-   (scenery), **p5 → cell `+0`**, **p6 → cell `+4`** (the byte the map loader reads as the
-   phone/special number). So the API doc's `(…, scenery, special, rot)` is really
-   `(…, scenery, cell+0, special)`; cell `+0` is probably the scenery rotation (values
-   0x59 ≈ 125°, 0xb2 ≈ 250° here) — INFERRED, needs the runtime cell layout.
-3. Exact meaning of the init SetCube block (x 26–30, y 61–70, cube 1) and mission-8 block
-   (x 50–53, y 104–105): heights 0x200/0x200 with scenery 0 — "remove cube" vs "flat
-   ground at 0x200"; check against `0xb48d8` and the map.
-4. AddSound 4th arg 100000000 (volume? duration?) in mission 2.
-5. Whether type 0x2b and type 9 can both fire for the same car (handled by `active[]`
-   anyway).
-6. GetPhoneCoords for duplicated phone 6: confirm the loader's x/y loop order (assumed
-   x-outer ascending → (55,91) wins).
+All resolved (CONFIRMED, 68k Update 7):
+
+1. ~~`SetFlag34c28c(1)` during the briefcase carry~~ It is `ShowCheckpointMarker`. `0x34c288` is
+   ≥ 0 here: the type 0x2c drop-off trigger at (83,20) has an arrow, so `0xeff2a` makes it the
+   target and a flashing Checkpoint.red/blue icon is drawn over the drop-off.
+2. ~~SetScenery argument order~~ `SetScenery(sx, sy, cube, scenery, rotation, special)`; cell
+   `+0` is the rotation (256 = full turn), `+4` the special (script_api.md §5).
+3. ~~SetCube blocks~~ Slope 0 removes the cube (not drawn, not solid). Init block: the pitched
+   roof of the house at (26..30,61..70) disappears. Mission-8 block (50..53,104..105): a flat
+   wall section (cube 1, h1 384) becomes a gap you can drive through (`0xb48d8`).
+4. ~~AddSound 4th arg~~ `vol` = loudness numerator, `A = vol / d²` (100,000,000: full volume
+   within ~4.9 squares, silent beyond ~18); the last argument is z (script_api.md §5).
+5. ~~0x2b and type 9 for the same car~~ Water kills only an RC car; a normal car that lands in
+   water fires 0x2b only, type 9 only if it is also destroyed.
+6. ~~Duplicated phone 6~~ The loader loops x outer, then y, then cube; the last write wins, so
+   (55,91).

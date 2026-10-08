@@ -180,7 +180,7 @@ those of `AddTrigger(ev,type,a,b,c,d)`; "actor a" = every live actor whose scrip
 (`+0x47c`) equals `a` at the time the trigger is added (one trigger per matching actor,
 the stored value is the actor pointer). If an actor referenced by pointer is destroyed,
 triggers of types 8,0x0d,0x13,0x14,0x16,0x2d,0x33–0x36,0x3b,0x3c on it are silently
-removed (`0xa653a`).
+removed (`0xa653a`). `0xa653a` takes a **script id** and is called only from the death/destruction paths (`0xccc96` player kill credit, `0xdc5ac` health < −70, `0xde0b6` collision damage, `0xe3a58` player death / melee kill / bomb detonation). Removal through state 6 (type 0x04 drop-off, 0x12 arrival, 0x0c/0x3d boarding, `Actor_Remove`, `RemoveAllActors` → `0xcf290`) does **not** call it, so pointer triggers on such an actor keep a stale pointer. CONFIRMED.
 
 | Type | Args | Fires when | Arrow |
 |---|---|---|---|
@@ -193,16 +193,16 @@ removed (`0xa653a`).
 | 0x06 | – | player dead or arrested (respawn countdown > 0). | – |
 | 0x07 | a = phone no. | like 0x01 (ringing, flashing, on foot) but **no arrow** (used for "secret"/optional phones). | – |
 | 0x08 | a = actor id | player **gets into** actor a (player actor == a). | yes |
-| 0x09 | a = actor id | actor id a destroyed/removed (`0xa653a`, called from damage/explosion code). | – |
+| 0x09 | a = actor id | actor id a **destroyed or killed** (`0xa653a`). Not fired when the actor is removed via state 6 (drop-off, arrival, boarding, Actor_Remove). CONFIRMED. | – |
 | 0x0a | a = amount | money ≥ (money at add time + a). | – |
 | 0x0b | – | player is in any vehicle. | – |
-| 0x0c | a = actor id | Add: pedestrians a → AI state 0x0d (`+0x422=1`, `+0x30e=5`): walk to and **board the player's vehicle**; fires when one is inside (`0xa6a7a`, from AI `0xe3822`) and the ped disappears. INFERRED (used for passengers in levels 00, 01, 21). | – |
+| 0x0c | a = actor id | Add: pedestrians a → AI state 0x0d (`+0x422=1`, `+0x30e=5`): walk to and **board the player's vehicle**; AI state 0x0d re-targets `+0x41e` to the player's current actor each frame; boarding (`0xe361e`) waits while the player is on foot. Fires (`0xa6a7a`) when the ped is within the door radius and ±0x800 in z; the ped is then set to state 6 and removed next frame by `0xdc5ac` → `0xcf290`, **without** a type-9 event. CONFIRMED (used for passengers in levels 00, 01, 21). | – |
 | 0x0d | a = actor id | controlled player within ±6000 of actor a. | yes |
 | 0x0e | – | player's vehicle type (`0xf00a8`) differs from the type at add time (left/changed vehicle). | – |
 | 0x0f | a,b = x,y; c = floor | controlled player within ±0x1000 of (a,b) on floor c (any mode). | yes |
 | 0x10 | a,b,c | as 0x0f and \|speed\| (`+0x3ae`) < 0x14 (stopped). | yes |
 | 0x11 | a = seconds | hidden timer (a*30 ticks). | – |
-| 0x12 | a = actor id; b,c = x,y | Add: actors a → AI state 0x0e "go to (b,c)" (`+0x2e6/+0x2ea`); fires when it arrives (`0xa6b5a`); actor is then removed (state 6). | – |
+| 0x12 | a = actor id; b,c = x,y; d unused | Add: actors a → AI state 0x0e "go to (b,c)" (`+0x2e6/+0x2ea`); fires when it arrives (\|dx\|+\|dy\| < 0x579, `0xa6b5a`); actor is then removed (state 6, no type 9). The 4th argument some scripts pass (1, −1) is ignored (68k `0xb2b12`, OS4 `0x010cfa80`). CONFIRMED. | – |
 | 0x13 | a = actor id; b = speed | actor a's speed > b. | – |
 | 0x14 | a = actor id; b = speed | actor a's speed < b. | – |
 | 0x15 | a,b,c | controlled player within ±12000 of (a,b), floor c. | – |
@@ -216,16 +216,16 @@ removed (`0xa653a`).
 | 0x1d | a, b = actor ids | actor a within ±3000 of actor b and facing it (±90°). | – |
 | 0x1e / 0x1f | a = x | player x ≤ a / player x > a. | – |
 | 0x20 / 0x21 | a = y | player y ≤ a / player y > a. | – |
-| 0x22 | a = weapon | player fires weapon a (`0xa6c62` from the fire code in `0xe3a58`): 1 bazooka, 2 flamethrower, 3 grenade, 4 minigun, 5 shotgun, 7 pistol, 8 remote bomb. CONFIRMED. | – |
+| 0x22 | a = weapon | player fires weapon a (`0xa6c62` from the fire code in `0xe3a58`): 1 bazooka, 2 flamethrower, 3 grenade, 4 minigun, 5 shotgun, 7 pistol, 8 remote bomb **placed** (0 fists and 6 are never sent). Sent once per shot, after the ammo is taken and the projectile is created (`0xcf11e`), only for the player. Grenade: on **releasing** fire (holding builds `+0x3aa` up to 0x19). Bomb: the first press places it (event 8; the bomb gets the `SetProjectileId` id, else −2); a second press detonates it and calls `0xa653a(bomb id)`. CONFIRMED. | – |
 | 0x23 | a = weapon | player's selected weapon (`+0x35e`) == a. `+0x35e` ids: 0 fists, 1 bazooka, 2 flame, 3 grenade, 4 minigun, 5 shotgun, 0xd pistol, 0xe bomb (differ from the 0x22 numbering). | – |
 | 0x24 | – | player switches weapon (`0xa6bc2`). | – |
-| 0x25 | a,b,c = square x,y,cube | scenery at that cell becomes 0 (crate smashed / pickup collected). | yes (cell centre) |
+| 0x25 | a,b,c = square x,y,cube | scenery at that cell (+1) becomes 0. Smashing a full crate (`0xd0670`) only turns it into its item (special 1..7 → scenery 9/10/11/12/13/27/28); picking the item up (`0xd0988`) sets 0. So it fires **on pickup**, and on the smash only for an empty crate. CONFIRMED. | yes (cell centre) |
 | 0x26 | a = 1..5 | player is out of ammo for weapon slot a (1:`+0x366`, 2:`+0x36a`, 3:`+0x36e`, 4:`+0x372`, 5:`+0x362`). | – |
-| 0x27 | – | `0xa6c12`: player's vehicle brake+steer branch (once per press) = handbrake spin. CONFIRMED code, wording INFERRED. | – |
+| 0x27 | – | `0xa6c12`: the player does a **J-turn** (vehicles.md §2.3): on the ground, throttle against the direction of travel while steering, in a model with 68k `+0x4926 == 0` (not tank, heli, boat); latch `+0x3c1` cleared each frame. CONFIRMED. | – |
 | 0x28 | a = actor id | actor a destroyed/killed (`0xa653a`). | yes (on actor) |
 | 0x29 | – | a policeman is killed (`0xa6cca`, cop-kill code `0xccc96`). Fires one trigger per kill. | – |
-| 0x2a | a,b,c = cell | cell byte +8 becomes 0. Used on glass (face type 3) shop windows: fires when the window is smashed. INFERRED (missions_01). | – |
-| 0x2b | a = actor id | vehicle actor a **falls into water** (`0xa6a12` from vehicle physics `0xe0e46`/`0xe109e` when z reaches water level; splash sound 0x2b). Used for "dump the car in the sea". INFERRED (missions_01). | – |
+| 0x2a | a,b,c = cell | cell byte +8 (slope) becomes 0. The only runtime writer is the cube collision `0x446b8` (from `0x44f82`): a moving non-pedestrian actor (a vehicle) crossing a face of type 3 (glass) sets +8 = 0 and plays 0x31 BrokenGlass. Line-of-sight tests pass actor 0 and never break glass. CONFIRMED. | – |
+| 0x2b | a = actor id | actor a **lands in water** (`0xa6a12`, top face water `+0x338`; callers `0xe0e46`, `0xe109e` and two in `0xe3a58`); latch `+0x44a` makes it fire once per entry, sound 0x2b Splash. An RC car (`+0x4904`) is also killed there (health −71), so type 9 fires too. CONFIRMED. | – |
 | 0x2c | a,b,c | controlled player **on foot** within ±0x200 of (a,b), floor c. | yes |
 | 0x2d | a = actor id | player gets into actor a (as 0x08, no arrow). | – |
 | 0x2e | a = actor id | actor a destroyed (`0xa653a`) or first attacked by the player (`0xa66ce`). | yes |
@@ -246,9 +246,9 @@ removed (`0xa653a`).
 | 0x3f | a,b,c | controlled player within ±6000 of (a,b), floor c. | – |
 | 0x40 | a,b,c | controlled player within ±0x400 of (a,b), floor c (any mode). | yes |
 | 0x41 | a,b,c | as 0x2c (on foot, ±0x200) without arrow. | – |
-| 0x42 | – | `0xa6d26` (`0xe9644`): fires each frame the player presses throttle (bit 0x1000 of `0x34c158`) while remote-controlling a model with `+0x4904 != 0` (RC car); evaluated only when such triggers exist (`0x1196f0`). CONFIRMED. | – |
+| 0x42 | – | `0xa6d26` (`0xe9644`): fires each frame the player presses throttle (bit 0x1000 of `0x34c158`) while remote-controlling a model with `+0x4904 != 0` (RC car); evaluated only when such triggers exist (`0x1196f0`). Fire in the same branch self-destructs the RC car. This is the only call site (68k decompile ~124072), so level 21 M2's 0x42 on the rocket car (no `+0x4904`) never fires. CONFIRMED. | – |
 | 0x43 | a = actor id | as 0x19 (actor escaped beyond ±33000); Add also sets actor `+0x342=-1`, state 0x14 (flee). | – |
-| 0x44 | a = id; b,c = x,y | as 0x17 but AI state 0x15. | – |
+| 0x44 | a = id; b,c = x,y | as 0x17 but AI state 0x15. The arrival routine `0xa6640` fires the actor's 0x17 **and** 0x44 triggers alike. Unlike 0xf, state 0x15 is in the police pursuit-selection list (vehicles.md §6.1): a police car given 0x44 drops the order and goes to traffic (wanted < 3) or pursuit (wanted ≥ 3). CONFIRMED (68k `FUN_000e3a58` ~124171). | – |
 
 ## 4. Phones, missions and progression
 
@@ -321,11 +321,11 @@ model m (table `0x348120`, 28 entries), `≥ 1000` → special object `m−1000`
 |---|---|---|---|---|
 | `0xb231c` | 107 | `CreateActor(id, model, x, y, floor, angle, colour)` | spawns at (x,y) on cube level `floor`, z from map heights; vehicles get paint `colour` (tables `0x348198/0x3481b8`) and engine sounds. | CONFIRMED |
 | `0xb2590` | 6 | `CreateActorFx(id, model, x, y, floor, angle, colour, dmgFilter)` | as above with sparkle particles + sound 0x2f; `+0x3ca = dmgFilter`: only this weapon damages it (−1 all; 4 minigun, 7 pistol, 5 shotgun, 2 flame, 1/3 explosion). | CONFIRMED |
-| `0xb21a6` | 57 | `SetScenery(sx, sy, cube, scenery, b0, b4)` | sets cell scenery (ids in formats.md, e.g. 6 crate, 13 shotgun, 23 briefcase, 24 info) and raw in-memory cell bytes `+0` (b0) and `+4` (b4; for crates = contents, e.g. 7 big bomb, 1 bazooka). Reproduce b0/b4 byte-for-byte. Sparkle + sound 0x2f unless scenery 0 or 23. | CONFIRMED |
-| `0xb48d8` | 34 | `SetCube(sx,sy,cube,h1,h2,scenery,b0,slope)` | rewrites a map cube (+2,+6,+1,+0,+8); slope 0 = cube off. | CONFIRMED |
+| `0xb21a6` | 57 | `SetScenery(sx, sy, cube, scenery, rotation, special)` | (OS4 `FUN_010cde90`) writes cell `+1` scenery (ids in formats.md, e.g. 6 crate, 13 shotgun, 23 briefcase, 24 info), `+0` **rotation** (256 = full turn) and `+4` **special** (crate contents in pickup numbering, e.g. 7 big bomb, 1 bazooka; the map loader reads +4 as the phone number). Runtime cell: +0 rotation, +1 scenery, +2 h1, +4 special, +5 flags, +6 h2, +8 slope, +9..+0xd face types (68k cell = map + x·0x3900 + y·0x72 + cube·0x26; OS4 x·0x3c00 + y·0x78 + cube·0x28). Sparkle + sound 0x2f unless scenery 0 or 23. | CONFIRMED |
+| `0xb48d8` | 34 | `SetCube(sx,sy,cube,h1,h2,scenery,b0,slope)` | (sx, sy, cube, h1→+2, h2→+6, scenery→+1, rotation→+0, slope→+8) (OS4 `FUN_010cddc8`); face types kept. Slope 0 = Off **removes** the cube: not drawn, no surface (height 1e9), not solid; h1 only keeps the stacking base for the cubes above. | CONFIRMED |
 | `0xb4958..0xb4b40` | 57 | `SetFaceTop/N/E/S/W(sx,sy,cube,type,texture,flip)` | face byte (+9..+0xd) and texture pointer. | CONFIRMED |
 | `0xb3d0e` / `0xb3f08` | – | `StoreRegion(x0,y0,x1,y1,cube,slot)` / `PasteRegion(x,y,cube,slot)` | copy ≤40×40 cubes to/from 2 buffers. | CONFIRMED |
-| `0xb40ec` | 415 | `Dialog_Begin(icon)` | queues a "start" entry in the subtitle queue (`0x21e00`); icon drawn by `0x22300`: 0 phone, 1 lips, 2 mobile, 3 pager, 4 info (scripts use 1, 2, 4). | CONFIRMED |
+| `0xb40ec` | 415 | `Dialog_Begin(icon)` | queues a "start" entry in the subtitle queue (`0x21e00`); icon drawn by `0x22300`: 0 phone, 1 lips, 2 mobile, 3 pager, 4 info (scripts use 0, 1, 2, 4). The icon is the only effect: the voice is always SqueakyVoice 0x10 at 12000 Hz, with no portrait. In practice 0 = payphone briefing, 1 = a person present, 2 = the boss on the mobile, 4 = hint. | CONFIRMED |
 | `0xb40fe` | 12 | `Dialog_Say1(phrase)` | phrase in font 1 (`you_`): **the player (Travis) speaks**; sound 0x10. | CONFIRMED |
 | `0xb411c` | 328 | `Dialog_Say2(phrase)` | phrase in font 2 (`them_`): **the other party speaks**. | CONFIRMED |
 | `0xb413a` | 312 | `Dialog_End()` | queues end marker. | CONFIRMED |
@@ -336,25 +336,25 @@ model m (table `0x348120`, 28 entries), `≥ 1000` → special object `m−1000`
 | `0xb434e` | 4 | `AddLives(n)` | §4.2 | CONFIRMED |
 | `0xb4214` | 17 | `SetWantedLevel(n)` | §4.2 | CONFIRMED |
 | `0xb4cd0` | 1 | `LevelComplete()` | §4.2 | CONFIRMED |
-| `0xb4510` | 244 | `Actor_Release(id)` | actors id → state 5 (inert/parked) unless player-controlled/dead/removed; id cleared. | CONFIRMED writes, meaning INFERRED |
+| `0xb4510` | 244 | `Actor_Release(id)` | actors id → state 5 = no AI input (a vehicle coasts to a halt, a ped stands still; the same state as an abandoned car, so hijacking it ejects no driver); states 2/6/7 left alone; id always cleared. Released actors (id −1, state 3/5/7/0xa–0xc) are culled when far from every player (`0xdc5ac`). | CONFIRMED |
 | `0xb42b8` | 21 | `Actor_ReleaseIdle(id)` | as above with state 3 = ambient drone (wanders like normal traffic/peds); `+0x2ee = -1`. | CONFIRMED |
 | `0xb459a` | – | `Actor_Remove(id)` | state 6 (deleted) unless controlled. | CONFIRMED |
 | `0xb423a` | 7 | `Actor_Kill(id)` | health `+0x34a = -71`. | CONFIRMED |
 | `0xb28ac` | 72 | `Actor_Attack(id, mode, target)` | mode 0: stop (state 4); mode>0, target −1: attack the player (state 0x10); mode>0, target id: attack the last actor with that id (state 0x11); both give a shotgun with 100 shells and `+0x346 = mode` = fire rate (fires when target within ~6000 and `rand(0x65−mode) < ticks`); mode<0, target −1: flee from player (state 0x12). Typical `(id, 0x50, -1)`. | CONFIRMED |
 | `0xb2072` | 7 | `Actor_Follow(id, leader)` | `+0x41a` = leader actor; leader −1 → follow the player (`+0x41a=1`); −2 (other negatives) → stop following. | CONFIRMED |
-| `0xb47e0` | 13 | `Actor_SetAggro(id, v)` | `+0x346 = v` = fire rate (see Actor_Attack). | CONFIRMED |
-| `0xb475c` | 1 | `Actor_SetMaxSpeed(id, v)` | `+0x386 = v`: AI speed cap (race 200–550, 1000000 = unlimited). | CONFIRMED |
-| `0xb483c` | 5 | `Actor_SetControls(id, on)` | `+0x49c` controls enabled (default 1); 0 zeroes steering/throttle (race grid before "Go!", parked van; also applies when the player drives it). | CONFIRMED |
-| `0xb4666` / `0xb46dc` | 2 | `Heli_TakeOff(id)` / `Heli_Land(id)` | helicopter models (`model+0x4928 != 0`): `+0x498` flying 1/0; land also zeroes speed. (Some mission docs call these `Actor_Siren on/off`.) | CONFIRMED |
+| `0xb47e0` | 13 | `Actor_SetAggro(id, v)` | `+0x346 = v` = driver/shooter **skill** 0..100 (CreateActor default 50). Readers: fire chance `rand(0x65−v) < ticks`; v < 99 (or health < 50) looks ahead for blocking cubes; traffic lights (v < 70 stops at phases 1–3, 6; v < 90 at 1–2; ≥ 90 runs reds); corner-speed bands 31/51/61/91/95/98; v < 81 limits steering while skidding (vehicles.md §6.2). Race values 95–100 = never brake or stop. CONFIRMED | CONFIRMED |
+| `0xb475c` | 1 | `Actor_SetMaxSpeed(id, v)` | `+0x386 = v`: hard speed clamp (default 1,000,000) in the on-foot branch and at the common vehicle point `0xea8c6`, so it also caps the **player** while driving that actor (level 21 M6 van). Race 200–550. | CONFIRMED |
+| `0xb483c` | 5 | `Actor_SetControls(id, on)` | `+0x49c` controls enabled (default 1, `0x974a0`/`0xa2b80`). The only reader is the player-driven branch (state 2) of `0xe3a58`: 0 zeroes steering and throttle. No effect on AI drivers; in the race it holds the player's car (id 10) until "Go!". | CONFIRMED |
+| `0xb4666` / `0xb46dc` | 2 | `Heli_TakeOff(id)` / `Heli_Land(id)` | helicopter models (68k `model+0x4928 != 0` = OS4 `+0x492a`, "flies"; the vehicles.md `+0x4928` tank/heli/boat flag is the OS4 offset of 68k `+0x4926`): `+0x498` 1 = rotors lift (`0xe109e`: vz −= 0xaa) and the AI can steer, 0 = controls zeroed, it sinks; Land also zeroes speed. No-op on other models. TakeOff is required for a 0x17 "fly to" order. (Some mission docs call these `Actor_Siren on/off`.) | CONFIRMED |
 | `0xb41b0` | 2 | `SetPlayerVehicleId(id)` | if the player is **in a vehicle** (`+0x4909 == 0`): that vehicle actor `+0x47c = id` (tags the player's car). | CONFIRMED |
-| `0xb48ac` | 2 | `SetProjectileId(id)` | `0x11a77e`: script id given to objects the player throws/drops (grenades, bombs). | INFERRED |
-| `0xb4296` | 4 | `Explosion(x,y,z,owner,size)` | `0xcdd02`: debris/fire particles + damage. | CONFIRMED (args INFERRED) |
-| `0xb4382` | 1 | `AddGas(x,y,z,vx,vy,vz,life,p8)` | particle type 9 with the "Gas" texture, velocities /3; level 10 only. | CONFIRMED type, args INFERRED |
-| `0xb43d4` | – | `Ped_ExitPlayerVehicle(id, pedModel<0)` | ped `~m` with id `id` gets out of the player's vehicle (`0xdb03e`). | INFERRED |
-| `0xb4414` | – | `Ped_ExitVehicle(newId, vehId, pedModel<0)` | same, from the first actor with id `vehId` (driver bails out). | INFERRED |
-| `0xb448e` | – | `Ped_ExitVehicleEx(newId, vehId, pedModel<0, side)` | via `0xdb196`; `side` 0/1 probably door side. | CONFIRMED structure |
+| `0xb48ac` | 2 | `SetProjectileId(id)` | `0xefece` → `0x11a77e`: script id (`+0x47c`) given to the next **remote bomb** the player places (`0xe3a58`); the default −1 (reset at level start) gives the bomb id −2. Grenades never get an id. | CONFIRMED |
+| `0xb4296` | 4 | `Explosion(x,y,z,layer,size)` | `0xcdd02` → `0xcd22e` (OS4 `thunk_01044f28`). `layer` = particle layer 0..3 (as actor `+0x3ce`; scripts pass 0), not an owner: the blast is unattributed. Debris ≈ clamp(((size>>10)+2)/2, 2, 6) per type, flames if size > 2500; power size·25000 pushes actors and damages filters −1/1/3; camera shake += size/10; sound Explosion vol 50,000,000, Hz 12000 − min(1.25·size, 7000); peds within ~5 squares flee (`0xccbac`). | CONFIRMED |
+| `0xb4382` | 1 | `AddGas(x,y,z,vx,vy,vz,life,layer)` | `0x3d97a(9, Gas, x,y,z, vx/3,vy/3,vz/3, life, layer, scale 0x30000)`; life −7 per tick (`0x3997c`), dies at life < 1 or z > 24000. Level 10 only (life 400+R(500), layer 1). | CONFIRMED |
+| `0xb43d4` | – | `Ped_ExitPlayerVehicle(id, pedModel<0)` | `0xdb03e(veh, ~m, id)` spawns ped `~m` with script id `id` beside whatever the player controls (not checked to be a vehicle): at the door (veh `+0x48f8`), 1.2·(radius + half-width) to the side, heading veh − 0x5a0, `+0x448 = 1`; ped count `0x34809c` +1. The side alternates via toggle `0x34c1b0` (people.md §6.3). | CONFIRMED |
+| `0xb4414` | – | `Ped_ExitVehicle(newId, vehId, pedModel<0)` | same, beside the first actor with id `vehId`. | CONFIRMED |
+| `0xb448e` | – | `Ped_ExitVehicleEx(newId, vehId, pedModel<0, side)` | via `0xdb196`; `side` 0 = right (the player's own exit side), non-zero = left. | CONFIRMED |
 | `0xb4602` | – | `RemoveAllActors()` | removes every non-player actor. | CONFIRMED |
-| `0xb4bba` | 3 | `AddSound(ref 0–9, sample, loop, vol, period, x, y, range)` | `AddSound_script`; handle in `0x2fb000[ref]`. | CONFIRMED |
+| `0xb4bba` | 3 | `AddSound(ref 0–9, sample, loop, vol, hz, x, y, z)` | `AddSound_script` (OS4 `FUN_010cda74`); passes the rest straight to the engine's AddSound (68k `FUN_000170ce`, OS4 `FUN_0100815c`); handle in `0x2fb000[ref]`. The 8th argument is the sound's (downward) **z**, not a range: the shipped calls use 20000 (street level) and 19000 (level 20 alarm). Audibility comes only from `vol / d²` over the 3D distance (frontend_audio.md §4.3). | CONFIRMED |
 | `0xb4c0e` | 10 | `DeleteSound(ref)` | `DeleteSound_script`. | CONFIRMED |
 | `0xb4c58` | 16 | `SetVisibleLayers(n)` | `0x34c078 = n` = number of cube layers the renderer draws (roof cut-away indoors); rain loop volume 0xff if n==3 else 0x7f. Used with indoor rectangles (levels 10, 11, 20). | CONFIRMED (missions_20) |
 | `0xb47b8` | 12 | `SetStartLights(n)` | `0x117d3e = n`: icon `lights_n` 0..3 (3 = go; sounds 0x37/0x38); −1 off. | CONFIRMED |
@@ -364,7 +364,7 @@ model m (table `0x348120`, 28 entries), `≥ 1000` → special object `m−1000`
 | `0xb48be` | 2 | `SetSpawnPoint(sx, sy, cube)` | forced start/respawn square (`0x26c040..48`, used by `0x43f0e` start and `0x43c96` respawn); −1 = map start points (respawn picks a random one not among the last 4). Reset by the level loader (`0xedec8`). | CONFIRMED (missions_20) |
 | `0xb4df8` / `0xb4ed8` | 6 / 45 | `RefreshPhones()` / `KillAllPhones()` | §4.1 | CONFIRMED |
 | `0xb4f5a`, `0xb4fb2`, `0xb5010`, `0xb5030`, `0xb41dc`, `0xa692a` | | trigger functions | §3.1 | CONFIRMED |
-| `0x3fc8c` | 43 | `Random(n)` | `n * table[++i] >> 9` over the `General/RandomNumbers` table: 0..n−1 | INFERRED |
+| `0x3fc8c` | 43 | `Random(n)` | `n * table[++i] >> 9`, i a u16 wrapping at 65536, over `General/RandomNumbers` (65536 BE shorts; regenerated as `rand()>>6` if missing). Shipped table: 0..511, so the result is always 0..n−1 (OS4 `FUN_0103ac94`). | CONFIRMED |
 
 ## 6. CD script command codes (legacy)
 
@@ -406,7 +406,7 @@ Control, Caught By The Fuzz, Born Slippy), gold/silver times and the best time.
 
 **Level start** (every level, before `Mission_Init`): multiplier 1, **lives 3**, state 0,
 visible layers 3, traffic model −1, marker off, level timer `0x349180 = 0`, spawn point −1,
-money 0 (INFERRED: nothing carries over). Level inits then add lives: 00 +2, 01 +2, 10 +1,
+money 0, no weapons or ammo (the player object is zero-filled; CONFIRMED, 68k `0xec686`). Level inits then add lives: 00 +2, 01 +2, 10 +1,
 11 +1, 20/21 none.
 
 **Level end.** State 3 (complete) → `0x2b666(city, level, minutes = 0x349180 / 1800)` (the

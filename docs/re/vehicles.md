@@ -483,7 +483,7 @@ Steering target `+0x2e6/+0x2ea` per state:
 | 3 | traffic lane choice `FUN_000a143e` (square centres, junction picks) |
 | 8 / 10 | route node `node.xy << 3` (combat_police.md §1, §2.2) |
 | 9 / 11 | the target object (`+0x41e`); police lead it by `v·(5−aggr)·3` |
-| 0x0f / 0x15 | the script point, written once by trigger types 0x17 / 0x32 / 0x44 |
+| 0x0f / 0x15 | the script point, written once by trigger types 0x17 / 0x32 / 0x44. For a **police car** (not a van) state 0x15 (and 0x14) is also in the pursuit-selection list (combat_police.md §2.2), so the car leaves the order at once: state 3 below wanted 3, state 10 from 3. State 0x0f is excluded. (68k ~124171, CONFIRMED.) |
 | 0x14 | route toward the node farthest from the player (`+0x3ba`) |
 
 There is **no path finding for scripted gotos**: states 0x0f/0x15 aim straight at the point. The scripts give

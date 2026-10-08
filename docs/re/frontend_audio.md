@@ -68,7 +68,7 @@ title screen to the actual screen size).
 | `BigPager.0`–`.9` | 7×7 | 16 | 112 | pager LCD digits |
 | `BigPager.image` | 38×38 | 48 | 1824 | big pager body |
 | `Small.0`–`.9`, `Small.x`, `Small.Person` | 9×13 | 16 | 208 | small HUD digits, "×", person |
-| `Siren.1`–`.10` | 9×13 | 16 | 208 | 10-frame spinning star (wanted level). `Siren` (no suffix, a large star) is shipped but not loaded |
+| `Siren.1`–`.10` | 9×13 | 16 | 208 | 10-frame spinning star (wanted level). `Siren` (no suffix) is the CD release's static wanted star (loaded as 9×13, 208 bytes, from `PROGDIR:icons/siren` at CD-exe file offset 0x6646), replaced by `Siren.1..10` in Oct 2001; not loaded by Update 7/OS4 (C) |
 | `<Weapon>.Normal/.Bright` | 9×20 | 16 | 320 | Fist, Pistol, Bomb, Shotgun, Flamethrower, Grenade, Minigun, Bazooka; the slot number is drawn into the top of the icon (Fist 0, Pistol 1, Shotgun 2, Flamethrower 3, Grenade 4, Minigun 5, Bazooka 6, Bomb 7) |
 | `Cup.None/.Bronze/.Silver/.Gold` | 15×20 | 16 | 320 | level rating cups |
 | `Loading` | 94×35 | 96 | 3360 | "Loading" + empty bar; loaded in `FUN_0104feb0` |
@@ -109,8 +109,11 @@ Loader for Big: `FUN_0100e088(prefix, font, w, h, size)`; for You/Them:
   (little_ variants for the lower-case codes in You/Them).
 * `You.c0`..`You.c11` → control codes **1..12**: controller-button symbols for control
   hints — c0–c3 arrows left/up/right/down, c4–c7 PlayStation-style ✕ □ ○ △, c8–c11 CD32
-  red/yellow/blue/green buttons (`analysis/img/icons/sheet_you_c.png`; meaning INFERRED
-  from the pictures).
+  red/yellow/blue/green buttons (`analysis/img/icons/sheet_you_c.png`). CONFIRMED by the key-name
+  code `FUN_0103c690` / `FUN_0103d7b0` (lowlevel JPF bits): PSX 0x106 → 5 ✕, 0x108 → 6 □,
+  0x107 → 7 ○, 0x109 → 8 △; CD32 0x11D Red → 9, 0x120 Yellow → 10, 0x11F Blue → 11,
+  0x11E Green → 12; Play/Reverse/Forward use phrases 1510–1512. Produced only for key names in
+  the control setup; no phrase file contains these codes.
 * **Latin-2 table** (`0x01177e8c`), selected in text by a `'^'` prefix byte
   (`FUN_0100a9e8`): `c_caron` Č 0xC8 & 0xC0, `little_c_caron` č 0xE8 & 0xE0,
   `s_caron` Š 0xA9 & 0xC3, `little_s_caron` š 0xB9 & 0xE3, `z_caron` Ž 0xAE & 0xC4,
@@ -166,7 +169,7 @@ Main routine `FUN_01019bd8` (68k `FUN_00024a3e`), called from the frame renderer
 | Ammo | 5 digits `Small.N`, x = 5+10k, y = 26, lighten | y 47, step 20 | leading zeros; hidden for fist |
 | Score / money `FUN_010180b0` | x = xmax−75, y = 5, 7 digits × 10 px, lighten | x−70, y 10 | player +0x384; > 9,999,999 → 8 digits from x−10; negative → 0 |
 | Bonus multiplier (green) | `Small.x` at (xmax−75,19), digit at (xmax−65,19) | (xmax−150,38)/(xmax−130,38) | green-add table; value `DAT_0114c74c` (1–4, `FUN_010413ec`) multiplies score gains (`FUN_01041408`) |
-| Lives | `Small.Person` plain (xmax−35,19), `Small.x` xmax−25, digit xmax−15 | −70/−50/−30, y 38 | `DAT_0114c6d0` (getter `FUN_01042078`), starts at 3 (I) |
+| Lives | `Small.Person` plain (xmax−35,19), `Small.x` xmax−25, digit xmax−15 | −70/−50/−30, y 38 | `DAT_0114c6d0` (getter `FUN_01042078`): set to 3 (and `DAT_0114c728` = 3) at every level start (`FUN_010692bc` ~49232); death −1 (~49668); at 0 state 2 "Game over!" 2026; AddLives `FUN_01042084` / `FUN_010d14a8` (C) |
 | Hearts `FUN_01018518` | 5 icons, x = cx−25+10i, y = 31, lighten | y 62, step 20 | health = player +0x34c (68k +0x34a); heart i = `Heart.Big` if health/20 ≥ i else `Heart.Small`; health < 1 → all small. No pulsing; the Heartbeat sample is never played |
 | Wanted level | `Siren.1..10` stars, y = 16 | y 32 | n = player +0x330; pitch 11; x0 = cx − 11n/2; phase c++ per frame (reset > 29); star k uses p = c+2k (wrap at 30): `Siren.(p+1)` if p ≤ 9 else `Siren.1` → a ripple of spinning stars (disasm `0101a464`) |
 | Countdown timer | `BigPager.image` at (5,45); 3 LCD digits `BigPager.N` at x = 13/21/29, y = 60 | (10,90); 26/42/58, 120 | shown if 0 ≤ t < 1000 s; t = `FUN_010f699c()` (script timer /30); TickTock each second |
@@ -184,7 +187,7 @@ The money display *is* the score (player +0x384).
 * Queue of 100 `{type, text, font, icon}`: 1 = open with icon (`FUN_01015d7c`), 2 = add
   text (`FUN_01015e18`), 3 = close. Icon 0 Phone, 1 Lips, 2 Mobile, 3 Pager, 4 Info
   (`0x0117b848 + 16*idx`). Font 1 (`You`, red) / font 2 (`Them`, blue) chosen by script
-  calls `FUN_010d1614` / `FUN_010d1638` (red = player speaking — INFERRED from names). The
+  calls `FUN_010d1614` / `FUN_010d1638` = `Dialog_Say1` / `Dialog_Say2` (red = the player speaking, matched to the 68k API `0xb40fe`/`0xb411c`; C). The
   death/arrest charge sheet uses Lips + font 2 (`FUN_010bcf10`). (C)
 * Lo-res geometry: opening animates FadeDarken over (0, ymax−1−40t/15)–(xmax, ymax) for
   t = 0..15 ticks (closing reverses); open box (0, ymax−41)–(xmax, ymax), icon 25×38 at
@@ -304,7 +307,7 @@ Model table `DAT_0117b6f8[17]` (`Objects/Options/*.Obj`):
 | 13 | moviereel | View replay |
 | 14 | moviereel | Save replay |
 | 15 | amiga | End game |
-| 16 | cross | loaded, unused |
+| 16 | cross | Game Over screen object (`FUN_01021434`, z 0x898; C) |
 
 One instance (`FUN_010c0c1c(model,x,y,heading)`, 0x4B8 bytes; [0..2] position, [3..5]
 angles, [9] model) at **x = 0, y = 600, z = 6000**, drawn by
@@ -325,8 +328,16 @@ default "Travis", 25 chars; resets times/cups → Game menu) · 1 Load saved gam
 (`FUN_0101f1a4`) · 2 View saved replay 2092 (`FUN_0101fdcc`) · 3 Credits 2093
 (`FUN_010206bc`) · 4 CD audio setup 2094 (`FUN_0102dd30`) · 5 Control setup 2454
 (`FUN_0102e75c`) · 6 Set language 2132 (`FUN_0101267c`, reloads phrases) · 7 View intro
-2109 (**only plays the refuse sound in Update 7/OS4**) · 8 Quit 2130 ("Are you sure?"
-2070, Yes 2071 / No 2072).
+2109 · 8 Quit 2130 ("Are you sure?" 2070, Yes 2071 / No 2072).
+
+View intro (C): **OS4** only plays the refuse sound; its video code (`FUN_01000978`, player
+~0x01000e10) is compiled in but has no callers. **Update 7 68k** plays it: main menu
+`FUN_00033192` item 7 → `FUN_00010364("intro")`, `FUN_000106c0` (play), `FUN_00011402`
+(cleanup); refused only if the files are in neither `PROGDIR:Videos` nor
+`PaybackCD:Payback/Videos`. 68k `FUN_000ec686` also plays it automatically at the end of the
+startup load, after the CubeTextures and before CloseProgress (call at 0xeda52). The CD
+release does the same (startup call at file offset 0x65caa, menu item index 6 at 0x14b70,
+loader at 0x894c0).
 
 **Game menu `FUN_0102ca08`** — title 2086 "GAME MENU", 7 items: 0 Play single player game
 2134 (→ level select; with all cups also 2047 "GAME COMPLETE!" + rating 2073–2075) ·
@@ -425,13 +436,29 @@ EMPTY!"). Save screen 2089: default description `"%s - C%d, L%d"`, 40 chars, 208
 ### 3.7 Config — `S:Payback.config` (C: load `FUN_0104199c`, save `FUN_01041510`)
 
 656 bytes, u32 BE unless noted, in order: version 10 (< 10 "Config file too old") ·
-`DAT_0114c72c` (screen-related, I) · lens-flare mode 0..2 · char[40] CD device · CD unit
+`DAT_0114c72c` saved motion blur · lens-flare mode 0..2 · char[40] CD device · CD unit
 (−1) · CD music mode (0 Off 2142, 1 Radio 2143, 2 Continuous 2144, 3 Disabled 2145;
-default 3) · screen mode ID `DAT_0114c304` · char[40] language (empty → ask) ·
+default 3) · software screen ModeID `DAT_0114c304` · char[40] language (empty → ask) ·
 4 × {device, key set} · required kills · multiplayer/rampage city · view size
-`DAT_0114c310` · police aggressiveness · 11 × 11 key codes · FX volume 0..100 · second
-screen mode ID `DAT_0114c300` · Gouraud · rotating view · Warp3D. Resolution/screen mode
+`DAT_0114c310` · police aggressiveness · 11 × 11 key codes · FX volume 0..100 · Warp3D
+screen ModeID `DAT_0114c300` · Gouraud · rotating view · Warp3D. Resolution/screen mode
 are picked in `PaybackSetup`, not in game (I).
+
+Field meanings (C):
+* `DAT_0114c72c` = saved motion-blur setting. The live flag is `DAT_0114c6c8` (toggled by
+  `FUN_01042308` and pause item 3; the software path blends frames with `FUN_0112cdb8`). Level
+  start (`FUN_010692bc` ~49442): blur on if c72c is set; level end (~49887): c72c = c6c8, then
+  blur off for the menus.
+* `DAT_0114c304` = software-render screen ModeID: `FUN_0104107c` gets W/H from it via
+  GetDisplayInfoData and sets `DAT_0114c2e0` = native non-RTG (8 bitplanes + c2p
+  `FUN_0112d1d0`); it is the OpenScreen SA_DisplayID in both software branches (0x0104ff88,
+  0x010509c4).
+* `DAT_0114c300` = Warp3D screen ModeID: the Warp3D OpenScreen (0x0105013c), W3D_CC_ModeID in
+  `FUN_01002024`, and `FUN_0104107c` when `DAT_0114c7d8 != 0`.
+* `DAT_0114c310` = 3-D view size in 1/256 of the screen, 0xB0..0x100 step 0x10: raw key 0x0C
+  ('=') grows, 0x0B ('-') shrinks it (`FUN_01051940` / `FUN_01051a10`), refused under Warp3D;
+  `FUN_01051800` clears the buffers and sets the partial-view flag `DAT_0114c6c4`;
+  `FUN_0105bd98` scales W/H by it; forced to 0x100 when Warp3D is on.
 
 Keys: 11 actions (phrases 2457–2467: accelerate, reverse/brake, left, right, shoot,
 shoot alt, in/out, brake only, next weapon, prev weapon, repeat message). Keyboard raw
@@ -531,8 +558,10 @@ except CarHorn (754 bytes loaded from a 734-byte file — 20 garbage bytes).
 | 25 | MissionFail | | | | |
 
 **Never played by the executable** (all 201 AddSound/ModifySound/DeleteSound call sites
-scanned): ShipHorn, Burp, Ambulance, CarStart, **Heartbeat**, **ThumpingMusic** (C for
-the exe; `Maps/*.script` not exhaustively checked). `Siren` is the police-car siren, not
+scanned): ShipHorn, Burp, Ambulance, CarStart, **Heartbeat**, **ThumpingMusic** (C). The
+scripts do not play them either (C): in the CD scripts AddSound is command 0x20 (CD DoScript
+at file 0x4d6e6); levels 00 and 01 use 0x30 Alarm, 10 uses 0x3A Hiss, 20 uses 0x40 Alarm2, 11
+and 21 have none. `Siren` is the police-car siren, not
 a wanted-level sound.
 
 ### 4.2 Mixer (C, `FUN_01007290` / `FUN_01004f54` / `FUN_01007d10`)
@@ -697,8 +726,9 @@ Chunk header `u32 size, u16 type`; next chunk at `(size+1)&~1`.
 | 18 PSTAMP | 0 | ignored |
 
 Unknown chunks print "Unrecognised chunk type %04x" (OS4 string 0x0112e0c4).
-Frame period passed to the timer = speed×1000 µs × 0.5 (CONFIRMED); actual pacing is
-≈15 fps, locked to the audio chunks (INFERRED). Length ≈ 30 s.
+Frame period = the header speed (66 ms) converted to E-clock ticks and rounded:
+`round(speed_ms·1000 / µs_per_tick)` with IEEE `+ 0.5` (68k `FUN_000106c0`, 0x10bd2..0x10c36;
+CONFIRMED). So ≈15.15 fps, matching the 1470-byte audio chunks. Length ≈ 30 s.
 
 ### 5.2 Audio = raw signed 8-bit mono PCM (CONFIRMED)
 
@@ -737,7 +767,17 @@ Load: end of LoadMap (`FUN_01079300`) builds `"%s.mini"` from the map base name
    (icon struct `{pixels, 64, 64, w3d}`); a 64×64 W3D texture in hardware mode.
 3. Stamp a small marker (colour **0xB0**, shadow **0x08**) at the top centre — pixel
    writes (x,y): (31,0); (30,1),(31,1),(32,1); (29..32,2),(33,2); (29..32,3),(33,3);
-   shadow (29..32,4),(33,4),(34,4). INFERRED: a north pointer / player arrow.
+   shadow (29..32,4),(33,4),(34,4) (CONFIRMED, `FUN_010727f0` stores at 0x010728c0). As a
+   picture (x 29..34, B = 0xB0 pure red, S = 0x08 black):
+   ```
+   y0  . . B . . .
+   y1  . B B B . .
+   y2  B B B B B .
+   y3  B B B B B .
+   y4  S S S S S S
+   ```
+   A red up-pointing arrowhead with a shadow at the map's north edge, baked into the texture
+   (so it turns with the map in rotating view): a north pointer (INFERRED).
 
 ### 6.3 Loading progress bar (CONFIRMED)
 
@@ -756,10 +796,27 @@ etc. — units are arbitrary "work" counts, self-calibrating.
 
 ## 7. Open questions
 
-* Original-CD `CD_Audio_Handler` message format; the actual CD audio track list.
-* Whether `Maps/*.script` ever play Heartbeat / ThumpingMusic / CarStart etc.
-* The pause-menu `FUN_01008cec(0)` call (presumably resumes Continuous music, I).
-* "View intro" is a no-op in Update 7/OS4; how the CD release triggers the intro.
-* Config fields `DAT_0114c72c`, `DAT_0114c304`, `DAT_0114c300` (written by PaybackSetup).
-* Version-3 replay record layout (tick totals match the v10 layout, I).
-* Unused assets: `Icons/Siren` (no suffix), `Objects/Options/Cross.Obj`.
+* Original-CD `CD_Audio_Handler` message format and the CD audio track list
+  (`extracted/iso` holds no audio tracks).
+* §4.4: the water test "square flags & 0x7F == 4" is probably the top face type (cube +9 = 4
+  Reflect), as in the traffic spawner (`FUN_000cf5cc`); not verified.
+
+Resolved (C):
+* ~~Scripts playing Heartbeat / ThumpingMusic / CarStart~~ None do (§4.4).
+* ~~Pause-menu `FUN_01008cec(0)`~~ The receiver is the "Payback CDDA Thread" (entry
+  0x010087a0; no Ghidra function), which waits on signal 0x1000 and switches on
+  `DAT_0114c2b4 & 0xF000`: 0x2000 quit, 0x3000 stop, 0x4000+n play track n now
+  (`FUN_010084bc`), 0x5000+n the policy at 0x010085cc (low 12 bits 0x64 = stop); bit 0x10000
+  only toggles so a repeat counts as new. Policy(n): a track is playing and its TOC length has
+  not run out → nothing; it has run out → n > 0 replays n, n = 0 advances to the next track
+  (wrapping); nothing playing → n = 0 starts a random track, n > 0 plays n. `FUN_01008cec`
+  skips a repeat of the same n within one second. So command 0 = "keep music running"; the
+  pause loop `FUN_0101a7dc` polls it in any mode ≠ 0, the main loop only in mode 2 (side
+  effect, I: pausing in Radio mode on foot starts a random track).
+* ~~View intro~~ Update 7 and the CD release play it (menu and startup); only OS4 refuses (§3.3).
+* ~~Config fields~~ §3.7.
+* ~~Version-3 replay records~~ Same bit layout as version 10: CD encoder at file 0x4773c..0x477de,
+  decoder 0x473cc (`(w&0xF8)>>3` weapon, 10 = none, 0xFFFF = end, `w&7` ticks), reader 0x7a7a0,
+  comment skip 0x7a7d2 (bit 15 as `FUN_010bbcf4`). Only the header differs.
+* ~~Unused assets~~ `Icons/Siren` is the CD release's wanted star (§1.2); `Cross.Obj` (option
+  model 16) is the spinning object on the Game Over screen `FUN_01021434` (z 0x898).
