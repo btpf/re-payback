@@ -210,6 +210,92 @@ impl Rgba {
     }
 }
 
+/// A resource from a classic Mac resource fork (the `.rsrc` files written
+/// by `tools/extract_mac.py`): the data of `kind`/`id`, if present.
+pub fn resource<'a>(fork: &'a [u8], kind: &[u8; 4], id: i16) -> Option<&'a [u8]> {
+    let be32 = |p: usize| fork.get(p..p + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let be16 = |p: usize| fork.get(p..p + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize);
+    let (data_off, map_off) = (be32(0)?, be32(4)?);
+    let types = map_off + be16(map_off + 24)?;
+    let ntypes = be16(types)?.wrapping_add(1) & 0xffff;
+    for t in 0..ntypes {
+        let e = types + 2 + t * 8;
+        if fork.get(e..e + 4)? != kind {
+            continue;
+        }
+        let count = be16(e + 4)? + 1;
+        let refs = types + be16(e + 6)?;
+        for r in 0..count {
+            let re = refs + r * 12;
+            if be16(re)? as u16 as i16 != id {
+                continue;
+            }
+            let off = data_off + (be32(re + 4)? & 0x00ff_ffff);
+            let len = be32(off)?;
+            return fork.get(off + 4..off + 4 + len);
+        }
+    }
+    None
+}
+
+/// The images of a Mac OS X `icns` icon family with 32-bit colour and an
+/// 8-bit mask (`it32`/`t8mk` 128, `ih32`/`h8mk` 48, `il32`/`l8mk` 32,
+/// `is32`/`s8mk` 16), largest first.
+pub fn icns_images(d: &[u8]) -> Result<Vec<Rgba>> {
+    if d.get(0..4) != Some(b"icns") {
+        return Err(Error::Parse { what: "icns", detail: "not an icns".into() });
+    }
+    let mut chunks = std::collections::HashMap::new();
+    let mut p = 8;
+    while p + 8 <= d.len() {
+        let len = u32_at(d, p + 4)? as usize;
+        if len < 8 {
+            break;
+        }
+        chunks.insert(&d[p..p + 4], d.get(p + 8..p + len).ok_or(Error::Truncated("icns"))?);
+        p += len;
+    }
+    let mut out = Vec::new();
+    for (img, mask, size, skip) in
+        [(b"it32", b"t8mk", 128usize, 4usize), (b"ih32", b"h8mk", 48, 0), (b"il32", b"l8mk", 32, 0), (b"is32", b"s8mk", 16, 0)]
+    {
+        let (Some(img), Some(mask)) = (chunks.get(&img[..]), chunks.get(&mask[..])) else { continue };
+        let n = size * size;
+        // Three channel planes, each PackBits-like: c < 0x80 copies c + 1
+        // bytes, otherwise repeats the next byte c - 0x80 + 3 times.
+        let mut planes = Vec::with_capacity(3 * n);
+        let mut q = skip;
+        while planes.len() < 3 * n && q < img.len() {
+            let c = img[q] as usize;
+            q += 1;
+            if c < 0x80 {
+                planes.extend_from_slice(img.get(q..q + c + 1).ok_or(Error::Truncated("icns rle"))?);
+                q += c + 1;
+            } else {
+                let v = *img.get(q).ok_or(Error::Truncated("icns rle"))?;
+                planes.extend(std::iter::repeat_n(v, c - 0x80 + 3));
+                q += 1;
+            }
+        }
+        if planes.len() < 3 * n || mask.len() < n {
+            return Err(Error::Truncated("icns image"));
+        }
+        let mut pixels = Vec::with_capacity(n * 4);
+        for k in 0..n {
+            pixels.extend_from_slice(&[planes[k], planes[n + k], planes[2 * n + k], mask[k]]);
+        }
+        out.push(Rgba { width: size as u32, height: size as u32, pixels });
+    }
+    Ok(out)
+}
+
+/// The Mac release's application icon (`icns` 128 in the resource fork of
+/// `Payback (OS X)`), largest image first.
+pub fn mac_app_icon(fork: &[u8]) -> Result<Vec<Rgba>> {
+    let icns = resource(fork, b"icns", 128).ok_or(Error::Parse { what: "icns", detail: "no icns 128".into() })?;
+    icns_images(icns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

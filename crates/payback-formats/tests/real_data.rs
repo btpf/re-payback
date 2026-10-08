@@ -202,3 +202,17 @@ fn launcher_icon_decodes() {
     // Workbench shows the colour image.
     assert_eq!(payback_formats::icon::workbench_image(&b).unwrap(), colour[0]);
 }
+
+#[test]
+fn mac_app_icon_decodes() {
+    let Some(dir) = data_dir() else { return };
+    let Ok(fork) = std::fs::read(dir.join("../mac/Payback/Payback (OS X).rsrc")) else { return };
+    let imgs = payback_formats::icon::mac_app_icon(&fork).unwrap();
+    let sizes: Vec<u32> = imgs.iter().map(|i| i.width).collect();
+    assert_eq!(sizes, vec![128, 48, 32, 16]);
+    // Corners transparent, centre opaque.
+    let big = &imgs[0];
+    assert_eq!(big.pixels[3], 0);
+    let c = ((64 * 128 + 64) * 4 + 3) as usize;
+    assert!(big.pixels[c] > 0);
+}

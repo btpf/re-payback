@@ -13,3 +13,6 @@
 
 # Local progress dashboard (kept up to date, not committed).
 /progress.html
+
+# Local Mac-vs-Amiga comparison report (not committed).
+/mac_differences.html
