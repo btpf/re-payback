@@ -576,7 +576,7 @@ impl Plugin for LightingPlugin {
             .init_resource::<DynamicLights>()
             .add_systems(
                 Update,
-                (follow_settings, rebuild_on_toggle, sync_mode, collect_lights, upload_lights)
+                (follow_settings, rebuild_on_toggle, sync_mode, follow_textures, collect_lights, upload_lights)
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             );
@@ -674,6 +674,47 @@ fn sync_mode(
         }
     }
     *done = Some((hardware, city.map.night));
+}
+
+/// The "Textures: Mac / Amiga look" setting (`Variants::textures`) changed
+/// in the pause menu's graphics screen: switch the cube texture set and
+/// rebuild the level's atlases in place (city materials and the water's
+/// index atlas), as [`sync_mode`] does for the renderer. The set is
+/// render-only (the surface flags come from `.CubeTextureList`), so the
+/// simulation is untouched. At load `level.rs` sets it from the settings.
+#[allow(clippy::too_many_arguments)]
+fn follow_textures(
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    mode: Res<RenderMode>,
+    mut data: ResMut<GameData>,
+    city: Option<Res<City>>,
+    render: Option<Res<CityRender>>,
+    materials: Res<Assets<CityMaterial>>,
+    water: Res<Assets<crate::water::WaterMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(settings) = settings.filter(|s| s.is_changed()) else { return };
+    let want = settings.variants.textures;
+    if data.mac_cube_textures == want {
+        return;
+    }
+    data.mac_cube_textures = want;
+    let (Some(city), Some(render)) = (city, render) else { return };
+    info!("cube textures: {} set", if want { "Mac" } else { "Amiga" });
+    // Night maps are darkened in the atlas only in software (`sync_mode`).
+    let atlases = crate::city::build_cube_atlases(&data, city.map.night && !mode.hardware());
+    for (pass, handle) in &render.materials {
+        let Some(atlas) = materials.get(handle).map(|m| m.atlas.clone()) else { continue };
+        let image = if *pass == Pass::Masked { &atlases.keyed } else { &atlases.opaque };
+        if let Some(mut slot) = images.get_mut(&atlas) {
+            *slot = image.clone();
+        }
+    }
+    if let Some(index) = water.get(&render.water).map(|w| w.index_atlas.clone())
+        && let Some(mut slot) = images.get_mut(&index)
+    {
+        *slot = atlases.indices;
+    }
 }
 
 /// Compute (or drop) the static light and the texture remap.

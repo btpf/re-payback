@@ -5,8 +5,9 @@
 //! The original chose the screen mode and the renderer (software or Warp3D
 //! hardware, `DAT_0114c7d8`) in the external `PaybackSetup` launcher and
 //! stored them in `S:Payback.config` (fields 7, 16 and 19). Here they are
-//! menu items: the pause menu's "Graphics options" (`FUN_0101a7dc`, item 5)
-//! and the front end's Graphics options screen, saved in `Saves/Payback.cfg`
+//! menu items on the Graphics options screen ([`GraphicsSetup`]), reached
+//! from the front end's main menu and from the pause menu's "Graphics
+//! options" (`FUN_0101a7dc`, item 5), saved in `Saves/Payback.cfg`
 //! (`hardware`, `resolution`, `window_mode`).
 //!
 //! The Mac release configured the window, size, renderer, rotating view,
@@ -14,8 +15,8 @@
 //! (`CPaybackPreferences::EditPreferences` @ 10050c60). The port has no
 //! such dialog: all of it is on the front end's Graphics options screen
 //! ([`SETUP_ITEMS`]), with the Mac/Amiga variants, the HUD resolution and
-//! the framing. The pause menu keeps the shorter [`ITEMS`] (its own items
-//! cover FX and motion blur).
+//! the framing. The pause menu keeps the original's two sub-items
+//! ([`ITEMS`]) and adds a line that opens the same screen in game.
 //!
 //! The window follows [`Settings`] live; `--resolution <w>x<h>` and
 //! `--window-mode windowed|borderless|fullscreen` win over the settings
@@ -189,16 +190,13 @@ pub enum Item {
     Gas,
 }
 
-/// The pause menu's graphics sub-items (item 5).
-pub const ITEMS: [Item; 7] = [
-    Item::Gouraud,
-    Item::Rotating,
-    Item::Hardware,
-    Item::Resolution,
-    Item::WindowMode,
-    Item::HiresHud,
-    Item::Aspect,
-];
+/// The pause menu's graphics sub-items (item 5), as in the original
+/// (`FUN_0101a7dc`, `local_5c`). Sub-selection `ITEMS.len()` is the added
+/// line [`MORE`], which opens [`GraphicsSetup::in_game`].
+pub const ITEMS: [Item; 2] = [Item::Gouraud, Item::Rotating];
+
+/// The pause menu's added line under [`ITEMS`] (no phrase).
+pub const MORE: &str = "More graphics options";
 
 /// The front end's Graphics options screen: the Mac setup dialog's
 /// controls in its order (display, then rendering), then the HUD and
@@ -304,6 +302,40 @@ impl Item {
         self.dimmed(cx.settings) || self.needs_mac(cx.data)
     }
 
+    /// In a level the setting only takes effect at the next level load:
+    /// the scenery models (`objects::set_model_variants`) are built at
+    /// load and swapping them would reshape the level's objects. The
+    /// others apply at once (the cube textures through
+    /// `lighting::follow_textures`, the blood through
+    /// `effects::sync_blood`); the title, intro and menu props show in
+    /// the menus.
+    pub fn next_level(self) -> bool {
+        self == Item::Scenery
+    }
+
+    /// Debug name (`--graphics-toggle`): the settings-file key.
+    pub fn from_name(name: &str) -> Option<Item> {
+        Some(match name.trim() {
+            "gouraud" => Item::Gouraud,
+            "rotating_view" | "rotating" => Item::Rotating,
+            "hardware" => Item::Hardware,
+            "resolution" => Item::Resolution,
+            "window_mode" => Item::WindowMode,
+            "motion_blur" => Item::MotionBlur,
+            "fx" => Item::Fx,
+            "hires_hud" | "hud" => Item::HiresHud,
+            "original_aspect" | "aspect" => Item::Aspect,
+            "textures" => Item::Textures,
+            "blood" => Item::Blood,
+            "menu_props" => Item::MenuProps,
+            "title" => Item::Title,
+            "intro" => Item::Intro,
+            "scenery" => Item::Scenery,
+            "gas" => Item::Gas,
+            _ => return None,
+        })
+    }
+
     /// Drawn dimmed (`FUN_0100cc78`): Gouraud under hardware rendering
     /// (`FUN_0101a7dc`: `DAT_0114c2f8 == 0 || DAT_0114c7d8 != 0`), the
     /// resolution in borderless fullscreen (it is the desktop's).
@@ -385,14 +417,14 @@ impl Item {
     }
 }
 
-/// Move the sub-selection `sel` (index into [`ITEMS`]) by `d`, skipping
-/// items that cannot be selected.
+/// Move the sub-selection `sel` (index into [`ITEMS`], or `ITEMS.len()`
+/// for [`MORE`]) by `d`, skipping items that cannot be selected.
 pub fn step_item(sel: usize, d: i32, s: &Settings) -> usize {
-    let n = ITEMS.len() as i32;
+    let n = ITEMS.len() as i32 + 1;
     let mut i = sel as i32;
     for _ in 0..n {
         i = (i + d).rem_euclid(n);
-        if ITEMS[i as usize].selectable(s) {
+        if ITEMS.get(i as usize).is_none_or(|it| it.selectable(s)) {
             break;
         }
     }
@@ -404,18 +436,30 @@ pub fn first_item(s: &Settings) -> usize {
     ITEMS.iter().position(|i| i.selectable(s)).unwrap_or(0)
 }
 
-/// The front end's Graphics options screen (main menu item 8; the
-/// original set these in PaybackSetup, the Mac in its setup dialog). Laid
-/// out like CD Audio Setup (`FUN_0102dd30`): title, the items, "Done" 2148
-/// at 170/200. The [`SETUP_ITEMS`] list is 12 px a line from 36/200 and
-/// scrolls when it does not fit above Done (dots mark hidden lines).
-/// Up/down select, fire or right steps an item forward, left back; Esc or
-/// Done saves and returns.
+/// The Graphics options screen: main menu item 8 and, in a level, the
+/// pause menu's "More graphics options" (the original set these in
+/// PaybackSetup, the Mac in its setup dialog). Laid out like CD Audio
+/// Setup (`FUN_0102dd30`): title, the items, "Done" 2148 at 170/200. The
+/// [`SETUP_ITEMS`] list is 12 px a line from 36/200 and scrolls when it
+/// does not fit above Done (dots mark hidden lines). Up/down select, fire
+/// or right steps an item forward, left back; Esc or Done saves and
+/// returns.
+///
+/// In a level it is drawn like the pause menu: over the frozen game
+/// picture, darkened (FadeDarken3; black under hardware rendering), with
+/// `options.obj` turning behind, and the music kept going. Settings apply
+/// live; [`Item::next_level`] ones read "(next level)".
 pub struct GraphicsSetup {
     /// Index into [`SETUP_ITEMS`], or `SETUP_ITEMS.len()` = Done.
     sel: usize,
     /// First item shown.
     top: usize,
+    /// Opened from the pause menu.
+    in_game: bool,
+    /// Background `options.obj` angle (as the pause menu's).
+    back: i32,
+    /// Debug (`--graphics-toggle`): items stepped on the first tick.
+    toggle: Vec<Item>,
 }
 
 /// Line spacing of the item list.
@@ -433,12 +477,39 @@ impl GraphicsSetup {
         // The Mac-only items come last, so the first one that is not
         // dimmed is never locked for want of the Mac data.
         let sel = SETUP_ITEMS.iter().position(|i| !i.dimmed(s)).unwrap_or(0);
-        GraphicsSetup { sel, top: 0 }
+        GraphicsSetup { sel, top: 0, in_game: false, back: 0, toggle: Vec::new() }
+    }
+
+    /// From the pause menu.
+    pub fn in_game(s: &Settings) -> GraphicsSetup {
+        GraphicsSetup { in_game: true, ..GraphicsSetup::new(s) }
+    }
+
+    /// Debug (`--pause-graphics`): on line `--menu-item <n>`, stepping the
+    /// `--graphics-toggle <keys>` items (comma-separated) once.
+    pub fn debug(s: &Settings) -> GraphicsSetup {
+        let mut g = GraphicsSetup::in_game(s);
+        if let Some(i) = crate::arg("--menu-item").and_then(|v| v.parse::<usize>().ok()) {
+            g.sel = i.min(SETUP_ITEMS.len());
+        }
+        g.toggle = crate::arg("--graphics-toggle")
+            .map(|v| v.split(',').filter_map(Item::from_name).collect())
+            .unwrap_or_default();
+        g
+    }
+
+    fn label(&self, item: Item, cx: &Ctx) -> String {
+        let l = item.label(cx);
+        if self.in_game && item.next_level() { format!("{l} (next level)") } else { l }
     }
 }
 
 impl super::ui::Screen for GraphicsSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &super::ui::Input) -> super::ui::Step {
+        for item in std::mem::take(&mut self.toggle) {
+            item.activate(cx, 1);
+        }
+        self.back = (self.back + 0x40).rem_euclid(super::ui::TURN);
         let n = SETUP_ITEMS.len() + 1;
         if input.up || input.down {
             let d = if input.down { 1 } else { -1 };
@@ -477,7 +548,20 @@ impl super::ui::Screen for GraphicsSetup {
     }
 
     fn draw(&self, ui: &mut super::ui::Ui, cx: &Ctx) {
-        ui.picture(0, true);
+        if !self.in_game {
+            ui.picture(0, true);
+        } else if cx.hardware {
+            // As the pause menu: hardware clears the screen every frame.
+            for y in 0..super::ui::H {
+                for x in 0..ui.w {
+                    ui.back.put_rgb(x, y, [0, 0, 0]);
+                }
+            }
+        } else {
+            // The pause menu's FadeDarken3 panel, widened for the list.
+            let (x0, x1) = (ui.vx(20), ui.vx(299));
+            ui.back.darken(x0, 2, x1, 229);
+        }
         ui.title(&cx.g(1600));
         let (y0, rows) = list_rows();
         let end = (self.top + rows).min(SETUP_ITEMS.len());
@@ -485,10 +569,10 @@ impl super::ui::Screen for GraphicsSetup {
             let item = SETUP_ITEMS[i];
             let y = y0 + STEP * row as i32;
             if item.locked(cx) {
-                ui.centred_dim(&item.label(cx), y, 2);
+                ui.centred_dim(&self.label(item, cx), y, 2);
             } else {
                 let c = if i == self.sel { ui.flash() } else { 2 };
-                ui.centred(&item.label(cx), y, c);
+                ui.centred(&self.label(item, cx), y, c);
             }
         }
         if self.top > 0 {
@@ -499,6 +583,21 @@ impl super::ui::Screen for GraphicsSetup {
         }
         let c = if self.sel == SETUP_ITEMS.len() { ui.flash() } else { 2 };
         ui.centred(&cx.g(2148), ui.hy(170), c);
+    }
+
+    /// In a level: the pause menu's `options.obj` behind.
+    fn back_model(&self) -> Option<super::ui::ModelView> {
+        self.in_game.then_some(super::ui::ModelView {
+            path: "options/options.obj",
+            pos: [0, -2000, 10000],
+            rot: [self.back, 0, 0],
+        })
+    }
+
+    /// In a level the music keeps going (`CD_CheckForTrackEnd(0)`, as the
+    /// pause menu); in the menus track 13.
+    fn cd_track(&self) -> i32 {
+        if self.in_game { 0 } else { 13 }
     }
 }
 
@@ -654,7 +753,10 @@ mod tests {
         assert_eq!(first_item(&s), 0);
         s.hardware = true;
         assert_eq!(first_item(&s), 1);
-        assert_eq!(step_item(1, -1, &s), ITEMS.len() - 1);
-        assert_eq!(step_item(ITEMS.len() - 1, 1, &s), 1);
+        // Gouraud is skipped: up from Rotating view wraps to the added line.
+        assert_eq!(step_item(1, -1, &s), ITEMS.len());
+        assert_eq!(step_item(ITEMS.len(), 1, &s), 1);
+        s.hardware = false;
+        assert_eq!(step_item(ITEMS.len(), 1, &s), 0);
     }
 }

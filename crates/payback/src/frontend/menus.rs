@@ -534,8 +534,9 @@ pub struct PauseMenu {
     sel: usize,
     obj: OptionObj,
     confirm: Option<Confirm>,
-    /// Graphics options sub-item (index into [`display::ITEMS`]; the
-    /// original has Gouraud shading and Rotating view, `local_5c`).
+    /// Graphics options sub-item (index into [`display::ITEMS`]: the
+    /// original's Gouraud shading and Rotating view, `local_5c`; or
+    /// `ITEMS.len()`, the added [`display::MORE`] line).
     sub: usize,
     /// Rotation of the person model (`[3] += 0x20`).
     person: i32,
@@ -647,6 +648,12 @@ impl Screen for PauseMenu {
                 s.motion_blur = !s.motion_blur;
                 cx.sound(Sfx::Select);
             }
+            5 if self.sub >= ITEMS.len() => {
+                // Every graphics setting, as on the front end's screen.
+                let screen = GraphicsSetup::in_game(s);
+                cx.sound(Sfx::Select);
+                return Step::Push(Box::new(screen));
+            }
             5 => {
                 if !ITEMS[self.sub].selectable(s) {
                     self.sub = display::first_item(s);
@@ -654,6 +661,15 @@ impl Screen for PauseMenu {
                 ITEMS[self.sub].activate(cx, 1);
             }
             _ => {}
+        }
+        Step::Stay
+    }
+
+    /// Back from the graphics screen: the renderer may have changed, so
+    /// Gouraud may no longer be selectable.
+    fn resume(&mut self, cx: &mut Ctx, _outcome: Outcome) -> Step {
+        if ITEMS.get(self.sub).is_some_and(|it| !it.selectable(cx.settings)) {
+            self.sub = display::first_item(cx.settings);
         }
         Step::Stay
     }
@@ -705,8 +721,8 @@ impl Screen for PauseMenu {
             }
             5 => {
                 // 1601 at 0x6e/200 and 1602 at 0x79/200 as in the
-                // original, the added items continue 11/200 apart. A
-                // dimmed item uses `FUN_0100cc78`.
+                // original, the added line 11/200 below. A dimmed item
+                // uses `FUN_0100cc78`.
                 for (i, item) in ITEMS.iter().enumerate() {
                     let yy = ui.hy(0x6e + 11 * i as i32);
                     let l = item.label(cx);
@@ -717,6 +733,9 @@ impl Screen for PauseMenu {
                         ui.centred(&l, yy, c);
                     }
                 }
+                let i = ITEMS.len();
+                let c = if self.sub == i { ui.flash() } else { 1 };
+                ui.centred(display::MORE, ui.hy(0x6e + 11 * i as i32), c);
             }
             _ => {}
         }

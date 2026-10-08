@@ -17,7 +17,9 @@
 //! `--replay-file <name in Saves/Replays>`); `loading` starts level 0.0
 //! through the loading panel (`--load-delay <ms>` slows its stages down);
 //! with `--map`, `pause` opens the pause menu after 3 s (on item
-//! `--pause-item <n>`, e.g. 5 = Graphics options) and `levelend`
+//! `--pause-item <n>`, e.g. 5 = Graphics options; `--pause-graphics`
+//! also opens its graphics screen, on line `--menu-item <n>`, stepping the
+//! comma-separated `--graphics-toggle <keys>` once) and `levelend`
 //! completes the level at once).
 //!
 //! A gamepad works the menus too: d-pad or left stick, A or Start to
@@ -643,6 +645,9 @@ fn run(mut fe: ResMut<Frontend>, mut env: Env) {
             None => menus::PauseMenu::new(),
         };
         fe.stack.push(Box::new(menu));
+        if debug_pause && std::env::args().any(|a| a == "--pause-graphics") {
+            fe.stack.push(Box::new(display::GraphicsSetup::debug(&env.settings)));
+        }
         fe.pending = Input::default();
         fe.acc = 0.0;
         env.typed.clear();
