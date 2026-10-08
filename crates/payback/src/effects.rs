@@ -220,6 +220,8 @@ pub enum Tex {
     Shockwave,
     /// The LensFlare.2xx glow, drawn as 4 quarters.
     LensFlare,
+    /// `Bubble`: a sinking vehicle's bubbles (Mac `do_Other` @ 10146280).
+    Bubble,
 }
 
 /// One effect record (OS4 0x2c bytes at `DAT_0118ff2c`), in original units.
@@ -685,6 +687,8 @@ const BLOOD_DARK_TILE: usize = 47;
 /// Hardware atlas only: `Dust` loaded black with alpha = max(R, G, B)
 /// (flag `DAT_0114c3cc`, `FUN_0104feb0`), the smoke sprite.
 const SMOKE_HW_TILE: usize = 48;
+/// `Bubble`, after the smoke tile.
+const BUBBLE_TILE: usize = 49;
 
 /// Full-mode flare elements (`FUN_01034804`): tile, position factor f (the
 /// element sits at `c + f·(p − c)`, c = screen centre, p = flare) and
@@ -773,6 +777,7 @@ impl Effect {
             (_, Tex::Dirt) => Sprite::Single(8),
             (_, Tex::DirtSkidmark) => Sprite::Single(9),
             (_, Tex::Shad) => Sprite::Single(10),
+            (_, Tex::Bubble) => Sprite::Single(BUBBLE_TILE),
         };
         (sprite, size, Pass::Blend(self.blend))
     }
@@ -810,7 +815,7 @@ fn hw_format(name: &str) -> HwFormat {
 /// bilinear filtering.
 fn build_atlas(data: &GameData, hardware: bool, blood: BloodSlot) -> Image {
     let mut rgba = vec![0u8; ATLAS_W * ATLAS_H * 4];
-    let files = FILES.iter().copied().chain(std::iter::once("Dust"));
+    let files = FILES.iter().copied().chain(["Dust", "Bubble"]);
     for (i, name) in files.enumerate() {
         let (name, mac) = blood.file(i, name, data);
         let format = match (hardware, i) {

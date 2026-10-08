@@ -607,6 +607,9 @@ impl<'w> Script<'w> {
             o.script_id = id;
             o.level = floor.clamp(0, 2) as usize;
         }
+        // Counted in the ambient spawner's budget (`+0x934`, Mac
+        // `AddObject` @ 10105780 -> `IncExtraObjs`).
+        self.world.entity_mut(e).insert(crate::sim::traffic::Persistent);
         // Every new object starts with skill `+0x346 = Random(100)` (68k
         // object constructor `FUN_000a2b80`); scripts change it with
         // `Actor_SetAggro`.

@@ -301,10 +301,13 @@ fn cops(
         {
             continue;
         }
-        // Head for the player (his driver's door when driving), leading
-        // by (5 - aggr) * 3 ticks.
-        let lead = (5 - aggr).max(0) * 3;
-        let mut goal = p.pos + p.vel * lead;
+        // Head for the player (his driver's door when driving) at
+        // `pos + v·(5 − aggr)·−3` (Mac `do_Person` @ 1013fbd0 l.115714, 68k
+        // ~122108): objects move by `pos += v` (Mac `MoveObject_General`
+        // @ 1006e4f0), so this trails the player by (5 − aggr)·3 ticks, the
+        // same point the police cars chase (`pursuit.rs`).
+        let lag = (5 - aggr) * 3;
+        let mut goal = p.pos - p.vel * lag;
         if !p_on_foot {
             let (s, c) = (trig.sin(p.heading), trig.cos(p.heading));
             let lat = -(p_info.radius + 192);

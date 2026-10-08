@@ -51,6 +51,9 @@ fn spawn_parked(world: &mut World) {
                 // them alone.
                 o.script_id = 2000 + i as i32;
             }
+            // Counted in the ambient spawner's budget (`+0x934`, Mac
+            // `amiga_startlevel` @ 100fff40 -> `IncExtraObjs`).
+            world.entity_mut(e).insert(crate::sim::traffic::Persistent);
         }
     }
 }

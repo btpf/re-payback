@@ -943,7 +943,9 @@ Common AI steering, for any target heading T:
 
 ### 7.2 Spawning and despawning (C: OS4 `FUN_010485cc` / `FUN_01047af4`; 68k `FUN_000d0cfc` / `FUN_000cf5cc`)
 
-**Cap.** The spawner runs only while `lastIdx < min(nPlacedVehicles + 11, 20)`. Cars and peds share this budget.
+**Cap.** The spawner runs only while `lastIdx < min(nPlaced + 11, 20)` (Mac `AddVehicles` @ 10059d40; the 68k
+uses `+ 8`). nPlaced counts `+0x934` objects (map object list, script objects, 2 per player in multiplayer). Cars
+and peds share this budget and this spawner (port: `traffic::spawn_ambient`).
 It makes `2·ticks` attempts per frame.
 
 **Where.** The edge of the view window:
@@ -979,10 +981,12 @@ each**.
 - z = cube top − 0x200 (drops into place)
 - aggression +0x348 = rand(100) (constructor)
 
-**Despawn** (OS4 `FUN_010542b8`, every frame):
+**Despawn** (OS4 `FUN_010542b8`, 68k `FUN_000dc5ac` ~117128, Mac `DoCollideStuff` @ 10067b50 l.25138; every
+frame):
 
 - Condition: state ∈ {3, 5, 7, 10, 11, 12}, no script tag (+0x480 == −1), and the square is outside every
-  camera's ±(R+5) window.
+  camera's ±(R+5) window (inclusive). Idle (4) and fleeing (0x12) objects are never culled; the port's
+  `people::despawn_far` follows this list (it used to cull 0x12 too).
 - State 6 is removed at once.
 - Dead bodies stay until off screen (no timer).
 
@@ -1048,8 +1052,9 @@ else:     throttle if speed < 0x18                      // new: walk on slowly w
 **Police on foot** (model `0x490a == 1`) act only when the player's wanted level (+0x330) is **≥ 3** and neither
 side is stunned or dead.
 
-- The cop heads for the player's position, or the car's door point when the player is driving. The lead is
-  `−3·(5 − difficulty)·player velocity`.
+- The cop heads for the player's position, or the car's door point when the player is driving. The offset is
+  `−3·(5 − difficulty)·player velocity`: objects move by `pos += v`, so the cop trails the player (port:
+  `police::cops`).
 - **Arrest**:
   - Distance condition:
     - Player on foot: within `(r_cop + r_player)·3/32` in >>4 units, i.e. 576 internal.

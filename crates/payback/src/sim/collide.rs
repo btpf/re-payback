@@ -794,16 +794,18 @@ pub fn scenery_collide(
 }
 
 /// Arc tangent in angle units, ±0x5a0 (`arctan` @ 10083170, tables from
-/// `InitArctan` @ 10083050): below 1 a 1000-entry table of `atan(i/1000)`,
-/// above it a table of `atan(1 + i)` by whole units, 0x5a0 past the table.
-/// (The table constants are INFERRED: 2880/π scale, 1000 steps.)
+/// `InitArctan` @ 10083050). CONFIRMED constants (double table at TOC
+/// `1017cef8` → 101740e0: 2880, 100, 10, …, 1000, −10, −100, −1000): for
+/// |r| < 10 the table `(int)(2880·atan(i/100)/π)` at `(int)(100·|r|)`; up to
+/// 1000 the table `(int)(2880·atan(10 + i)/π)` at `(int)(|r| − 10)`; 0x5a0
+/// beyond. Negative r mirrors it.
 pub fn arctan(r: f64) -> i32 {
     let scale = 2880.0 / std::f64::consts::PI;
     let a = r.abs();
-    let v = if a < 1.0 {
-        (scale * (((a * 1000.0) as i32) as f64 / 1000.0).atan()) as i32
-    } else if a <= 999.0 {
-        (scale * (1.0 + ((a - 1.0) as i32) as f64).atan()) as i32
+    let v = if a < 10.0 {
+        (scale * (((a * 100.0) as i32) as f64 / 100.0).atan()) as i32
+    } else if a <= 1000.0 {
+        (scale * (10.0 + ((a - 10.0) as i32) as f64).atan()) as i32
     } else {
         0x5a0
     };
@@ -1026,5 +1028,11 @@ mod tests {
         assert_eq!(arctan(-1.0), -0x2d0);
         assert_eq!(arctan(5000.0), 0x5a0);
         assert!((arctan(0.5) - 425).abs() <= 1);
+        // 1/100 steps below 10: 0.019 reads atan(0.01).
+        assert_eq!(arctan(0.019), arctan(0.01));
+        assert_eq!(arctan(0.01), 9);
+        // Whole units from 10: 10.9 reads atan(10).
+        assert_eq!(arctan(10.9), arctan(10.0));
+        assert_eq!(arctan(-10.9), -arctan(10.0));
     }
 }

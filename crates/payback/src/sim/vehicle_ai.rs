@@ -12,7 +12,7 @@
 use super::ai::{Ai, Order};
 use super::driving::{Drive, DrivingSet};
 use super::traffic::{LightPhase, TrafficSet};
-use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of};
+use super::{Class, Obj, Rng, State, Stick, Trig, angle_diff, heading_of, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
 use crate::data::GameData;
@@ -55,21 +55,59 @@ impl RouteGraph {
 }
 
 /// Per-driver navigation state.
-#[derive(Component, Default, Clone, Debug)]
+#[derive(Component, Clone, Debug)]
 pub struct Nav {
-    /// Own route node (`+0x3bc`; `None` = 9999, take the nearest).
+    /// Own route node (`+0x3bc`, Mac `+0x89e`; `None` = 9999, take the
+    /// nearest).
     pub node: Option<usize>,
-    /// Goal node: the target's nearest node (`target+0x3be`) or, fleeing,
-    /// the node farthest from the player (`+0x3ba`).
+    /// Goal node of a fleeing car: the node farthest from the player
+    /// (`+0x3ba`, Mac `+0x89c`). Pursuers read the target's node from
+    /// [`TargetNode`] instead.
     pub goal: Option<usize>,
-    /// Frames until the goal node is re-evaluated (`+0x3c0`, reset to 20).
-    pub refresh: u8,
-    /// Steering target (`+0x2e6/+0x2ea`).
+    /// Steering target (`+0x2e6/+0x2ea`, Mac `+0x7c8/+0x7cc`). Every state
+    /// shares it: traffic's lane choice moves it square by square, a car
+    /// handed back to traffic keeps it (Mac `MoveUnit` @ 10081080 only
+    /// re-targets once the car reaches it). New objects start with it on
+    /// their own position (Mac `CreateObject` @ 10075630).
     pub aim: IVec2,
-    /// Impatience timer (`+0x450`).
+    /// Impatience timer (`+0x450`, Mac `+0x93c`).
     pub horn: i32,
-    /// Honking (`_DAT_0034c3b4`) last tick, for the horn sound edge.
+    /// Honking (`_DAT_0034c3b4`, Mac `_DAT_1017cc70`) last tick.
     pub honking: bool,
+    /// The looped horn while honking (Mac `DoVehicleFire` @ 10070c20 sound
+    /// handle `+0x918`).
+    pub horn_sound: Option<Entity>,
+}
+
+impl Nav {
+    /// A fresh driver aiming at its own position.
+    pub fn at(pos: IVec3) -> Nav {
+        Nav {
+            node: None,
+            goal: None,
+            aim: pos.truncate(),
+            horn: 0,
+            honking: false,
+            horn_sound: None,
+        }
+    }
+}
+
+/// The chase target's route node (`target+0x3be`, Mac `+0x8a0`) and its
+/// refresh countdown (`+0x3c0`, Mac `+0x8a2`). The countdown belongs to the
+/// target and drops by one per frame (Mac `ResetObject` @ 1006e490, 68k top
+/// of `FUN_000e3a58`); the first pursuer to find it at 0 re-runs
+/// `FindNearestNode` @ 100f11d0 and sets it to 20, so all pursuers share one
+/// refresh every 20 frames (`do_Other` @ 10146280). A fleeing car (0x14)
+/// re-picks its farthest node whenever the countdown is 0 but resets only
+/// its own (unread) countdown, so with no pursuer it re-picks every frame.
+/// The only target in the port is the player; the cache restarts when the
+/// player object changes (a new object starts at 0).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct TargetNode {
+    pub owner: Option<Entity>,
+    pub node: Option<usize>,
+    pub refresh: u8,
 }
 
 /// Driver parameters for [`controller`].
@@ -93,13 +131,51 @@ pub struct Env<'a> {
     pub occ: &'a [(IVec2, usize, Entity)],
 }
 
-/// Occupancy of every solid object (the `DAT_003178a0` grid).
-pub fn occupancy<'a>(objs: impl Iterator<Item = (Entity, &'a Obj)>) -> Vec<(IVec2, usize, Entity)> {
-    objs.filter(|(_, o)| {
-        (o.class != Class::Projectile || o.state == State::Barrier) && o.state != State::Removed
-    })
-    .map(|(e, o)| (IVec2::new(o.pos.x >> 11, o.pos.y >> 11), o.level, e))
-    .collect()
+/// The occupancy grid (`DAT_003178a0[x][y][level]`, Mac `_DAT_1017c490`):
+/// every object marks each square its box covers, at cube level
+/// `min(level, 2)` (Mac `AddCollideObj` @ 10055c70, 68k `FUN_000cdfdc`,
+/// re-run for each object after its update in `object_MainLoop`
+/// @ 1014a670). The box is the axis-aligned bound of the four corners
+/// (±radius across, `-rear`/`front` along the heading); a person's corners
+/// all sit at `+radius` along (sic: both "along" values are the radius).
+/// A player's person model (`+0x8160`) marks one more square each side.
+/// Projectiles are objects too and count.
+pub fn occupancy<'a>(
+    objs: impl Iterator<Item = (Entity, &'a Obj)>,
+    library: &ObjectLibrary,
+    trig: &Trig,
+) -> Vec<(IVec2, usize, Entity)> {
+    let mut out = Vec::new();
+    for (e, o) in objs {
+        if o.state == State::Removed {
+            continue;
+        }
+        let info = &library.model(o.model).info;
+        let person = o.class == Class::Person;
+        let r = info.radius;
+        let (back, front) = if person { (r, r) } else { (-info.min_y, info.max_y) };
+        let (s, c) = (trig.sin(o.heading), trig.cos(o.heading));
+        let (mut lo, mut hi) = (IVec2::MAX, IVec2::MIN);
+        for along in [back, front] {
+            for lat in [r, -r] {
+                let p = IVec2::new(along * s + lat * c, along * c - lat * s);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+        }
+        let sq = |v: IVec2| IVec2::new((v.x >> 8) + o.pos.x >> 11, (v.y >> 8) + o.pos.y >> 11);
+        let grow = if person && o.player.is_some() { 1 } else { 0 };
+        let top = MAP_SIZE as i32 - 1;
+        let lo = (sq(lo) - grow).clamp(IVec2::ZERO, IVec2::splat(top));
+        let hi = (sq(hi) + grow).clamp(IVec2::ZERO, IVec2::splat(top));
+        let level = o.level.min(2);
+        for x in lo.x..=hi.x {
+            for y in lo.y..=hi.y {
+                out.push((IVec2::new(x, y), level, e));
+            }
+        }
+    }
+    out
 }
 
 /// Cruise band (lo, hi) by skill: below lo accelerate, above hi brake
@@ -169,12 +245,16 @@ pub fn controller(
         v = v.clamp(IVec2::splat(-0x5dc), IVec2::splat(0x5dc));
     }
     let want = heading_of(v.x, v.y);
-    let err = angle_diff(obj.heading, want);
-    // Dead zone: half a tick's maximum yaw.
+    // Dead zone: half a tick's maximum yaw. The two ways round are
+    // compared as in `do_Other` @ 10146280 (68k ~124420): turn up when the
+    // short way is up and longer than the dead zone, down when the down way
+    // is at least the dead zone (ties go down).
     let dead = t.turn >> 1;
-    let mut steer = if err > dead {
-        -1
-    } else if err < -dead {
+    let up = wrap(want - obj.heading);
+    let down = wrap(obj.heading - want);
+    let mut steer = if up < down {
+        if dead < up { -1 } else { 0 }
+    } else if dead <= down {
         1
     } else {
         0
@@ -280,24 +360,31 @@ pub fn controller(
     }
 }
 
-/// Route following for states 8/10/0x14 (68k ~124213-124290): returns
-/// true on reaching the goal node (state 8 -> 9, 10 -> 11). `pursuit`
-/// selects the node arrival radius of states 8/10 (see below).
-pub fn follow_route(route: &RouteGraph, nav: &mut Nav, obj: &Obj, pursuit: bool) -> bool {
-    let Some(goal) = nav.goal else {
-        return false;
-    };
+/// Route following for states 8/10/0x14 (Mac `do_Other` @ 10146280, 68k
+/// ~124213-124290): returns true on reaching `goal` (state 8 -> 9,
+/// 10 -> 11). `pursuit` selects the node arrival radius of states 8/10.
+pub fn follow_route(
+    route: &RouteGraph,
+    nav: &mut Nav,
+    obj: &Obj,
+    goal: Option<usize>,
+    pursuit: bool,
+) -> bool {
     let Some(node) = nav.node else {
+        // 9999: take the nearest node to self.
         nav.node = route.nearest(obj.pos);
         if let Some(n) = nav.node {
             nav.aim = route.pos(n);
         }
         return false;
     };
+    let Some(goal) = goal else {
+        return false;
+    };
     // Reached when |d| < r on both axes. Pursuit (states 8/10) uses the
-    // Mac radius `300 + speed²>>7` (`do_Other` @ 10146280; the Amiga's
-    // `300 + |5·speed|`, 68k ~124245, reached nodes far too early at
-    // speed). Flee (0x14) keeps `300 + |5·speed|` on the Mac too.
+    // Mac radius `300 + speed²>>7`; the Amiga's `300 + |5·speed|` (68k
+    // ~124245) reached nodes far too early at speed. Flee (0x14) keeps
+    // `300 + |5·speed|` on the Mac too.
     let r = if pursuit {
         300 + (obj.speed * obj.speed >> 7)
     } else {
@@ -317,19 +404,51 @@ pub fn follow_route(route: &RouteGraph, nav: &mut Nav, obj: &Obj, pursuit: bool)
     false
 }
 
-/// Horn sound on the honk edge (the tank fires instead).
-pub fn horn(commands: &mut Commands, nav: &mut Nav, veh: &Vehicle, obj: &Obj, honk: bool) {
-    if honk && !nav.honking && veh.kind != vk::TANK {
-        let t = &TYPES[veh.kind];
-        let hz = (16_000_000 / t.mass.max(1)).clamp(3000, 20000) as f32;
-        commands.spawn(Sound::once(
-            t.horn,
-            20_000_000.0,
-            hz,
-            SoundPos::At(obj.posf()),
-        ));
-    }
+/// The horn while an AI driver honks (Mac `DoVehicleFire` @ 10070c20,
+/// 68k `FUN_000e2a50`): a looped horn sound (`+0x491a`) at volume 20e6 and
+/// `clamp(16e6 / mass, 3000, 20000)` Hz (a police model: its horn is the
+/// siren, 25e6 at 10000 Hz) starts when the fire/horn input goes on, follows
+/// the car, and is deleted the first frame the input is off (`do_Other`
+/// ~10147dec: `DeleteSound(+0x918)`). The tank fires its gun instead
+/// (`tank_cannon`). The sound is a child of the car, so it goes with it.
+pub fn horn(
+    commands: &mut Commands,
+    sounds: &mut Query<&mut Sound>,
+    nav: &mut Nav,
+    e: Entity,
+    veh: &Vehicle,
+    obj: &Obj,
+    honk: bool,
+) {
     nav.honking = honk;
+    if veh.kind == vk::TANK {
+        return;
+    }
+    let at = SoundPos::At(obj.posf());
+    match (honk, nav.horn_sound) {
+        (true, Some(s)) => {
+            if let Ok(mut snd) = sounds.get_mut(s) {
+                snd.pos = at;
+            } else {
+                nav.horn_sound = None;
+            }
+        }
+        (true, None) => {
+            let t = &TYPES[veh.kind];
+            let (vol, hz) = if t.police {
+                (25_000_000.0, 10_000.0)
+            } else {
+                (20_000_000.0, (16_000_000 / t.mass.max(1)).clamp(3000, 20000) as f32)
+            };
+            let s = commands.spawn((Sound::looping(t.horn, vol, hz, at), ChildOf(e))).id();
+            nav.horn_sound = Some(s);
+        }
+        (false, Some(s)) => {
+            commands.entity(s).despawn();
+            nav.horn_sound = None;
+        }
+        (false, None) => {}
+    }
 }
 
 /// Script orders for vehicles.
@@ -343,6 +462,8 @@ pub fn vehicle_orders(
     library: Option<Res<ObjectLibrary>>,
     mut rng: ResMut<Rng>,
     mut triggers: ResMut<Triggers>,
+    tnode: Res<TargetNode>,
+    mut sounds: Query<&mut Sound>,
     player: Query<Entity, With<CameraTarget>>,
     mut set: ParamSet<(
         Query<(Entity, &Obj)>,
@@ -365,7 +486,7 @@ pub fn vehicle_orders(
     };
     let snap: Vec<(Entity, IVec3, IVec3)> =
         set.p0().iter().map(|(e, o)| (e, o.pos, o.vel)).collect();
-    let occ = occupancy(set.p0().iter());
+    let occ = occupancy(set.p0().iter(), &library, &trig);
     let env = Env {
         city: &city,
         lights: lights.phase,
@@ -395,7 +516,7 @@ pub fn vehicle_orders(
             continue;
         }
         let Some(mut nav) = nav else {
-            commands.entity(e).insert(Nav::default());
+            commands.entity(e).insert(Nav::at(obj.pos));
             continue;
         };
         let t = &TYPES[veh.kind];
@@ -443,8 +564,10 @@ pub fn vehicle_orders(
             }
             Order::FleeFar | Order::Flee => {
                 // State 0x14: drive the route toward the node farthest from
-                // the player, re-chosen every 20 frames (68k ~124330).
-                // (Plain flee 0x12 is person-only; the port flees by route.)
+                // the player, re-chosen while the player's node countdown
+                // is 0 (`do_Other` @ 10146280, 68k ~124330; see
+                // [`TargetNode`]). (Plain flee 0x12 is person-only; the port
+                // flees by route.)
                 if let Some(pp) = player_pos {
                     if route.is_empty() {
                         aim = Some(
@@ -452,15 +575,13 @@ pub fn vehicle_orders(
                                 .clamp(IVec2::splat(-0x5dc), IVec2::splat(0x5dc)),
                         );
                     } else {
-                        if nav.refresh == 0 {
+                        if tnode.refresh == 0 || nav.goal.is_none() {
                             nav.goal = route.0.farthest(pp.x >> 3, pp.y >> 3);
-                            nav.refresh = 20;
-                        } else {
-                            nav.refresh -= 1;
                         }
                         // On the farthest node the original drops into
                         // state 11 (straight chase); the port waits there.
-                        if !follow_route(&route, &mut nav, &obj, false) {
+                        let goal = nav.goal;
+                        if !follow_route(&route, &mut nav, &obj, goal, false) {
                             aim = Some(nav.aim);
                         }
                     }
@@ -502,7 +623,7 @@ pub fn vehicle_orders(
                 let s = controller(
                     e, &obj, t, front, drive, driver, aim, &env, &mut nav, &mut rng, &trig,
                 );
-                horn(&mut commands, &mut nav, veh, &obj, s.fire);
+                horn(&mut commands, &mut sounds, &mut nav, e, veh, &obj, s.fire);
                 s
             }
             // No AI input: the car coasts (state 4).
@@ -613,7 +734,21 @@ fn tank_cannon(
     }
 }
 
+/// The target's node countdown drops by one per frame (Mac `ResetObject`
+/// @ 1006e490); a new player object starts at 0.
+fn tick_target_node(mut t: ResMut<TargetNode>, player: Query<Entity, With<CameraTarget>>) {
+    let p = player.iter().min();
+    if t.owner != p {
+        *t = TargetNode {
+            owner: p,
+            ..default()
+        };
+    }
+    t.refresh = t.refresh.saturating_sub(1);
+}
+
 fn load_route(mut commands: Commands, data: Res<GameData>, spec: Res<LevelSpec>) {
+    commands.insert_resource(TargetNode::default());
     let path = spec.path("route");
     let route = data
         .read(&path)
@@ -740,6 +875,14 @@ impl Plugin for VehicleAiPlugin {
             .configure_sets(
                 FixedUpdate,
                 VehicleAiSet.after(TrafficSet).before(DrivingSet),
+            )
+            .init_resource::<TargetNode>()
+            .add_systems(
+                FixedUpdate,
+                tick_target_node
+                    .in_set(VehicleAiSet)
+                    .before(super::pursuit::PursuitSet)
+                    .before(vehicle_orders),
             )
             .add_systems(FixedUpdate, vehicle_orders.in_set(VehicleAiSet))
             .add_systems(

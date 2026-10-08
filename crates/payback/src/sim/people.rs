@@ -206,7 +206,6 @@ impl Plugin for PeoplePlugin {
                         move_people,
                         animate_people,
                         regen_and_respawn,
-                        spawn_peds,
                         despawn_far,
                     )
                         .chain()
@@ -1019,127 +1018,21 @@ fn regen_and_respawn(
     }
 }
 
-/// Spawn pedestrians just outside the view (people.md §7.2): two attempts
-/// per tick on the window edge ahead of the player's motion; flag-0x20
-/// squares accept a pedestrian 1 time in 5.
-#[allow(clippy::too_many_arguments)]
-fn spawn_peds(
-    mut commands: Commands,
-    data: Res<GameData>,
-    city: Option<Res<City>>,
-    cam: Res<GameCam>,
-    library: Option<ResMut<ObjectLibrary>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut rng: ResMut<Rng>,
-    objects: Query<&Obj>,
-    player: Query<&Obj, With<CameraTarget>>,
-    views: Res<ViewCams>,
-    mut turn: Local<usize>,
-) {
-    let (Some(city), Some(mut library)) = (city, library) else {
-        return;
-    };
-    // Split screen: each tick spawns around the next player's view.
-    let (cam, vel) = if views.0.is_empty() {
-        (*cam, player.single().map(|o| o.vel).unwrap_or(IVec3::ZERO))
-    } else {
-        *turn = (*turn + 1) % views.0.len();
-        let p = *turn as u8;
-        let vel = player.iter().find(|o| o.player == Some(p)).map_or(IVec3::ZERO, |o| o.vel);
-        (views.0[*turn], vel)
-    };
-    let count = objects.iter().count();
-    // Ambient budget: min(placed + 11, 20) objects.
-    if count >= 20 {
-        return;
-    }
-    let mut occupied = vec![false; MAP_SIZE * MAP_SIZE];
-    for o in &objects {
-        let (sx, sy) = ((o.pos.x >> 11) as usize, (o.pos.y >> 11) as usize);
-        if sx < MAP_SIZE && sy < MAP_SIZE {
-            occupied[sx * MAP_SIZE + sy] = true;
-        }
-    }
-    let c = cam.square();
-    let h = cam.window();
-    for _ in 0..2 {
-        let along = rng.rand(2 * h + 1) - h;
-        let edge = if vel.x.abs() >= vel.y.abs() && vel.x != 0 {
-            if vel.x > 0 { 1 } else { 3 }
-        } else if vel.y != 0 {
-            if vel.y > 0 { 2 } else { 0 }
-        } else {
-            rng.rand(3)
-        };
-        let (sx, sy) = match edge {
-            0 => (c.x + along, c.y - h),
-            1 => (c.x + h, c.y + along),
-            2 => (c.x + along, c.y + h),
-            _ => (c.x - h, c.y + along),
-        };
-        if !(1..MAP_SIZE as i32 - 1).contains(&sx) || !(1..MAP_SIZE as i32 - 1).contains(&sy) {
-            continue;
-        }
-        let (sx, sy) = (sx as usize, sy as usize);
-        let near_busy = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
-            .iter()
-            .any(|(dx, dy)| {
-                occupied[(sx as i32 + dx) as usize * MAP_SIZE + (sy as i32 + dy) as usize]
-            });
-        if near_busy {
-            continue;
-        }
-        for level in 0..3 {
-            let cube = &city.map.square(sx, sy).cubes[level];
-            if cube.slope == Slope::Off || !cube.faces[map::TOP].visible() {
-                continue;
-            }
-            if cube.flags & 0x20 == 0 || rng.rand(5) != 0 {
-                continue;
-            }
-            let top = city.square_cubes(sx, sy)[level].top_at(0.5, 0.5);
-            let pos = IVec3::new(
-                (sx as i32) * 2048 + 0x400,
-                (sy as i32) * 2048 + 0x400,
-                crate::world::z_of_h(top) as i32 - 0x200,
-            );
-            // PedMale1-4 (table indices 6, 8, 9, 10).
-            let kind = [6, 8, 9, 10][rng.rand(4) as usize];
-            let heading = rng.rand(0x167f);
-            if let Some(e) = spawn_person(
-                &mut commands,
-                &data,
-                &mut library,
-                &mut meshes,
-                kind,
-                pos,
-                heading,
-                State::Wander,
-            ) {
-                commands.entity(e).insert(Ambient);
-                // The wander anchor starts at the spawn square's centre
-                // (Mac `AddThing` @ 10058350, l.18726).
-                let anchor = pos.truncate();
-                commands.queue(move |world: &mut World| {
-                    if let Some(mut p) = world.get_mut::<Person>(e) {
-                        p.anchor = anchor;
-                    }
-                });
-                occupied[sx * MAP_SIZE + sy] = true;
-            }
-            break;
-        }
-    }
-}
+// Pedestrians are spawned with the traffic: a flag-0x20 square is one of
+// `AddThing`'s choices (`traffic::spawn_ambient`, people.md §7.2).
 
 /// Spawned by the ambient spawner (removable when off screen).
 #[derive(Component)]
 pub struct Ambient;
 
-/// Remove untagged objects that leave every camera's window (OS4
-/// `FUN_010542b8`, 68k `FUN_000dc5ac`): not only the spawner's, but also
-/// released mission actors, thrown-out drivers, abandoned cars and bodies;
-/// otherwise they fill the 20-object budget and traffic stops for good.
+/// Remove untagged objects that leave every camera's window (Mac
+/// `DoCollideStuff` @ 10067b50 l.25138, 68k `FUN_000dc5ac` ~117128, OS4
+/// `FUN_010542b8`): objects without a script id (`+0x47c`, Mac `+0x968`)
+/// in states 3, 5, 7, 10, 11 or 12 (drone, parked, dead, pursuit, barrier)
+/// whose square is outside every player's window (inclusive edges) — not
+/// only the spawner's, but also released actors, thrown-out drivers,
+/// abandoned cars and bodies. State 6 goes at once. Idle (4), fleeing
+/// (0x12) and script-order objects stay.
 fn despawn_far(
     mut commands: Commands,
     cam: Res<GameCam>,
@@ -1175,7 +1068,6 @@ fn despawn_far(
             State::Wander
                 | State::Parked
                 | State::Dead
-                | State::Flee
                 | State::Removed
                 | State::PursuitRoute
                 | State::Pursuit

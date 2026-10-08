@@ -216,7 +216,7 @@ aggressiveness, 0..5 [C] (68k `FUN_000ec686` ~127030–127100):
 - Rampage uses the menu choice "Police aggressiveness" (phrases 2491–2496: Very low..Very high),
   stored in 68k `DAT_0011a6ea` / OS4 `DAT_0114c2ec`.
 
-Aggressiveness drives: the wanted decay period, the police shooting chance, the pursuit lead
+Aggressiveness drives: the wanted decay period, the police shooting chance, the pursuit trailing point
 factor `5 − aggr`, the pursuit skill, and the traffic driver skill. [C]
 
 ### 2.1 Wanted level
@@ -309,13 +309,19 @@ have weight 0, so they are never kept (OS4 `FUN_01047af4` ~37785; weights set in
 **Spawning** (scheduler 68k `FUN_000d0cfc` / OS4 `FUN_010485cc`; drone-at-square 68k
 `FUN_000cf5cc` / OS4 `FUN_01047af4`) [C]:
 
-- **Object cap.** Spawning runs every frame while `objCount−1 < min(persistentCount + 8, 20)`.
-  The hard limit is 32 objects. **There is no police-specific cap.**
+- **Object cap.** Spawning runs every frame while `objCount−1 < min(persistentCount + 8, 20)` (68k);
+  the **Mac** (`AddVehicles` @ 10059d40) uses `+ 11`. persistentCount (`IncExtraObjs` @ 10051d30) counts
+  the objects flagged `+0x934`: the map's object list, script `AddObject*`, and two per player in
+  multiplayer. The cap is re-checked before every try. The hard limit is 32 objects. **There is no
+  police-specific cap.** Port: `traffic::spawn_ambient` follows the Mac (`traffic::Persistent`).
 - **Window.** The view window has radius `r = ((camZ + 1500)·8 >> 11) + 5` squares around the
   camera square.
 - **Edge.** Spawns go on the window edge ahead of the player. The edge comes from the dominant
-  axis of the player's velocity (random if stationary). Random points on that edge are tried for
-  cube levels 0..2, `ticks·2` times per frame.
+  axis of the player's velocity (x only when `|vy| < |vx|`; stationary: `random(3)` = N, E or S, never
+  W). Each of the `ticks·2` passes per frame tries every cube level 0..2, each at its own random
+  square of that edge. In multiplayer each pass serves one player, moving to the next after a pass that
+  spawned, and a square inside another player's window is refused. [C, Mac `AddVehicles`/`AddThing`,
+  68k `FUN_000d0cfc`/`FUN_000cf5cc`]
 - **Square test.** The square must exist and its **top face type** (cube `+9`) must not be Off (0) or
   Reflect (4, water) (68k `FUN_000cf5cc`) [C]. The square and
   its 4 neighbours must be free in the occupancy grid (68k `DAT_003178a0[x][y][cube]`). A traffic
@@ -333,7 +339,7 @@ have weight 0, so they are never kept (OS4 `FUN_01047af4` ~37785; weights set in
   `clamp(rand(90) + aggr·8 − 30, 0, 99)`.
 - **Despawn.** Objects in states 3, 5, 7, 0xa, 0xb or 0xc without a script id are removed once
   their square leaves the ±r window. **This includes police in pursuit.** State 6 objects are
-  removed at once. (68k `FUN_000dc5ac` ~117125.)
+  removed at once. (68k `FUN_000dc5ac` ~117128, Mac `DoCollideStuff` @ 10067b50 l.25138; same list in both.)
 
 **Pursuit selection.** Applies to police cars that are not vans, in states 3/8/9/10/11/0x14/0x15
 (not 0xf) [C]:
@@ -361,7 +367,10 @@ ambient. None of the shipped scripts gives 0x43/0x44 to a police car (their only
 - There is **no transition back** from 9/11 to the graph.
 
 **Direct chase (9/11)** [C]:
-- Police aim at `target.pos + target.v·(5−aggr)·3`, i.e. they lead the target by (5−aggr)·3 ticks.
+- Police aim at `target.pos + target.v·(5−aggr)·−3` (Mac `do_Other` @ 10146280 l.118091, 68k ~124291). Every
+  object moves by `pos += v` (Mac `MoveObject_Vehicle` @ 1006e890, `MoveObject_General` @ 1006e4f0, 68k
+  ~123574), so this point lies (5−aggr)·3 ticks **behind** the target: the police follow the player rather
+  than cut it off (they lead only at aggr 6). CONFIRMED in both builds. Port: `pursuit.rs` `pursue`.
   Non-police aim straight at the target.
 - Steering uses atan2 with turn rate from model +0x48e4.
 - Drivers with skill ≥ 99 and hp ≥ 50 skip the obstacle / traffic-light look-ahead, so they ram.
@@ -371,9 +380,11 @@ ambient. None of the shipped scripts gives 0x43/0x44 to a police car (their only
   shared with traffic and script gotos: vehicles.md §6.2. Consequence: at skill 95–97 (wanted 3–5 with
   aggr < 4) the look-ahead sees the player's car as an obstacle, so the car brakes behind it and then drops
   a cop; only skill ≥ 99 cars ram. [C]
-- Port (`sim/pursuit.rs`): the target's nearest node is cached per chaser (refreshed every 20 ticks) instead
-  of on the target object; a missing route file sends pursuers straight to state 11. (Port fact, checked in
-  `sim/pursuit.rs` ~216–231: nearest node refreshed every 20 frames; empty route → straight to Pursuit.)
+- Port (`sim/pursuit.rs`): the target's node and countdown are one `vehicle_ai::TargetNode` (the only
+  target is the player), ticked once per frame, refreshed by the first pursuer that finds it at 0, as in
+  the original; a missing route file sends pursuers straight to state 11.
+- Leaving pursuit (wanted < 3) only rewrites the state byte: the car keeps its skill, route node and
+  steering target, and the lane code resumes once it reaches that target. [C, Mac `do_Other`]
 
 **Flee (0x14).** The target is the route node farthest from the player (`FarthestNode`, stored at
 +0x3ba). Used by script objects. [C]
@@ -397,9 +408,10 @@ if |car - player|_manhattan < 8000 and ((|car.speed| < 100 and |player.speed| < 
 Square flag **bit 0x40** = "police may place roadblock here" (map editor key B). It sits in the
 cube header `flags` byte, in-memory cube +5.
 
-Spawning (68k `FUN_000cfe0c`, OS4 `FUN_01047134`) runs only at **wanted ≥ 5**. The scheduler makes
-`(wanted−4)·2 + 1` attempts per cube level per pass (3 at wanted 5, 5 at wanted 6), on random
-squares of the spawn edge.
+Spawning (68k `FUN_000cfe0c`, OS4 `FUN_01047134`, Mac `AddPolice` @ 10058ba0) runs only at **wanted ≥ 5**.
+The scheduler makes `(wanted−4)·2 + 1` attempts per cube level per pass (3 at wanted 5, 5 at wanted 6),
+right after that level's traffic try, on random squares of the same spawn edge; it does not stop after
+a success (the occupancy test keeps runs apart).
 
 Requirements:
 - The square has bit 0x40, x in 1..0x7e and y in 1..0x7e.
@@ -448,7 +460,8 @@ else:
   guard range test (state 0x10) and the steering target. Port: `police::cops` uses the real radii
   and the target's door offsets, and skips cops while the player is stunned (+0x490).
 - Firing has **no range or line-of-sight test**.
-- The cop turns toward `player.pos + player.v·(5−aggr)·3` and walks straight at it. Cops on foot
+- The cop turns toward `player.pos + player.v·(5−aggr)·−3` (Mac `do_Person` @ 1013fbd0 l.115714, 68k ~122108),
+  a point (5−aggr)·3 ticks *behind* the player (`pos += v`), and walks straight at it. Cops on foot
   never use route nodes.
 - While driving, the player's car door closes by 50·ticks per frame (sound 40 Doorslam when it
   shuts).

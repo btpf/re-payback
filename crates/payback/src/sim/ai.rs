@@ -117,16 +117,20 @@ pub fn give_order(world: &mut World, e: Entity, order: Order) {
         _ => State::Idle,
     };
     if vehicle {
-        // A fresh order restarts route following; ambient cars go back to
-        // the traffic driver (state 3).
+        // Only the state byte changes: the route node and steering target
+        // carry over (a new object's target is its own position). Ambient
+        // cars go back to the traffic driver (state 3), which takes over
+        // once they reach the target (`MoveUnit` @ 10081080).
         let aggro = world.get::<Ai>(e).map_or(0, |a| a.aggro);
+        let dir = world.get::<super::traffic::Traffic>(e).map_or(0, |t| t.dir);
+        let pos = world.get::<Obj>(e).map(|o| o.pos);
         let mut ent = world.entity_mut(e);
-        ent.insert(super::vehicle_ai::Nav::default());
+        if let (false, Some(pos)) = (ent.contains::<super::vehicle_ai::Nav>(), pos) {
+            ent.insert(super::vehicle_ai::Nav::at(pos));
+        }
         if order == Order::Ambient {
-            if let Some(o) = ent.get::<Obj>() {
-                let tr = super::traffic::resume(o, aggro);
-                ent.insert((tr, super::people::Ambient));
-            }
+            let tr = super::traffic::resume(aggro, dir);
+            ent.insert((tr, super::people::Ambient));
         }
     } else if let Order::Attack { .. } = order {
         // Attackers get a shotgun with 100 shells.

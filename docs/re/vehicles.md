@@ -96,7 +96,7 @@ Defaults come from the `.Obj` reader (OS4 `FUN_010bf8bc` tail). The per-type ove
 
 | Off (OS4) | Default | Meaning |
 |---|---|---|
-| +0x48c4 | from mesh | max\|X\|·16: half-width. Collision radius and skid-mark wheel offsets. Helicopter: divided by 3. |
+| +0x48c4 | from mesh | max\|X\|·16: half-width. Collision radius and skid-mark wheel offsets. Helicopter: divided by 3, door at −that; the dummy prop: halved (C, Mac `InitStructures` @ 1005ffb0). |
 | +0x48c8 | from mesh | max Y·16 of near-ground vertices: front extent (wheel base front) |
 | +0x48cc | from mesh | \|min Y\|·16: rear extent |
 | +0x48d4 | −1 | **Home city.** −1 = any city. 0/1/2 = traffic spawns it only in that city (`DAT_0114c694` = level/2). On user maps (city > 2) the `.vehicles` booleans are used instead (§5). |
@@ -233,8 +233,9 @@ Spawn-time instance fields (C, `FUN_01047af4`):
 
 - Accelerate key (`DAT_0114c65c[p]`) → throttle −1. **Throttle −1 means "drive forward".**
 - Reverse/brake key (`DAT_0114c654[p]`) → throttle +1.
-- Brake key (`DAT_0114c62c[p]`): throttle = +1 if speed > 0, −1 if speed < 0, else 0. It brakes to a stop and
-  never reverses.
+- Brake key (`DAT_0114c62c[p]`): throttle = +1 if speed > 0, −1 if speed < 0, else unchanged. It brakes to a
+  stop and never reverses. It does **not** change the grip; grip 4 comes from the J-turn latch only (§2.5; C, Mac
+  `do_Other` @ 10146280, `SkidUnit` @ 10081830).
 - Left (`DAT_0114c66c`) → steer −1; right (`DAT_0114c664`) → steer +1.
 - Fire (`DAT_0114c64c`) → fire flag `DAT_0114c544` (tank gun etc.). On the RC car, fire sets health = −71
   (detonate).
@@ -274,6 +275,24 @@ revCap = clamp(H*|m.maxR|/50, |m.maxR|/4, |m.maxR|)
 speed = clamp(speed, -revCap, fwdCap)
 ```
 
+Corrections from the Mac (C, `do_Other` @ 10146280; OS4 main.c 1422/1784):
+
+- Airborne means `z < +0x8c8` (the ground of the last clear collision step) and not a flier. In the air the
+  throttle only revs the wheels (`+0x894`): forward `a = ws < 1 ? brake : accel; ws += min(4·a·t, 2·maxF − ws)`,
+  reverse `a = ws < 1 ? accel : brake; ws += max(−4·a·t, 2·maxR − ws)`. The speed itself only decays (1 per tick
+  without throttle). On the ground `ws = speed` each tick. The engine pitch follows `ws`.
+- Both brake branches puff tyre smoke: per wheel at 0.7 of the box extents (`cos·70/100`, `sin·70/100`),
+  `random(2) == 0`: type 1 `Dust` at `+ random(300)` per axis, velocity `v/2 + random(50)`, size
+  `min(|speed|·front >> 12, 1000)`, level `+0x8b0`, table 0.
+- `UseHandbrake` (trigger 0x27) fires only for player 1's object.
+- Rocket car (types 24-26): with the throttle forward the model swaps rocketcar/thrust2 → thrust1 → thrust2,
+  back to rocketcar otherwise; the box follows the model.
+- A police van with its siren on alternates its model with `policevan_red` (brake 10, grip 20, mass 2000), so its
+  handling alternates; not reproduced by the port.
+- Engine pitch (C): on the ground `|ws|·20000/eff + 6000` (tank `·10000 + 4000`) with the damage-capped top speed
+  `eff`, and the clonk swap below 50 health; in the air (`PositionAirborneUnit`) the same over the plain maxF; the
+  helicopter on the ground with its engine off 4000.
+
 Acceleration ramps up: `accel` (`[0xcb]`) grows by 5 per tick to the model maximum. Sanity check: a Mundaneo
 (accel 5, max 280) needs 56 ticks = 2.2 s to reach top speed.
 
@@ -294,6 +313,8 @@ heading = (heading + ticks*yawrate) mod 5760
 ```
 
 So a car cannot turn faster than its speed (in angle units/tick), and the yaw rate builds up at 5 units/tick².
+Steering, the heading change and the 45° snap run **only on the ground** (C, Mac `do_Other` @ 10146280); in
+the air see §2.9. The steering of each ground tick is stored (`+0x804`, OS4 `[0xc9]`).
 Right (steer +1) while going forward lowers h, which matches people.md.
 
 **Heading snap to 45°** (C, OS4 main.c 2436–2490; 68k 125690–125750). If speed ≠ 0, every frame:
@@ -305,17 +326,24 @@ move h toward target by at most 4*ticks
 
 It wraps correctly near 0/5760. This gives the game's "lane-aligned" feel.
 
-**Visual lean** `[0xc2]`: target = `±speed·256/maxF`, with the sign set by steer and travel direction (inverted
-when `+0x492e`, boats). It slews 64 per tick and relaxes by 0x20 per tick with no steering.
+**Lean** `[0xc2]` (Mac `+0x7e8`; C): every ground tick it relaxes 32·t toward 0, then (no J-turn) slews 64·t
+toward `−steer·|speed|·256/maxF` (the other sign with `+0x492e`, boats). It is **added to the roll target** in
+`PositionUnit` (§2.10), so a car at top speed in a turn rolls 256 units (16°) to the outside.
+
+**Dip** (Mac `+0x7ec`; C): relaxes 16·t toward 0; throttle forward below maxF: −16·t (floor −0x80); throttle
+back above maxR: +16·t (cap 0x80). At one tick per frame it sits at ∓16 while accelerating. Added to the pitch
+target.
 
 ### 2.5 Grip, surfaces, skidding (C, OS4 `FUN_010cc288(obj, map, ticks)`)
 
-Velocity is not tied to the heading. Every frame it is pulled toward `speed·(sin h, cos h)`:
+Velocity is not tied to the heading. Every **ground** tick (`SkidUnit` is not called in the air; C, Mac
+`SkidUnit` @ 10081830) it is pulled toward `speed·(sin h, cos h)`, taken before the surface bleeds the speed:
 
 ```
 tvx = speed*sin[h] >> 8;  tvy = speed*cos[h] >> 8
 g   = m.grip  (4 if J-turn latch set)
-surface = CubeTextureList flag of the top-face texture of the cube under the car (FUN_0106dfcc, default 4)
+surface = CubeTextureList flag of the top-face texture of the centre square on level +0x8b0
+          (FUN_0106dfcc; no visibility test; 4 off the map or level > 2)
 switch surface:
   0x22 (34, grass/mud):  r = g/2;          if speed > 450: speed -= min(3*ticks, speed-450)
   0x24 (36, sand):       r = g*2;          if speed > 350: speed -= min(20*ticks, speed-350)
@@ -325,7 +353,7 @@ switch surface:
   default (4 tarmac, 35, 65, off-map, layer>=3): r = g*4/5
 vx += clamp(tvx-vx, -r*ticks, r*ticks);  vy likewise
 if heli: return
-skid = clamp(2*(|vx-tvx| + |vy-tvy|)/ticks, 0, 255)   # slip measured before the correction
+skid = clamp(2*(|vx-tvx| + |vy-tvy|)/ticks, 0, 255)   # slip measured after the correction (Mac, C)
 if in water (+0x33a): skid *= 2
 ```
 
@@ -344,10 +372,17 @@ If skid > 0:
   - With probability ~(ticks−random(2))>0: a smoke/dust puff (`FUN_01035da0`) at wheel ± random(300). Velocity is
     `v/2 + random(50)` and size is `skid·halfwidth>>7`.
   - In water: spray particles instead, size 500+random(500).
+- Marks start from the wheel's last point or, when its trail is −1, from where the wheel was at the tick start;
+  `n = max(|dx|,|dy|)/(size·7/8) + 1` points at `k·d/n`, z = the car's, level `+0x8b0`. Tables: dirt 0x30000
+  (DirtSkidmark), snow/slush/ice 0 (Dust), else 0x10000 (Dust with the shadow flag) (C, Mac `SkidUnit`,
+  `analysis/mac/scratch_followup/addeffect_calls.tsv`). Puffs: grass/sand `Dirt` 0x30000 size `skid·hw>>7`, snow
+  (0x32 only) `Dust` `>>7`, else `Dust` `>>8`; the tank puffs too (only the marks and the sound need `!4928`);
+  boats get nothing. Spray: `random(2) == 0`, `Dust`, `500 + random(500)`, velocity `v/4 + random(50)`, level + 1.
 - Skid sound handle `[0x10d]`:
   - On land and not 4928: volume `skid·40000`, pitch `skid·10+10000`, at z+250.
   - Otherwise volume 0.
-- If skid == 0, the wheel trail points reset to −1.
+- If skid == 0, the wheel trail points reset to −1. In the air they reset too, and the skid sound keeps its
+  last volume.
 
 The CubeTextureList surface flags (C for the codes above; texture lists in `extracted/game/CubeTextures`):
 
@@ -362,7 +397,15 @@ The CubeTextureList surface flags (C for the codes above; texture lists in `extr
 | 52 (0x34) | Ice, Ice2 | grip 1 (pure slide) |
 | 65 | #Water, Pond | water (boats; cars sink, §2.8) |
 
-### 2.6 Movement sub-steps, gravity, landing (C, OS4 `FUN_0105b9ec`)
+### 2.6 Movement sub-steps, gravity, landing (C, OS4 `FUN_0105b9ec`, Mac `MoveObject_Vehicle` @ 1006e890)
+
+Order per object (C, Mac `object_MainLoop` @ 1014a670): `MoveObject_Vehicle` (lift, gravity, move, cube collision,
+bounce), then `do_Other` (controls, the first sub-step's landing / ground follow, steering, `PositionUnit`,
+`SkidUnit`, the hit speed reset), then the scenery push (`AddCollideObj`). In `MoveObject_Vehicle` the vertical
+block below runs only from the second sub-step. Gravity `vz += 0x20; z += vz` runs on every sub-step unless the car
+is both in water and on the ground — on dry ground too, so the walls are tested at `z` after gravity (on flat
+ground alternately the ground and 0xa0 below it, as the follow sets `vz = ground + 0x80 − z`); the drawn z is the
+snapped one.
 
 ```
 repeat ticks times:
@@ -383,6 +426,10 @@ repeat ticks times:
       if [0x127] (helicopter engine on) and z > 0 and vz > -256: vz -= 0xaa   # lift
       vz += 0x20 (gravity 32/tick²); z += vz   (when airborne)
 ```
+
+The ground is `+0x8c8` = the centre height of the last **clear** collision step (§2.7), not a fresh lookup. The
+water flag `+0x81a` is the centre cube's top type 4 on that step, also while the car is still above it. The
+splash latch `+0x936` clears on landing, on dry ground and in the air. The landing sound plays at z + 100.
 
 Gravity is 32 z-units/tick², the same as people.md §4.3. A car leaving a ramp is handled by `FUN_010ccc5c` while
 z < ground (§2.9).
@@ -434,8 +481,17 @@ Corrections from the Mac comparison (CONFIRMED, Mac `CheckForCubeCollision` @ 10
 - On a hit the heights, `+0x8f0` and the level stay from the last clear step, so a car pressed against a wall keeps
   the roll and pitch it had before touching it.
 
-Port (`collide.rs` `box_points` / `vehicle_walls`, `driving.rs`): as above (one sub-step per tick). Deviation kept:
-the speed is halved on a hit (`BounceUnit` leaves it). Until 2026-10 the port tested a cross of half-size 256 and
+**A hit stops the car** (C, all builds): `BounceUnit` leaves the speed, but the tail of the vehicle update (Mac
+`do_Other` @ 10146280 after `SkidUnit`; OS4 main.c ~2503) sets `speed = 0` whenever a hit flag is set and restores
+the pre-move heights and level. The grip step of that tick still ran with the old speed, so the bounce velocity
+then decays at the grip rate.
+
+Levels: `+0x8b0` = the highest cube level of the 9 points (the surface, the scenery and effects), `+0x8b4` = the
+centre's (water, crates, pickups). Nothing outside the collision code writes `+0x8f0`; contact pushes keep it.
+
+Port (`collide.rs` `box_points` / `vehicle_walls`, `driving.rs`): as above (one sub-step per tick), including the
+speed reset (until 2026-10-08 it halved the speed). Left: glass is removed at the end of the tick, not at the
+moment it breaks. Until 2026-10 the port tested a cross of half-size 256 and
 restored the previous position: corners of the box (half-width and front/rear are larger than 256) could get into a
 building or through a fence, and the 9 height samples then read a roof (`GetCubeInfo2` of a building square has only
 the roof), rolling the car up to 90° beside walls and jittering as the contact came and went.
@@ -461,22 +517,38 @@ Example: a head-on hit at 300 costs 300²/16384 = 5 health; at 600 it costs 21.
 the update takes the **sinking branch** (68k 125750; OS4 equivalent):
 
 ```
-speed = 0; pitch [4] += 4*ticks up to 0x5a0
-if z < 27000: z += 32*ticks; random(5)==1 per wheel → bubble particles (DAT_0034c128)
+speed = 0; if pitch [4] (raw, 0..5759) < 0x5a0: pitch += 4*ticks
+if z < 27000: z += 32*ticks; at each of the 9 rotated box points random(5)==1 → type 5 `Bubble`, ±250,
+              v (random(10)−5, random(10)−5, random(100)−300), size 100 + random(150), level + 1
 else:
     if driven by a player: lose the vehicle; message 2018 "Drowned!" (FUN_00091b2c(0x7e2)); a life is lost/the player is reset
     object state +0x426 = 6 (removed)
 ```
 
-The boat (`+0x492c`) is the reverse: it may only move on water (see §4).
+Mac (C, `do_Other` @ 10146280): the drowned player gets phrase 2018, the respawn timer 80 and loses a
+multiplayer life; `ObjectDead`; state 6. Splash: on the ground in water, once (latch `+0x936`): the RC car gets
+health −71, `ObjectSunk`, sound 0x2b at mass·10000, pitch 0x209e.
+
+The boat (`+0x492c`) is the reverse: it may only move on water (see §4). On water it bobs (C, Mac): `CreateObject`
+@ 10075630 sets roll/pitch rates `+0x7f4 = −25`, `+0x7f8 = −11`; each tick `+0x7fc += +0x7f4`, `+0x800 += +0x7f8`,
+each rate ±2 toward 0; the offsets are added to the roll and pitch targets (§2.10). With the throttle it leaves a
+wake: 2·t type-8 `Dust` puffs at `start + k·(pos − start)` (k = 1..2t) minus `rear·(sin, cos)`, ±50, z −100..100,
+velocity `v ∓ (sin, cos)/2 + random(300) − 150`, vz `random(10) − 5`, size `0x82 + random(50)`.
 
 ### 2.9 Airborne (C, OS4 `FUN_010ccc5c(obj, ticks, steer)` for z < ground)
 
-For a non-helicopter in the air:
+For a non-helicopter in the air (C, Mac `PositionAirborneUnit` @ 10082620; OS4 reads `[0xc9]`):
 
-- Steering rotates the heading at `min(ticks·m.yaw, |speed|/2)`.
-- The pitch [4] tips the nose toward level at 16·ticks.
-- Velocity is unchanged, apart from gravity in §2.6.
+- The wheel trails reset, `onGround = 0`, the splash latch clears.
+- The heading turns by `min(ticks·m.yaw, |speed >> 1|)` with the steering **of the last ground tick** (`+0x804`),
+  not the live stick; left raises the heading going forward.
+- The nose tips 16·ticks: down when moving forward until 0x5a0, up otherwise until −0x5a0.
+- Velocity is unchanged, apart from gravity in §2.6 (no grip step in the air).
+
+The flying helicopter (model flag `+0x8186`; engine on `+0x984`, set by `ObjTakeOff` @ 10105570 / `ObjLand`): the
+lift `vz −= 0xaa` while `z > 0` and `vz > −0x100` keeps it near z = 0; in the air its velocity is pulled toward
+the heading by its grip·t, the yaw rate ramps like a tracked vehicle on the live steer, pitch = speed, roll 0,
+level 2.
 
 Engine pitch uses the wheel speed (revs freely). Helicopter: see §4.
 
@@ -490,32 +562,37 @@ heights of §2.7 (z down, so larger = lower).
 L, C, R = min of each row (−half-width, centre line, +half-width)
 if L − C < 0 or C − R > 0:  ratio = (L − R)·256 / (2·hw)
 else: ratio = (|C − R| < |L − C|) ? (C − R)·256/hw : (L − C)·256/hw     # a crest: the gentler half
-roll target = arctan(ratio · K) + obj+0x7fc + lean(+0x7e8)            # K hidden; INFERRED 1/256
+roll target = arctan(ratio / 256) + bob(+0x7fc) + lean(+0x7e8)      # 1/256: C, TOC 1017ceec+0x38
 rear, mid, nose = centre line
 if rear − mid < 0 or mid − nose > 0:  p = −arctan((rear − nose) / (front + rear))
 else: p = −arctan(|mid − nose| < |rear − mid| ? (mid − nose)/front : (rear − mid)/rear)
 speed += p·ticks >> 8                                                  # downhill speeds up, uphill slows
-pitch target = p + obj+0x800 + dip(+0x7ec)
+pitch target = p + bob(+0x800) + dip(+0x7ec)
 roll, pitch = (old + target) / 2, the short way round
 ```
 
-`arctan` @ 10083170 returns angle units in ±0x5a0 from two tables built by `InitArctan` @ 10083050 (below 1:
-`atan(i/1000)`; above: `atan(1 + i)` by whole units; 0x5a0 past the table; the table constants are INFERRED).
+`arctan` @ 10083170 returns angle units in ±0x5a0 from two tables built by `InitArctan` @ 10083050 (C, constants
+at TOC `1017cef8` → 101740e0 = {2880, 100, 10, …, 0, 1000, −10, −100, −1000}): `small[i] = (int)(2880·atan(i/100)/π)`,
+`big[i] = (int)(2880·atan(10 + i)/π)`, i < 1000; `arctan(x) = small[(int)(100x)]` for 0 ≤ x < 10,
+`big[(int)(x − 10)]` up to 1000, 0x5a0 beyond; mirrored for x < 0. `+0x7fc`/`+0x800` are the boat bob (§2.8), 0
+for other vehicles.
 Positive pitch is nose down.
 
 In the air (`PositionAirborneUnit` @ 10082620): the nose tips by 16·ticks, down when moving forward until 0x5a0,
 up otherwise until −0x5a0; the flying helicopter takes pitch = speed and roll 0. Sinking raises the pitch by
 4·ticks to 0x5a0 (§2.8).
 
-Port (`driving.rs` `position_unit`, `box_heights`): as above, with ticks = 1. The `+0x7fc`/`+0x800` terms are
-unknown and taken as 0, and the steering lean is drawn separately rather than added to the roll. The body roll
+Port (`driving.rs` `position_unit`, `box_heights`): as above, with ticks = 1, lean, dip and bob included. The body roll
 and pitch are drawn on the vehicle model. Nothing limits the slope other than `arctan`'s ±0x5a0: a flat
 roll beside a wall depends on the box never reaching into the wall's square, which the §2.7 edge tests guarantee
 (no step clamp, no level filter, no wall-cube skip in `GetCubeInfo2`).
 
 ### 2.11 Vehicle ↔ vehicle, people, scenery
 
-See §3 (damage and collisions).
+See §3 (damage and collisions). Object contacts (Mac `CheckForCollisions` @ 1006a150) are reviewed item by item in
+`analysis/mac/driving_review.md` (items 34-42: speed damping `(8s + s·m_self/(mi+mj))/9` per touching pair, z push,
+integer distance, live positions, the RC car excluded, sparks per touching circle pair between two vehicles,
+vehicle-vehicle Thud/Thud2 for both, run-over blood with droplets); the port follows them (`sim/contact.rs`).
 
 ---
 
@@ -555,9 +632,9 @@ Steering target `+0x2e6/+0x2ea` per state:
 
 | State | Target |
 |---|---|
-| 3 | traffic lane choice `FUN_000a143e` (square centres, junction picks). The next square is picked once the car is within r of the target centre on both axes: Amiga `r = max(5·speed²/yaw, front)`, **Mac** (`MoveUnit` @ 10081080) `r = max(speed·1000/yaw, front)` (front = `+0x48c8`; equal at speed 200), so fast traffic no longer re-targets squares ahead. The port follows the Mac (`traffic.rs`). CONFIRMED. |
+| 3 | traffic lane choice `FUN_000a143e` (Mac `MoveUnit` @ 10081080), §6.4 |
 | 8 / 10 | route node `node.xy << 3` (combat_police.md §1, §2.2) |
-| 9 / 11 | the target object (`+0x41e`); police lead it by `v·(5−aggr)·3` |
+| 9 / 11 | the target object (`+0x41e`); police aim at `pos − v·(5−aggr)·3`, a point *behind* it (`pos += v`; combat_police.md §2.2) |
 | 0x0f / 0x15 | the script point, written once by trigger types 0x17 / 0x32 / 0x44. For a **police car** (not a van) state 0x15 (and 0x14) is also in the pursuit-selection list (combat_police.md §2.2), so the car leaves the order at once: state 3 below wanted 3, state 10 from 3. State 0x0f is excluded. (68k ~124171, CONFIRMED.) |
 | 0x14 | route toward the node farthest from the player (`+0x3ba`) |
 
@@ -585,6 +662,7 @@ if not +0x49e and state in (8,10,0xf,0x14,0x15): clamp d.x, d.y to ±1500     # 
 want = atan2(d)
 e = want − heading (shortest way)
 steer = e > 0 ? −1 (heading up) : +1, only if |e| > ticks·yaw/2               # dead zone, yaw = +0x48e4
+    # exactly: up = wrap(want − h), down = wrap(h − want); up < down: −1 if up > dead; else +1 if down >= dead
 
 # look-ahead, skipped when skill(+0x346) >= 99 and health >= 50 ("ramming" drivers)
 look  = heading + ticks·yawrate·2
@@ -635,11 +713,41 @@ Default skill: traffic `clamp(rand(90) + aggr·8 − 30, 0, 99)` (§1.4); police
 the skill `+0x346`: `script_api.md` §5). The race scripts set
 95–100, so the leaders (98+) run the uncapped band and the 99/100 cars skip the look-ahead.
 
+### 6.4 Lane choice (C, Mac `MoveUnit` @ 10081080, 68k `FUN_000a143e`, OS4 `FUN_010cb7e4`)
+
+State 3 keeps a target point (`+0x2e6/+0x2ea`, a square centre) and runs the driver of §6.2 at it with no aim
+clamp. Each frame, if the target is within r of the car on both axes (Amiga `r = max(5·speed²/yaw, front)`,
+**Mac** `r = max(speed·1000/yaw, front)`; equal at speed 200, so fast Amiga traffic re-targeted squares
+ahead; the port follows the Mac):
+
+```
+level = GetCubeNum(target square, (z − 0x200) >> 4) − 1   (clamped >= 0; 2 when above every cube)
+f = cube[level].flags & 0x1f; if 0: cube[level+1] (level < 2); if still 0: cube[level−1] (level > 0)
+drop the exit behind the car by heading: 0x2d0..0x86f (E) drops W, 0x870..0xe0f (N) drops S,
+    0xe10..0x13af (W) drops E, otherwise (S) drops N — only if another bit remains (dead ends turn round)
+n = bits set; none: keep the target
+k = random(n) over N, E, S, W, then 0x10 = straight on in the stored direction +0x423 (0 counts as W)
+target = centre of that neighbour of the target square; +0x423 = the direction taken (not for 0x10)
+```
+
+A new object's target is its own position (Mac `CreateObject` @ 10075630), so a spawned car picks its first
+square from the spawn square itself. Every state shares the target: a car put back into state 3 (pursuit
+off, `Actor_ReleaseIdle`) drives to wherever it was aiming and the lane code takes over there.
+
+**Occupancy grid** (C, Mac `AddCollideObj` @ 10055c70, 68k `FUN_000cdfdc`): each object marks every square of
+the axis-aligned box of its four corners (±radius across; −rear and +front along the heading; a person's corners
+all at +radius along, sic) at level min(level, 2), the player's person model one square wider; projectiles
+count. It is rebuilt for each object after its update. The look-ahead and the spawner test it.
+
+**Horn** (C, Mac `DoVehicleFire` @ 10070c20): the honk is the fire input. It starts a *looped* horn
+(`+0x491a`, 20e6, `clamp(16e6/mass, 3000, 20000)` Hz; police: the siren at 25e6/10000) that follows the car
+and is deleted the first frame the input is off. Port: `vehicle_ai::horn`.
+
 ### 6.3 Port deviations
 
 Not facts about the original (those are in §6.1–6.2, C); this is what the port does differently on purpose.
-The port follows §6.1–6.2 for states 0x0f/0x15/0x14 and police 10/11 (`sim/vehicle_ai.rs`,
-`sim/pursuit.rs`). Where the original leaves a vehicle idle, the port drives it: attack = ram the target like
+The port follows §6.1–6.2 and §6.4 for traffic (`sim/traffic.rs`, the shared `vehicle_ai::controller`),
+states 0x0f/0x15/0x14 and police 10/11 (`sim/vehicle_ai.rs`, `sim/pursuit.rs`). Where the original leaves a vehicle idle, the port drives it: attack = ram the target like
 state 9 (an attacking tank fires within 6000 with the guards' `rand(101 − aggro)` rule when facing it), follow =
 drive at the leader until within 0xc00, plain flee = flee by route, goto-and-vanish = goto, then remove. At the
 farthest flee node the port stops instead of switching to state 11.

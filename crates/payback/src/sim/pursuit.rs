@@ -4,9 +4,10 @@
 //!
 //! Police cars in traffic switch to pursuit at wanted >= 3: they follow the
 //! route graph to the player's nearest node (state 10), then drive straight
-//! at the player, leading by `(5 - aggr)·3` ticks (state 11). Near a slow
-//! player they stop and drop a shotgun cop. At wanted >= 5 roadblocks of
-//! parked police cars, barriers and cops appear at the window edge.
+//! at the point `(5 - aggr)·3` ticks of the player's velocity *behind* the
+//! player (state 11). Near a slow player they stop and drop a shotgun cop.
+//! At wanted >= 5 roadblocks of parked police cars, barriers and cops appear
+//! at the window edge (spawned with traffic, `traffic.rs`).
 
 use super::ai::{Ai, Order};
 use super::combat::{Arsenal, Weapon};
@@ -14,16 +15,15 @@ use super::driving::Drive;
 use super::people::{self, Ambient};
 use super::police::Aggressiveness;
 use super::traffic::{self, LightPhase};
-use super::vehicle_ai::{self, Driver, Env, Nav, RouteGraph, VehicleAiSet};
+use super::vehicle_ai::{self, Driver, Env, Nav, RouteGraph, TargetNode, VehicleAiSet};
 use super::{Obj, Rng, State, Stick, Trig, wrap};
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::{CameraTarget, GameCam};
 use crate::data::GameData;
 use crate::objects::ObjectLibrary;
-use crate::vehicles::{self, TYPES, Vehicle, kind as vk};
-use crate::world::{City, z_of_h};
+use crate::vehicles::{TYPES, Vehicle, kind as vk};
+use crate::world::City;
 use bevy::prelude::*;
-use payback_formats::map::{self, MAP_SIZE};
 
 /// A police car in pursuit (states 10/11).
 #[derive(Component, Clone, Copy, Debug)]
@@ -43,6 +43,10 @@ pub struct Siren {
 #[derive(Component)]
 pub struct Roadblock;
 
+/// The pursuit chain (inside [`VehicleAiSet`]).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PursuitSet;
+
 /// `--wanted N` (debug): hold the player's wanted level at N.
 #[derive(Resource, Clone, Copy)]
 pub struct HoldWanted(pub Option<i32>);
@@ -57,18 +61,12 @@ impl Plugin for PursuitPlugin {
             .and_then(|v| v.parse().ok());
         app.insert_resource(HoldWanted(hold)).add_systems(
             FixedUpdate,
-            (
-                hold_wanted,
-                select_pursuers,
-                roadblocks,
-                pursue,
-                sirens,
-                despawn_far,
-            )
+            (hold_wanted, select_pursuers, pursue, sirens, despawn_far)
                 .chain()
                 // Route police are unused in multiplayer.
                 .distributive_run_if(crate::level::single_player)
                 .in_set(VehicleAiSet)
+                .in_set(PursuitSet)
                 .before(vehicle_ai::vehicle_orders),
         );
     }
@@ -101,6 +99,8 @@ fn select_pursuers(
             &Vehicle,
             Option<&mut Ai>,
             Option<&mut Pursuit>,
+            Option<&traffic::Traffic>,
+            Has<Nav>,
         ),
         Without<CameraTarget>,
     >,
@@ -108,7 +108,7 @@ fn select_pursuers(
     let aggr = aggr.map_or(2, |a| a.0);
     let wanted = player_wanted(&player);
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
-        let Ok((e, mut obj, veh, mut ai, pursuit)) = q.get_mut(e__) else { continue };
+        let Ok((e, mut obj, veh, mut ai, pursuit, tr, has_nav)) = q.get_mut(e__) else { continue };
         if !TYPES[veh.kind].police || veh.kind == vk::POLICE_VAN {
             continue;
         }
@@ -140,10 +140,17 @@ fn select_pursuers(
             if obj.state != State::Wander {
                 info!("police {e:?}: pursuit off");
                 obj.state = State::Wander;
-                commands
-                    .entity(e)
-                    .remove::<Pursuit>()
-                    .insert(traffic::resume(&obj, 95));
+                // Only the state byte changes: the skill stays the
+                // pursuit's (`+0x346`), the steering target stays where it
+                // was until the lane code reaches it (`do_Other`
+                // @ 10146280).
+                let skill = pursuit.map_or(95, |p| p.skill);
+                let dir = tr.map_or(0, |t| t.dir);
+                let mut ent = commands.entity(e);
+                ent.remove::<Pursuit>().insert(traffic::resume(skill, dir));
+                if !has_nav {
+                    ent.insert(Nav::at(obj.pos));
+                }
             }
             continue;
         }
@@ -151,9 +158,13 @@ fn select_pursuers(
         match pursuit {
             Some(mut p) => p.skill = skill,
             None => {
-                commands
-                    .entity(e)
-                    .insert((Pursuit { skill }, Nav::default()));
+                // The route node `+0x3bc` and steering target carry over
+                // from whatever the car did before.
+                let mut ent = commands.entity(e);
+                ent.insert(Pursuit { skill });
+                if !has_nav {
+                    ent.insert(Nav::at(obj.pos));
+                }
             }
         }
         if obj.state == State::Wander {
@@ -177,6 +188,7 @@ fn pursue(
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<Rng>,
+    mut target: ResMut<TargetNode>,
     mut set: ParamSet<(
         Query<(Entity, &Obj)>,
         Query<(Entity, &Obj), With<CameraTarget>>,
@@ -198,7 +210,7 @@ fn pursue(
         return;
     };
     let aggr = aggr.map_or(2, |a| a.0);
-    let occ = vehicle_ai::occupancy(set.p0().iter());
+    let occ = vehicle_ai::occupancy(set.p0().iter(), &library, &trig);
     let Some((ppos, pvel, pspeed)) = set.p1().iter().next().map(|(_, o)| (o.pos, o.vel, o.speed))
     else {
         return;
@@ -222,21 +234,26 @@ fn pursue(
                 // No graph: straight at the player ("erratic").
                 obj.state = State::Pursuit;
             } else {
-                // The player's nearest node, refreshed every 20 frames.
-                if nav.refresh == 0 {
-                    nav.goal = route.nearest(ppos);
-                    nav.refresh = 20;
-                } else {
-                    nav.refresh -= 1;
+                // The player's nearest node, refreshed by the first pursuer
+                // to find the player's countdown at 0 (`do_Other`
+                // @ 10146280; [`TargetNode`]).
+                if target.refresh == 0 {
+                    target.node = route.nearest(ppos);
+                    target.refresh = 20;
                 }
-                if vehicle_ai::follow_route(&route, &mut nav, &obj, true) {
+                if vehicle_ai::follow_route(&route, &mut nav, &obj, target.node, true) {
                     info!("police {e:?}: on the player's node, direct chase");
                     obj.state = State::Pursuit;
                 }
             }
         }
         if obj.state == State::Pursuit {
-            nav.aim = (ppos + pvel * ((5 - aggr) * 3)).truncate();
+            // `target + v·(5 − aggr)·−3` (Mac `do_Other` @ 10146280 l.118091,
+            // 68k ~124290): objects move by `pos += v` (Mac
+            // `MoveObject_Vehicle` @ 1006e890, `MoveObject_General`
+            // @ 1006e4f0), so this is a point *behind* the player, which
+            // the police follow rather than cut off (ahead only at aggr 6).
+            nav.aim = (ppos - pvel * ((5 - aggr) * 3)).truncate();
         }
         let driver = Driver {
             skill: pursuit.skill,
@@ -317,155 +334,25 @@ fn spawn_cop(
     Some(cop)
 }
 
-/// Roadblocks at wanted >= 5 (68k `FUN_000cfe0c`, scheduler
-/// `FUN_000d0cfc`): `(wanted - 4)·2 + 1` tries per cube level on the
-/// spawn edge ahead of the player.
-#[allow(clippy::too_many_arguments)]
-fn roadblocks(
-    mut commands: Commands,
-    city: Option<Res<City>>,
-    cam: Option<Res<GameCam>>,
-    data: Res<GameData>,
-    library: Option<ResMut<ObjectLibrary>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut rng: ResMut<Rng>,
-    player: Query<&Obj, With<CameraTarget>>,
-    all: Query<&Obj>,
-) {
-    let (Some(city), Some(cam), Some(mut library)) = (city, cam, library) else {
-        return;
+/// A shotgun cop for a roadblock, straight into the world (the roadblock
+/// spawner runs on the `World`, `traffic::add_police`).
+pub fn spawn_cop_world(world: &mut World, pos: IVec3, heading: i32, level: usize) -> Option<Entity> {
+    // A system state, not `resource_scope` (that marks the resource added).
+    let mut st: bevy::ecs::system::SystemState<(
+        Commands,
+        Res<GameData>,
+        ResMut<ObjectLibrary>,
+        ResMut<Assets<Mesh>>,
+    )> = bevy::ecs::system::SystemState::new(world);
+    let cop = {
+        let Ok((mut commands, data, mut library, mut meshes)) = st.get_mut(world) else {
+            return None;
+        };
+        spawn_cop(&mut commands, &data, &mut library, &mut meshes, pos, heading, level)
     };
-    let Some(p) = player.iter().next() else {
-        return;
-    };
-    let wanted = p.wanted;
-    if wanted < 5 || all.iter().count() >= 20 {
-        return;
-    }
-    let occupied = |sq: IVec2, level: usize| {
-        all.iter()
-            .any(|o| o.level == level && o.pos.x >> 11 == sq.x && o.pos.y >> 11 == sq.y)
-    };
-    let c = cam.square();
-    let h = cam.window();
-    let v = p.vel;
-    for level in 0..3 {
-        for _ in 0..(wanted - 4) * 2 + 1 {
-            // Same edge choice as traffic: the dominant axis of motion.
-            let along = rng.rand(2 * h + 1) - h;
-            let edge = if v.x.abs() >= v.y.abs() && v.x != 0 {
-                if v.x > 0 { 1 } else { 3 }
-            } else if v.y != 0 {
-                if v.y > 0 { 2 } else { 0 }
-            } else {
-                rng.rand(3)
-            };
-            let sq = match edge {
-                0 => IVec2::new(c.x + along, c.y - h),
-                1 => IVec2::new(c.x + h, c.y + along),
-                2 => IVec2::new(c.x + along, c.y + h),
-                _ => IVec2::new(c.x - h, c.y + along),
-            };
-            if !(1..MAP_SIZE as i32 - 1).contains(&sq.x)
-                || !(1..MAP_SIZE as i32 - 1).contains(&sq.y)
-            {
-                continue;
-            }
-            let flags_at = |q: IVec2| -> u8 {
-                if (0..MAP_SIZE as i32).contains(&q.x) && (0..MAP_SIZE as i32).contains(&q.y) {
-                    city.map.square(q.x as usize, q.y as usize).cubes[level].flags
-                } else {
-                    0
-                }
-            };
-            let f = flags_at(sq);
-            // The cube must exist: slope byte +8 != 0 (68k `FUN_000cfe0c`,
-            // OS4 `FUN_01047134`); slope 0 (Off) is neither drawn nor solid.
-            let slope = city.map.square(sq.x as usize, sq.y as usize).cubes[level].slope;
-            if f & 0x40 == 0
-                || slope == map::Slope::Off
-                || [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
-                    .iter()
-                    .any(|&(dx, dy)| occupied(sq + IVec2::new(dx, dy), level))
-            {
-                continue;
-            }
-            // Flow N/S: the line runs along x; E/W: along y.
-            let step = if f & 0x05 != 0 {
-                IVec2::X
-            } else if f & 0x0a != 0 {
-                IVec2::Y
-            } else {
-                continue;
-            };
-            let mut a = sq;
-            while flags_at(a - step) & 0x40 != 0 {
-                a -= step;
-            }
-            let mut b = sq;
-            while flags_at(b + step) & 0x40 != 0 {
-                b += step;
-            }
-            let heading = if step == IVec2::X { 0x5a0 } else { 0 };
-            info!("roadblock {a}..{b} level {level}");
-            let mut q = a;
-            let mut car = true;
-            loop {
-                let base = IVec2::new(q.x << 11, q.y << 11);
-                let at = |off: i32| {
-                    let mid = base + IVec2::splat(0x400);
-                    let p = if step == IVec2::X {
-                        IVec2::new(base.x + off, mid.y)
-                    } else {
-                        IVec2::new(mid.x, base.y + off)
-                    };
-                    let g = city.square_cubes(q.x as usize, q.y as usize)[level].top_at(0.5, 0.5);
-                    p.extend(z_of_h(g) as i32)
-                };
-                if car {
-                    let pos = at(500);
-                    commands.queue(move |world: &mut World| {
-                        if let Some(e) =
-                            vehicles::spawn_vehicle_world(world, vk::POLICE as i32, pos, heading, 0)
-                        {
-                            if let Some(mut o) = world.get_mut::<Obj>(e) {
-                                o.level = level;
-                            }
-                            world.entity_mut(e).insert((Ambient, Roadblock));
-                        }
-                    });
-                } else {
-                    let pos = at(600);
-                    commands.queue(move |world: &mut World| {
-                        if let Some(e) = vehicles::spawn_prop_world(world, 0, pos, heading) {
-                            if let Some(mut o) = world.get_mut::<Obj>(e) {
-                                o.level = level;
-                            }
-                            world.entity_mut(e).insert(Roadblock);
-                        }
-                    });
-                    let h = rng.rand(0x167f);
-                    if let Some(cop) = spawn_cop(
-                        &mut commands,
-                        &data,
-                        &mut library,
-                        &mut meshes,
-                        at(0x600),
-                        h,
-                        level,
-                    ) {
-                        commands.entity(cop).insert(Roadblock);
-                    }
-                }
-                car = !car;
-                if q == b {
-                    break;
-                }
-                q += step;
-            }
-            return;
-        }
-    }
+    st.apply(world);
+    world.flush();
+    cop
 }
 
 /// Siren loop and red/blue light bar while pursuing (68k `FUN_000e2a50`):

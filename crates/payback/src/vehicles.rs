@@ -422,18 +422,41 @@ pub fn spawn_vehicle_world(
 ) -> Option<Entity> {
     let t = TYPES.get(usize::try_from(kind).ok()?)?;
     let data = world.resource::<GameData>().clone();
-    let (model, mesh, material) =
+    let kind = kind as usize;
+    let (model, mesh, material, frames) =
         world.resource_scope(|world, mut library: Mut<ObjectLibrary>| {
             let mut meshes = world.resource_mut::<Assets<Mesh>>();
-            let model = library.load(&data, &mut meshes, t.model)?;
-            let m = library.model_mut(model);
-            m.info.mass = t.mass;
-            m.info.police = t.police;
-            m.info.code = if kind as usize == kind::TANK { 0 } else { 0xff };
+            let mut setup = |library: &mut ObjectLibrary, kind: usize| {
+                let t = &TYPES[kind];
+                let model = library.load(&data, &mut meshes, t.model)?;
+                let m = library.model_mut(model);
+                // The model record is shared and set once (the original's
+                // loader, Mac `InitStructures` @ 1005ffb0); the default
+                // mass marks a fresh one. The helicopter's half-width is a
+                // third of its max |X| (rotor), its door at −that.
+                if m.info.mass != t.mass && kind == kind::HELICOPTER {
+                    m.info.radius /= 3;
+                }
+                m.info.mass = t.mass;
+                m.info.police = t.police;
+                m.info.code = if kind == kind::TANK { 0 } else { 0xff };
+                Some(model)
+            };
+            let model = setup(&mut library, kind)?;
+            // Rocket car: the thrust frames swapped in while accelerating
+            // (`do_Other` @ 10146280).
+            let frames = if (kind::ROCKET_CAR..=kind::ROCKET_CAR + 2).contains(&kind) {
+                let f: Option<Vec<usize>> =
+                    (0..3).map(|i| setup(&mut library, kind::ROCKET_CAR + i)).collect();
+                f.map(|f| [f[0], f[1], f[2]])
+            } else {
+                None
+            };
             Some((
                 model,
                 library.model(model).mesh.clone(),
                 library.material.clone(),
+                frames,
             ))
         })?;
     let mut obj = Obj::new(Class::Vehicle, model, pos, heading);
@@ -451,13 +474,16 @@ pub fn spawn_vehicle_world(
             .spawn((
                 obj,
                 Vehicle {
-                    kind: kind as usize,
+                    kind,
                     colour,
                     engine: Some(engine),
                     flying: false,
                     controls: true,
                 },
-                crate::sim::driving::Drive::default(),
+                crate::sim::driving::Drive {
+                    frames,
+                    ..std::default::Default::default()
+                },
                 crate::sim::Stick::default(),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
@@ -494,7 +520,8 @@ pub const PROPS: [(&str, i32); 4] = [
     ("misc/barrier.obj", 50),
     ("misc/cone.obj", 20),
     ("misc/dummy.obj", 115),
-    ("weapons/bullet.obj", 1),
+    // Mass 10 (Mac `InitStructures` @ 1005ffb0 table `toc[-0x1b92]`).
+    ("weapons/bullet.obj", 10),
 ];
 
 /// Spawn a static prop (special object `index`).
@@ -505,7 +532,14 @@ pub fn spawn_prop_world(world: &mut World, index: i32, pos: IVec3, heading: i32)
         world.resource_scope(|world, mut library: Mut<ObjectLibrary>| {
             let mut meshes = world.resource_mut::<Assets<Mesh>>();
             let model = library.load(&data, &mut meshes, path)?;
-            library.model_mut(model).info.mass = mass;
+            let info = &mut library.model_mut(model).info;
+            // The dummy's half-width is halved, once per (shared) model
+            // record: a fresh one still has the default mass (Mac
+            // `InitStructures` @ 1005ffb0).
+            if index == 2 && info.mass != mass {
+                info.radius >>= 1;
+            }
+            info.mass = mass;
             Some((
                 model,
                 library.model(model).mesh.clone(),

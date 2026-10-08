@@ -17,7 +17,7 @@ use crate::hud::{BigTitle, Texts};
 use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::sim::driving::Drive;
-use crate::vehicles::Vehicle;
+use crate::vehicles::{Vehicle, kind as vk};
 use bevy::prelude::*;
 
 pub struct ContactPlugin;
@@ -48,21 +48,60 @@ fn circles(trig: &Trig, o: &Obj, is_vehicle: bool, radius: i32, front: i32, rear
 
 struct Body {
     e: Entity,
-    circles: Vec<IVec3>,
     radius: i32,
+    front: i32,
+    rear: i32,
     mass: i32,
     vehicle: bool,
     person: bool,
+    /// Bus (`+0x818c`): its passengers scream on a hard hit.
+    bus: bool,
     player: bool,
     /// Player number (kill credit in multiplayer).
     player_no: Option<u8>,
-    speed: i32,
     /// Damage filter (`+0x8ac`): contacts hurt only when -1.
     filter: i32,
     /// The vehicle this person was thrown out of (Irony bonus).
     owner: Option<Entity>,
 }
 
+/// One touching pair of the current object `i` and an earlier `j`: the
+/// averaged push (x, y, and z doubled) and each side's damage.
+struct Touch {
+    j: usize,
+    push: IVec3,
+    dmg_j: i32,
+    dmg_i: i32,
+}
+
+/// Object-object contact (Mac `CheckForCollisions` @ 1006a150, OS4
+/// `FUN_01056c58`, 68k `FUN_000de0b6`), one tick per frame. Each object
+/// `i` in table order against every earlier `j`, from their current
+/// positions (pushes from earlier pairs included):
+/// - circles at `{0, hw − rear, front − hw, 2·front/3 − hw}` along the
+///   heading for vehicles, one for anything else; contact below
+///   `R = (hwA + hwB)·17 >> 4` in 3D with the z difference halved (pairs
+///   20000 or more apart in that are skipped, and so are circle pairs 25001
+///   or more apart on an axis); per touching circle pair the push `d·R/dist
+///   − d` (integer, `dist = (int)sqrt`, at least 1), averaged;
+/// - two vehicles, one of them faster than 50: a spark per touching circle
+///   pair (type 9 `Flare`, between the circles ± 200, flying with the
+///   mass-weighted velocity, size 100 + r(50), j's level + 1);
+/// - j gets `+push·min(m)/m_j` on its velocity (z too) and i `−push·min(m)/
+///   m_i`, a vehicle never by a person; the same goes on the positions
+///   (the original moves its predicted position);
+/// - damage `((px² + py² + (pz/2)²) >> 7)·min(m)/m_victim >> s`, s = 5 for
+///   a vehicle, 3 for the player on foot, 1 for other people, only with
+///   the damage filter −1.
+///
+/// Then per touching pair: two vehicles play Thud/Thud2 for each by its
+/// own damage, the volume from the push (a hard hit dents it; a bus
+/// driven by a player screams); both speeds are damped by `(8·s +
+/// s·m_self/(m_i + m_j)) / 9`; and each victim takes its damage, a person
+/// only from a vehicle (never person-person) faster than 50 (100 for the
+/// player): it stops, says Ow above 10 damage and bleeds (a type-8 splat ±
+/// 100, size `16·min(dmg, 50) + 50 + r(50)` for j, `100 + r(150)` for i,
+/// and 3 type-9 droplets).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn contacts(
     mut commands: Commands,
@@ -77,64 +116,96 @@ fn contacts(
     mut labels: ResMut<crate::hud::labels::Labels>,
     mode: Res<crate::level::GameMode>,
     mut q: Query<
-        (Entity, &mut Obj, Has<Vehicle>, Has<Person>, Has<CameraTarget>, Option<&mut Drive>),
+        (Entity, &mut Obj, Option<&Vehicle>, Has<Person>, Has<CameraTarget>, Option<&mut Drive>),
         Without<Projectile>,
     >,
 ) {
     let Some(library) = library else { return };
     let mut irony = Vec::new();
-    // Pairs in object-table order (Mac `CheckForCollisions` @ 1006a150
-    // takes each object against the earlier ones).
+    // Pairs in object-table order (each object against the earlier ones).
+    // The RC car (`+0x8160`) and state-6 objects take no part.
     let order = crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, &*o)));
     let bodies: Vec<Body> = q
         .iter_many(&order)
-        .filter(|(_, o, ..)| o.state != State::Removed)
+        .filter(|(_, o, v, ..)| o.state != State::Removed && v.is_none_or(|v| v.kind != vk::RC_CAR))
         .map(|(e, o, vehicle, person, player, _)| {
             let info = &library.model(o.model).info;
-            let radius = if person { 192 } else { info.radius.max(64) };
             Body {
                 e,
-                circles: circles(&trig, &o, vehicle, radius, info.max_y, info.min_y),
-                radius,
+                radius: if person { 192 } else { info.radius },
+                front: info.max_y,
+                rear: info.min_y,
                 mass: info.mass.max(1),
-                vehicle,
+                vehicle: vehicle.is_some(),
                 person,
+                bus: vehicle.is_some_and(|v| v.kind == vk::BUS),
                 player,
                 player_no: if player { Some(o.player.unwrap_or(0)) } else { None },
-                speed: o.speed,
                 filter: o.filter,
                 owner: o.owner,
             }
         })
         .collect();
+    let screams = |commands: &mut Commands, rng: &mut Rng| {
+        let pitch = 15000 + rng.rand(2000);
+        commands.spawn(Sound::once(id::SCREAMS, 255.0, pitch as f32, SoundPos::Global));
+    };
     for i in 0..bodies.len() {
+        let a = &bodies[i];
+        let mut touches: Vec<Touch> = Vec::new();
         for j in 0..i {
-            let (a, b) = (&bodies[i], &bodies[j]);
-            // A person never pushes a car; two people only nudge.
-            let r = ((a.radius + b.radius) * 17 / 16) as i64;
-            let mut push = IVec3::ZERO;
-            // The z correction, kept apart from the push (damage only):
-            // `2·(dz/2·R/d − dz/2)` per circle pair.
-            let mut push_z = 0i64;
-            let mut contacts = 0;
-            for ca in &a.circles {
-                for cb in &b.circles {
-                    let d = *cb - *ca;
-                    if (d.z / 2).abs() >= 20000 {
+            let b = &bodies[j];
+            let Ok([(_, mut oa, _, _, _, mut da), (_, mut ob, _, _, _, mut db)]) = q.get_many_mut([a.e, b.e])
+            else {
+                continue;
+            };
+            let dzh = (ob.pos.z - oa.pos.z) >> 1;
+            if dzh.abs() >= 20000 {
+                continue;
+            }
+            let r = (a.radius + b.radius) * 17 >> 4;
+            let r2 = r as i64 * r as i64;
+            let ca = circles(&trig, &oa, a.vehicle, a.radius, a.front, a.rear);
+            let cb = circles(&trig, &ob, b.vehicle, b.radius, b.front, b.rear);
+            let sparks = a.vehicle && b.vehicle && (ob.speed.abs() > 50 || oa.speed.abs() > 50);
+            let (mut push, mut n) = (IVec3::ZERO, 0);
+            for c in &ca {
+                for d in &cb {
+                    let (dx, dy) = (d.x - c.x, d.y - c.y);
+                    if dx.abs() >= 25001 || dy.abs() >= 25001 {
                         continue;
                     }
-                    let dist2 = (d.x as i64).pow(2) + (d.y as i64).pow(2) + ((d.z / 2) as i64).pow(2);
-                    if dist2 >= r * r || dist2 == 0 {
+                    let d2 = dx as i64 * dx as i64 + dy as i64 * dy as i64 + dzh as i64 * dzh as i64;
+                    if d2 >= r2 {
                         continue;
                     }
-                    let dist = (dist2 as f64).sqrt();
-                    let k = r as f64 / dist - 1.0;
-                    push += IVec3::new((d.x as f64 * k) as i32, (d.y as f64 * k) as i32, 0);
-                    push_z += 2 * ((d.z / 2) as f64 * k) as i64;
-                    contacts += 1;
+                    let dist = ((d2 as f64).sqrt() as i32).max(1);
+                    n += 1;
+                    push.z += (dzh * r / dist - dzh) * 2;
+                    push.x += dx * r / dist - dx;
+                    push.y += dy * r / dist - dy;
+                    if sparks {
+                        let (ma, mb) = (a.mass, b.mass);
+                        let size = 100 + rng.rand(50);
+                        let vz = rng.rand(80) - 40 - ((oa.vel.z + ob.vel.z) >> 1);
+                        let vy = rng.rand(80) - 40 - (ob.vel.y * mb + oa.vel.y * ma) / (ma + mb);
+                        let vx = rng.rand(80) - 40 - (ob.vel.x * mb + oa.vel.x * ma) / (ma + mb);
+                        let z = oa.pos.z + (dzh >> 1) + rng.rand(400) - 200;
+                        let y = c.y + (dy >> 1) + rng.rand(400) - 200;
+                        let x = c.x + (dx >> 1) + rng.rand(400) - 200;
+                        effects.add(
+                            9,
+                            Tex::Flare,
+                            Vec3::new(x as f32, y as f32, z as f32),
+                            Vec3::new(vx as f32, vy as f32, vz as f32),
+                            size as f32,
+                            ob.level as u8 + 1,
+                            Blend::Add,
+                        );
+                    }
                 }
             }
-            if contacts == 0 {
+            if n == 0 {
                 continue;
             }
             // Touch flag (OS4 +0x4a4, Mac +0x98c) for the walk-to-door
@@ -144,42 +215,88 @@ fn contacts(
                     commands.entity(x.e).insert(super::boarding::Touched);
                 }
             }
-            let p = push / contacts;
+            let p = push / n;
             let m = a.mass.min(b.mass);
-            let Ok([(_, mut oa, .., da), (_, mut ob, .., db)]) = q.get_many_mut([a.e, b.e]) else { continue };
-            if !(a.person && b.vehicle) {
-                ob.vel += p * m / b.mass;
-                ob.pos += p * m / b.mass;
-            }
-            if !(b.person && a.vehicle) {
-                oa.vel -= p * m / a.mass;
-                oa.pos -= p * m / a.mass;
-            }
-            // Damage from the averaged push correction, z included (Mac
-            // `CheckForCollisions` @ 1006a150, 68k `FUN_000de0b6`:
-            // `((px² + py² + (pz/2)²) >> 7)·min(m)/m_self`, the z term
-            // doubled per pair and halved here), for every victim with the
-            // damage filter -1. A person is only hurt by a vehicle moving
-            // faster than 50 (100 for the player), so a cop stepping out
-            // beside his parked car is pushed clear, not crushed.
-            let pz = push_z / contacts as i64 >> 1;
-            let base = ((p.x as i64).pow(2) + (p.y as i64).pow(2) + pz * pz) >> 7;
-            let base = base.min(i32::MAX as i64) as i32;
-            for (victim, other, o, other_speed, drive) in [(b, a, &mut ob, a.speed, db), (a, b, &mut oa, b.speed, da)] {
-                if victim.filter != -1 {
-                    continue;
+            // A push is not a teleport: the car keeps its last clear
+            // position for the wall test (`+0x8f0`, never written here).
+            let shift = |d: &mut Option<Mut<Drive>>, dv: IVec3| {
+                if let Some((_, left)) = d.as_deref_mut().and_then(|d| d.clear.as_mut()) {
+                    *left += dv;
                 }
-                let shift = if victim.vehicle { 5 } else if victim.player { 3 } else { 1 };
-                let mut dmg = (base as i64 * m as i64 / victim.mass as i64) as i32 >> shift;
-                if victim.person {
-                    // Run over only above speed 50 (100 for the player).
-                    let limit = if victim.player { 100 } else { 50 };
-                    if other.person || other_speed.abs() <= limit {
-                        dmg = 0;
+            };
+            if !(b.vehicle && a.person) {
+                let dv = p * m / b.mass;
+                ob.vel += dv;
+                ob.pos += dv;
+                shift(&mut db, dv);
+            }
+            if !(a.vehicle && b.person) {
+                let dv = -p * m / a.mass;
+                oa.vel += dv;
+                oa.pos += dv;
+                shift(&mut da, dv);
+            }
+            // Damage from the push, z halved, for every victim with the
+            // damage filter −1.
+            let pz = p.z >> 1;
+            let base = ((p.x as i64).pow(2) + (p.y as i64).pow(2) + (pz as i64).pow(2)) >> 7;
+            let dmg = |v: &Body| {
+                if v.filter != -1 {
+                    return 0;
+                }
+                let shift = if v.person && v.player {
+                    3
+                } else if v.person {
+                    1
+                } else {
+                    5
+                };
+                ((m as i64 * base / v.mass as i64) >> shift).min(i32::MAX as i64) as i32
+            };
+            touches.push(Touch { j, push: p, dmg_j: dmg(b), dmg_i: dmg(a) });
+        }
+        for t in touches {
+            let b = &bodies[t.j];
+            let Ok([(_, mut oa, _, _, _, da), (_, mut ob, _, _, _, db)]) = q.get_many_mut([a.e, b.e]) else { continue };
+            // Two vehicles: Thud below 11 damage, else Thud2 (dented; a
+            // bus driven by a player screams, j's then i's), for j, then i.
+            if a.vehicle && b.vehicle {
+                let vol = (t.push.x.abs() + t.push.y.abs()) as f32 * 100_000.0;
+                let mut drives = [db, da];
+                let hits = [(ob.posf(), t.dmg_j), (oa.posf(), t.dmg_i)];
+                for (k, (pos, dmg)) in hits.into_iter().enumerate() {
+                    let at = SoundPos::At(pos);
+                    if dmg < 11 {
+                        commands.spawn(Sound::once(id::THUD, vol, 15000.0, at));
+                    } else {
+                        commands.spawn(Sound::once(id::THUD2, vol, 10000.0, at));
+                        if let Some(d) = drives[k].as_deref_mut() {
+                            d.dented = true;
+                        }
+                        if b.bus && ob.state == State::Player {
+                            screams(&mut commands, &mut rng);
+                        }
+                        if a.bus && oa.state == State::Player {
+                            screams(&mut commands, &mut rng);
+                        }
                     }
                 }
-                if dmg <= 0 {
-                    continue;
+            }
+            // Both speeds damped by the share of the mass.
+            let total = a.mass + b.mass;
+            ob.speed = (ob.speed * 8 + ob.speed * b.mass / total) / 9;
+            oa.speed = (oa.speed * 8 + oa.speed * a.mass / total) / 9;
+            let (sa, sb) = (oa.speed, ob.speed);
+            for (earlier, victim, other, o, other_speed, dmg) in
+                [(true, b, a, &mut ob, sa, t.dmg_j), (false, a, b, &mut oa, sb, t.dmg_i)]
+            {
+                if victim.person {
+                    // Run over only by a vehicle faster than 50 (100 for
+                    // the player); never person-person.
+                    let limit = if victim.player { 100 } else { 50 };
+                    if other.person || other_speed.abs() <= limit {
+                        continue;
+                    }
                 }
                 let alive = o.health >= 1;
                 o.health -= dmg;
@@ -191,32 +308,20 @@ fn contacts(
                     irony.push((other.e, other.player_no));
                 }
                 if victim.person {
-                    o.speed = 0;
                     if dmg > 10 {
                         commands.spawn(Sound::once(id::OW1 + rng.rand(3) as u16, 5e6, 8000.0, at));
                     }
-                    let size = 16.0 * dmg.min(50) as f32 + 50.0 + rng.rand(50) as f32;
-                    effects.add(8, Tex::Blood, o.posf(), Vec3::ZERO, size, o.level as u8 + 1, Blend::Tint);
+                    o.speed = 0;
                     if victim.player && o.health < 1 {
                         if let Some(t) = &texts {
                             title.show_for(o.player, t.global(2021));
                         }
                     }
-                } else {
-                    let vol = (p.x.abs() + p.y.abs()) as f32 * 100_000.0;
-                    if dmg < 11 {
-                        commands.spawn(Sound::once(id::THUD, vol, 15000.0, at));
-                    } else {
-                        commands.spawn(Sound::once(id::THUD2, vol, 10000.0, at));
-                        if let Some(mut d) = drive {
-                            d.dented = true;
-                        }
-                    }
-                    if other.vehicle && (victim.speed.abs() > 50 || other_speed.abs() > 50) {
-                        effects.add(9, Tex::Flare, o.posf(), Vec3::ZERO, 100.0 + rng.rand(50) as f32, o.level as u8 + 1, Blend::Add);
-                    }
+                    blood(&mut effects, &mut rng, o, dmg, earlier);
                 }
-                hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false, attacker: other.player_no });
+                if dmg > 0 {
+                    hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false, attacker: other.player_no });
+                }
             }
         }
     }
@@ -230,6 +335,46 @@ fn contacts(
         if let Some(t) = &texts {
             title.show_for(player, t.global(2027));
         }
+    }
+}
+
+/// A run-over person bleeds (Mac `CheckForCollisions` @ 1006a150 at
+/// 1006c184 / 1006c854): a type-8 `Blood` splat at ± 100 (size `16·min(dmg,
+/// 50) + 50 + r(50)` for the earlier object of the pair, `100 + r(150)` for
+/// the current one) on its level, then 3 type-9 droplets ± 100 flying at
+/// `r(80) − 40 − v/4`, size `8·min + 80 + r(2·min)`, a level up; all tinted.
+/// Drawn last argument first, as the original evaluates them.
+fn blood(effects: &mut Effects, rng: &mut Rng, o: &Obj, dmg: i32, earlier: bool) {
+    let m = dmg.clamp(0, 50);
+    let size = if earlier { 16 * m + 50 + rng.rand(50) } else { 100 + rng.rand(150) };
+    let y = o.pos.y + rng.rand(200) - 100;
+    let x = o.pos.x + rng.rand(200) - 100;
+    effects.add(
+        8,
+        Tex::Blood,
+        Vec3::new(x as f32, y as f32, o.pos.z as f32),
+        Vec3::ZERO,
+        size as f32,
+        o.level as u8,
+        Blend::Tint,
+    );
+    for _ in 0..3 {
+        let size = 8 * m + 80 + rng.rand(2 * m);
+        let vz = rng.rand(80) - 40 - (o.vel.z >> 2);
+        let vy = rng.rand(80) - 40 - (o.vel.y >> 2);
+        let vx = rng.rand(80) - 40 - (o.vel.x >> 2);
+        let z = o.pos.z + rng.rand(200) - 100;
+        let y = o.pos.y + rng.rand(200) - 100;
+        let x = o.pos.x + rng.rand(200) - 100;
+        effects.add(
+            9,
+            Tex::Blood,
+            Vec3::new(x as f32, y as f32, z as f32),
+            Vec3::new(vx as f32, vy as f32, vz as f32),
+            size as f32,
+            o.level as u8 + 1,
+            Blend::Tint,
+        );
     }
 }
 
