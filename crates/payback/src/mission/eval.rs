@@ -461,22 +461,27 @@ fn sees(world: &World, a: &ActorView, p: &PlayerView, range: i64) -> bool {
         .is_some_and(|c| crate::sim::collide::line_of_sight(c, a.pos, p.pos))
 }
 
-/// Ringing phones flash (scenery 14 <-> 19) while their trigger is active;
-/// cells are restored to their original scenery afterwards.
+/// The phone cells [`flash_phones`] changed, with their original scenery
+/// (cleared at level end).
+#[derive(Resource, Default)]
+pub struct FlashedPhones(pub std::collections::HashMap<(usize, usize, usize), u8>);
+
+/// Ringing phones flash: every game tick a ringing phone's cell swaps
+/// scenery 14 (phone) and 19 (phone with arrow), as Mac `CheckForTriggers`
+/// @ 100f4a50 does for each trigger square holding scenery 0xe/0x13 on
+/// every call (once per frame of the level loop `amiga_levelloop` @
+/// 10100f50, i.e. per game tick here). It runs in the fixed tick: the cell's
+/// scenery is part of the simulation (scenery collisions read it). INFERRED:
+/// the original leaves the cell as it was when the trigger goes; here it
+/// gets its original scenery back.
 pub fn flash_phones(
-    time: Res<Time>,
     triggers: Res<Triggers>,
     city: Option<Res<City>>,
     mut set: MessageWriter<SetScenery>,
-    mut timer: Local<f32>,
-    mut flashed: Local<std::collections::HashMap<(usize, usize, usize), u8>>,
+    mut flashed: ResMut<FlashedPhones>,
 ) {
     let Some(city) = city else { return };
-    *timer += time.delta_secs();
-    if *timer < 0.4 {
-        return;
-    }
-    *timer = 0.0;
+    let flashed = &mut flashed.0;
     let phones = triggers.list.iter().filter(|t| t.kind == kind::PHONE);
     let ringing: Vec<i32> = phones.clone().filter(|t| t.a != -1).map(|t| t.a).collect();
     // Random phones (-1) ring by square.

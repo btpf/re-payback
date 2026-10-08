@@ -1015,32 +1015,66 @@ fn headlight_polygon(out: &mut Tris, info: &ModelInfo, tex: u32) {
     }
 }
 
-/// Overlay children of an object entity (see [`Overlay`]).
-#[derive(Component)]
-struct OverlayChildren(Vec<Entity>);
+/// Overlay parts of an entity (see [`Overlay`]): render-only entities that
+/// follow it ([`Follow`]). On every [`SimObj`] from the spawn (required
+/// there; render code must not change a simulated object's components),
+/// inserted on scenery when first needed.
+#[derive(Component, Default)]
+pub(crate) struct OverlayChildren(Vec<Entity>);
 
-/// Keep each object's overlay children (additive faces, lines) in step
-/// with its mesh.
+/// A render-only entity drawn at its owner's transform times `local`, with
+/// the owner's visibility. Used instead of `ChildOf` for parts of simulated
+/// objects: a child would give the object a `Children` component at a
+/// frame-dependent moment (and Bevy removes it again with the last child).
+/// Despawned once the owner is gone.
+#[derive(Component)]
+pub(crate) struct Follow {
+    owner: Entity,
+    local: Transform,
+}
+
+/// Place [`Follow`] entities (before transform propagation).
+#[allow(clippy::type_complexity)]
+fn follow_owners(
+    mut commands: Commands,
+    owners: Query<(&Transform, Option<&Visibility>), Without<Follow>>,
+    mut q: Query<(Entity, &Follow, &mut Transform, &mut Visibility)>,
+) {
+    for (e, f, mut tf, mut vis) in &mut q {
+        let Ok((otf, ovis)) = owners.get(f.owner) else {
+            commands.entity(e).try_despawn();
+            continue;
+        };
+        let want = otf.mul_transform(f.local);
+        if *tf != want {
+            *tf = want;
+        }
+        let v = ovis.copied().unwrap_or_default();
+        if *vis != v {
+            *vis = v;
+        }
+    }
+}
+
+/// Keep each object's overlay parts (additive faces, lines) in step with
+/// its mesh.
 #[allow(clippy::type_complexity)]
 fn sync_overlays(
     mut commands: Commands,
     library: Option<Res<ObjectLibrary>>,
-    q: Query<
-        (Entity, &Mesh3d, Option<&OverlayChildren>),
+    mut q: Query<
+        (Entity, &Mesh3d, Option<&mut OverlayChildren>),
         (With<MeshMaterial3d<ObjectMaterial>>, Changed<Mesh3d>),
     >,
 ) {
     let Some(library) = library else { return };
-    for (entity, mesh, old) in &q {
-        if let Some(old) = old {
-            for &e in &old.0 {
+    for (entity, mesh, mut old) in &mut q {
+        if let Some(old) = old.as_deref_mut() {
+            for e in old.0.drain(..) {
                 commands.entity(e).try_despawn();
             }
         }
         let Some(overlay) = library.overlays.get(&mesh.0.id()) else {
-            if old.is_some() {
-                commands.entity(entity).remove::<OverlayChildren>();
-            }
             continue;
         };
         let mut children = Vec::new();
@@ -1056,13 +1090,21 @@ fn sync_overlays(
                         Mesh3d(part.clone()),
                         MeshMaterial3d(material.clone()),
                         Transform::IDENTITY,
-                        ChildOf(entity),
+                        Follow {
+                            owner: entity,
+                            local: Transform::IDENTITY,
+                        },
                     ))
                     .id();
                 children.push(child);
             }
         }
-        commands.entity(entity).insert(OverlayChildren(children));
+        match old {
+            Some(mut old) => old.0 = children,
+            None => {
+                commands.entity(entity).insert(OverlayChildren(children));
+            }
+        }
     }
 }
 
@@ -1194,7 +1236,10 @@ impl Plugin for SceneryPlugin {
                 Update,
                 (follow_settings, animate_scenery, (vehicle_skins, vehicle_doors).chain(), sync_mode),
             )
-            .add_systems(PostUpdate, sync_overlays.before(TransformSystems::Propagate))
+            .add_systems(
+                PostUpdate,
+                (sync_overlays, follow_owners).chain().before(TransformSystems::Propagate),
+            )
             .add_systems(
                 FixedUpdate,
                 spawn_damage_check.run_if(in_state(AppState::Playing)),
@@ -1436,9 +1481,10 @@ fn door_model(kind: usize) -> Option<&'static str> {
     })
 }
 
-/// The open door of a vehicle, a child of it.
-#[derive(Component)]
-struct DoorPanel(Entity);
+/// The open door of a vehicle (a [`Follow`] entity), if one is drawn. On
+/// every [`SimObj`] from the spawn (see [`OverlayChildren`]).
+#[derive(Component, Default)]
+pub(crate) struct DoorPanel(Option<Entity>);
 
 /// An open driver's door (`Drive::door` != 0) is drawn as its own object
 /// (Mac `DrawObject` @ 10075880 tail = OS4 `FUN_010c101c` tail): the door
@@ -1454,22 +1500,21 @@ fn vehicle_doors(
     data: Res<GameData>,
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    vehicles: Query<(Entity, &SimObj, &Vehicle, &Drive, Option<&DoorPanel>)>,
-    mut panels: Query<(&mut Transform, &mut Mesh3d), Without<SimObj>>,
+    mut vehicles: Query<(Entity, &SimObj, &Vehicle, &Drive, &mut DoorPanel)>,
+    mut panels: Query<(&mut Follow, &mut Mesh3d), Without<SimObj>>,
 ) {
     let Some(mut library) = library else { return };
     // `--open-doors`: every door fully open (visual checks).
     let forced = std::env::args().any(|a| a == "--open-doors");
-    for (e, obj, vehicle, drive, panel) in &vehicles {
+    for (e, obj, vehicle, drive, mut panel) in &mut vehicles {
         let angle = if forced { 0x370 } else { drive.door };
         let door = (angle != 0)
             .then(|| door_model(vehicle.kind))
             .flatten()
             .and_then(|p| library.load(&data, &mut meshes, p));
         let Some(door) = door else {
-            if let Some(panel) = panel {
-                commands.entity(panel.0).try_despawn();
-                commands.entity(e).remove::<DoorPanel>();
+            if let Some(p) = panel.0.take() {
+                commands.entity(p).try_despawn();
             }
             continue;
         };
@@ -1482,18 +1527,23 @@ fn vehicle_doors(
         let paint = usize::try_from(vehicle.colour).ok().filter(|&c| c < PAINTS.len());
         let skin = if obj.burn > 0 { Skin::Burnt } else { Skin::Normal };
         let mesh = library.variant_mesh(&mut meshes, door, skin, None, paint);
-        match panel.and_then(|p| panels.get_mut(p.0).ok()) {
-            Some((mut t, mut m)) => {
-                *t = tf;
+        match panel.0.and_then(|p| panels.get_mut(p).ok()) {
+            Some((mut f, mut m)) => {
+                f.local = tf;
                 if m.0 != mesh {
                     m.0 = mesh;
                 }
             }
             None => {
                 let child = commands
-                    .spawn((Mesh3d(mesh), MeshMaterial3d(library.material.clone()), tf, ChildOf(e)))
+                    .spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(library.material.clone()),
+                        Transform::IDENTITY,
+                        Follow { owner: e, local: tf },
+                    ))
                     .id();
-                commands.entity(e).insert(DoorPanel(child));
+                panel.0 = Some(child);
             }
         }
     }

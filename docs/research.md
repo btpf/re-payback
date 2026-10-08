@@ -82,6 +82,31 @@ from the 68k mission code and an automated bot (`--autoplay`) completes each
 of them; replays are deterministic (`analysis/scratch/replay/check.sh` reports
 MATCH). `progress.html` (local, git-ignored) has the per-area estimates.
 
+Replays stay deterministic only if the simulation (the fixed-tick schedules)
+never depends on frame timing. The rules, after a hunt for frame-dependent
+divergences:
+
+- **Object order is the object table's.** Every `Obj` has a `slot` in
+  `sim::ObjTable`, kept like the original's object array (CONFIRMED: Mac
+  `NewObj` @ 100575b0 appends, `RemoveObj` @ 10057830 moves the last object
+  into the freed index, `GetObject` @ 100530e0 scans from index 0). Sim loops
+  whose result depends on the visiting order (random numbers per object,
+  spawns and despawns, first-come picks, pairs, mission actor lookups) go
+  through `sim::table_order`; ties in nearest-object picks break by slot.
+  Neither the ECS query order (it follows the storage tables) nor `Entity`
+  ids (render code spawns entities too) may decide anything.
+- **Render code never adds or removes components on an `Obj` entity.**
+  Bevy's `Aabb` and `PreviousGlobalTransform` and the object renderer's
+  `OverlayChildren` / `DoorPanel` are required components of `Obj`; overlay
+  parts and open doors are separate `Follow` entities, not children (a child
+  would add `Children` to the object). `PAYBACK_DET_CHECK=1` logs any
+  component change on an `Obj` between two ticks.
+- **Sim state is written only in the fixed tick.** Map edits the simulation
+  reads (phone flashing, scenery changes) run in `FixedUpdate`; no sim system
+  reads `Time` or anything set in `Update`.
+- **The fixed-tick schedules run single-threaded**, so systems without an
+  explicit order still run in the same order every run.
+
 | Area | State | Code (`crates/payback/src/`) |
 |---|---|---|
 | Data formats | done; every shipped file parses in the tests | `payback-formats`: `map`, `obj`, `texture`, `palette`, `phrases`, `sound`, `motion`, `route`, `flc`, `replay`, `scores` |

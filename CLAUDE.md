@@ -18,6 +18,7 @@ Reverse engineering and Bevy reimplementation of Payback (Apex Designs, Amiga, 2
 - Text files use LF line endings (`.gitattributes`).
 - Verify visual changes with `./target/debug/payback.exe [--map N --level L] --screenshot <png>` and look at the image.
 - Keep `cargo test -p payback -p payback-formats` passing. Keep replay determinism intact: `analysis/scratch/replay/check.sh <name> <ticks> --map 0 --seed 1234` must report MATCH.
+- Determinism rules (`docs/research.md`): render systems must not add/remove components on `Obj` entities; sim loops that draw rng, spawn, despawn or pick first-come iterate by object-table slot (`sim::table_order`), never by query order or `Entity`; sim state changes only in the fixed tick. `PAYBACK_DET_CHECK=1` reports violations of the first rule.
 
 ## Progress page
 

@@ -81,8 +81,11 @@ fn contacts(
 ) {
     let Some(library) = library else { return };
     let mut irony = Vec::new();
+    // Pairs in object-table order (Mac `CheckForCollisions` @ 1006a150
+    // takes each object against the earlier ones).
+    let order = crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, &*o)));
     let bodies: Vec<Body> = q
-        .iter()
+        .iter_many(&order)
         .filter(|(_, o, ..)| o.state != State::Removed)
         .map(|(e, o, vehicle, person, player, _)| {
             let info = &library.model(o.model).info;
@@ -242,7 +245,8 @@ fn vehicle_damage(
     mut q: Query<(Entity, &mut Obj, &Vehicle, Has<CameraTarget>)>,
 ) {
     let Some(library) = library else { return };
-    for (e, mut o, _veh, is_player) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut o, _veh, is_player)) = q.get_mut(e__) else { continue };
         let info = &library.model(o.model).info;
         let (mass, radius) = (info.mass as i64, info.radius as f32);
         let layer = o.level as u8 + 1;

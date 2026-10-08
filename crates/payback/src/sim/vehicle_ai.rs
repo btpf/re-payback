@@ -377,7 +377,10 @@ pub fn vehicle_orders(
         snap.iter().find(|s| s.0 == e).map(|s| (s.1, s.2))
     };
     let player_pos = find(None).map(|p| p.0);
-    for (e, mut obj, veh, mut ai, mut stick, drive, nav) in &mut set.p1() {
+    let order = crate::sim::table_order(set.p1().iter().map(|(e, o, ..)| (e, o)));
+    let mut objs = set.p1();
+    for e__ in order {
+        let Ok((e, mut obj, veh, mut ai, mut stick, drive, nav)) = objs.get_mut(e__) else { continue };
         if matches!(
             obj.state,
             State::Player
@@ -544,7 +547,8 @@ fn tank_cannon(
     let Some(library) = library.as_deref_mut() else {
         return;
     };
-    for (e, obj, veh, stick, latch, is_player) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, obj, veh, stick, latch, is_player)) = q.get_mut(e__) else { continue };
         if veh.kind != vk::TANK {
             continue;
         }

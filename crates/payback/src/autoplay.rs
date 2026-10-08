@@ -686,7 +686,8 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                 })
                 .min_by_key(|(_, o, _)| {
                     let d = (o.pos - me.pos).truncate().as_i64vec2();
-                    d.x * d.x + d.y * d.y
+                    // Ties: object-table order, never the ECS order.
+                    (d.x * d.x + d.y * d.y, o.slot)
                 })
                 .map(|(e, ..)| e);
             if bot.tick % 250 == 0 {
@@ -740,7 +741,7 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
         Goal::KillCops => {
             let mut q = world.query::<(Entity, &Obj, Has<Person>)>();
             let library = world.resource::<ObjectLibrary>();
-            let cops: Vec<(Entity, IVec3)> = q
+            let cops: Vec<(Entity, IVec3, u32)> = q
                 .iter(world)
                 .filter(|(_, o, person)| {
                     *person
@@ -748,11 +749,11 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                         && !matches!(o.state, State::Dead | State::Removed)
                         && library.model(o.model).info.police
                 })
-                .map(|(e, o, _)| (e, o.pos))
+                .map(|(e, o, _)| (e, o.pos, o.slot))
                 .collect();
-            let target = cops.into_iter().min_by_key(|(_, p)| {
+            let target = cops.into_iter().min_by_key(|(_, p, slot)| {
                 let d = (*p - me.pos).truncate().as_i64vec2();
-                d.x * d.x + d.y * d.y
+                (d.x * d.x + d.y * d.y, *slot)
             });
             if bot.tick % 250 == 0 {
                 let mut q = world.query::<(&Obj, Option<&Vehicle>)>();
@@ -768,7 +769,7 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                 let wanted = world.get::<Obj>(me.e).map_or(0, |o| o.wanted);
                 log(format_args!("KillCops: wanted {wanted}, police [{}], me {:?}", police.join(", "), me.pos));
             }
-            if let Some((t, _)) = target {
+            if let Some((t, ..)) = target {
                 kill(world, bot, me, t);
             }
         }
@@ -877,7 +878,8 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                 })
                 .min_by_key(|(_, o, _)| {
                     let d = (o.pos - me.pos).truncate().as_i64vec2();
-                    d.x * d.x + d.y * d.y
+                    // Ties: object-table order, never the ECS order.
+                    (d.x * d.x + d.y * d.y, o.slot)
                 })
                 .map(|(t, ..)| t);
             if let Some(t) = target {
@@ -1085,8 +1087,8 @@ fn defend(world: &mut World, bot: &mut Bot, me: &Me) -> bool {
                 && library.model(o.model).info.police
                 && (o.pos - me.pos).truncate().abs().max_element() < 5000
         })
-        .map(|(e, ..)| e)
-        .next();
+        .min_by_key(|(_, o, _)| o.slot)
+        .map(|(e, ..)| e);
     let Some(cop) = cop else { return false };
     // Shoot from where we stand.
     let pos = world.get::<Obj>(cop).map(|o| (o.pos, o.level));

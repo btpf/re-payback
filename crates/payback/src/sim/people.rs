@@ -478,10 +478,8 @@ fn panic_peds(
         return;
     };
     for ev in events.read() {
-        // A replayable order (see `ped_ai`).
-        let mut order: Vec<_> = q.iter().map(|(e, o, _)| (sim_key(o), e)).collect();
-        order.sort_unstable();
-        for (_, e) in order {
+        // Object-table order (`table_order`): replays must reproduce it.
+        for e in crate::sim::table_order(q.iter().map(|(e, o, _)| (e, o))) {
             let Ok((_, mut o, mut p)) = q.get_mut(e) else { continue };
             if o.state != State::Wander || models.model(o.model).info.police {
                 continue;
@@ -507,12 +505,10 @@ fn ped_ai(
     mut q: Query<(Entity, &mut Obj, &mut Person, &mut Stick)>,
 ) {
     let Some(city) = city else { return };
-    // Every wandering ped draws from the generator every few ticks, so the
-    // order must not depend on the ECS tables (render code moves entities
-    // between them at frame-dependent times): go by the objects' state.
-    let mut order: Vec<_> = q.iter().map(|(e, o, ..)| (sim_key(o), e)).collect();
-    order.sort_unstable();
-    for (_, e) in order {
+    // Every wandering ped draws from the generator every few ticks: visit
+    // them in object-table order (the original's `do_Objects` loop), not
+    // the ECS order.
+    for e in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((_, mut obj, mut p, mut stick)) = q.get_mut(e) else { continue };
         // The player's stick comes from `player_stick`.
         if obj.state == State::Player {
@@ -548,11 +544,6 @@ fn ped_ai(
             _ => {}
         }
     }
-}
-
-/// A sort key for visiting objects in an order that replays reproduce.
-pub fn sim_key(o: &Obj) -> [i32; 6] {
-    [o.pos.x, o.pos.y, o.pos.z, o.heading, o.vel.x, o.vel.y]
 }
 
 /// The original's steering toward heading `t`: d1 = (t − h) and d2 =
@@ -649,7 +640,8 @@ fn move_people(
     mut q: Query<(Entity, &mut Obj, &mut Person, &Stick)>,
 ) {
     let Some(city) = city else { return };
-    for (e, mut obj, mut p, stick) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, mut p, stick)) = q.get_mut(e__) else { continue };
         if obj.state == State::Removed {
             continue;
         }
@@ -916,7 +908,8 @@ fn regen_and_respawn(
         return;
     };
     let mut alive = false;
-    for (e, mut obj, on_foot) in &mut players {
+    for e__ in crate::sim::table_order(players.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, on_foot)) = players.get_mut(e__) else { continue };
         match obj.state {
             State::Dead | State::Removed => {
                 if session.respawn_timer == 0 {
@@ -1138,7 +1131,8 @@ fn despawn_far(
     q: Query<(Entity, &Obj), Without<CameraTarget>>,
 ) {
     let cams: &[GameCam] = if views.0.is_empty() { std::slice::from_ref(&*cam) } else { &views.0 };
-    for (e, obj) in &q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, obj)) = q.get(e__) else { continue };
         let sq = IVec2::new(obj.pos.x >> 11, obj.pos.y >> 11);
         if obj.player.is_some() {
             continue;

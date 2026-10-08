@@ -347,7 +347,8 @@ fn drive_traffic(
             occ.push((IVec2::new(o.pos.x >> 11, o.pos.y >> 11), o.level, e));
         }
     }
-    for (e, obj, veh, mut tr, mut stick) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, obj, veh, mut tr, mut stick)) = q.get_mut(e__) else { continue };
         if obj.state != State::Wander {
             continue;
         }

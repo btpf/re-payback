@@ -402,7 +402,8 @@ fn deaths_and_respawns(
     let mut present = [false; 4];
     let mut alive_at: Vec<Vec3> = Vec::new();
     let mut deaths: Vec<(u8, Option<u8>)> = Vec::new();
-    for (e, mut obj, on_foot) in &mut players {
+    for e__ in crate::sim::table_order(players.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, on_foot)) = players.get_mut(e__) else { continue };
         let Some(p) = obj.player.filter(|&p| (p as usize) < n) else {
             continue;
         };

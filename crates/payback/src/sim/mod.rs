@@ -11,6 +11,7 @@ pub mod boarding;
 pub mod collide;
 pub mod combat;
 pub mod contact;
+mod det_check;
 pub mod driving;
 pub mod people;
 pub mod police;
@@ -20,6 +21,8 @@ pub mod traffic;
 pub mod vehicle_ai;
 
 use crate::data::GameData;
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 /// Angle units per turn.
@@ -257,8 +260,25 @@ pub struct Stick {
 }
 
 /// The core dynamic-object record.
+///
+/// Render code must never add or remove components on an `Obj` entity:
+/// that moves it to another ECS table at a frame-rate-dependent moment,
+/// and query iteration order (which the simulation must not depend on, but
+/// see [`table_order`]) would follow. The render components Bevy would add
+/// later (`Aabb`, `PreviousGlobalTransform`) and the object renderer's own
+/// slots are required here so they exist from the spawn.
 #[derive(Component, Clone, Debug)]
+#[component(on_add = obj_added, on_remove = obj_removed)]
+#[require(
+    bevy::camera::primitives::Aabb,
+    bevy::pbr::PreviousGlobalTransform,
+    crate::objects::OverlayChildren,
+    crate::objects::DoorPanel
+)]
 pub struct Obj {
+    /// Index in the object table ([`ObjTable`]), the order the simulation
+    /// visits objects in. Kept up to date by the table.
+    pub slot: u32,
     pub pos: IVec3,
     pub vel: IVec3,
     pub prev_pos: IVec3,
@@ -295,6 +315,7 @@ pub struct Obj {
 impl Obj {
     pub fn new(class: Class, model: usize, pos: IVec3, heading: i32) -> Obj {
         Obj {
+            slot: u32::MAX,
             pos,
             vel: IVec3::ZERO,
             prev_pos: pos,
@@ -328,11 +349,77 @@ impl Obj {
     }
 }
 
+/// The object table: every `Obj` entity in table order, as the original's
+/// object array (Mac `NewObj` @ 100575b0 appends at index `++count`,
+/// `RemoveObj` @ 10057830 moves the last object into the freed index;
+/// OS4/68k keep the same array). Its order is decided by the simulation
+/// alone (spawns and despawns are applied in a fixed system order), never
+/// by the ECS storage or entity ids, which render code also touches. The
+/// original moves player-model objects into the first slots on creation;
+/// here players simply take the next slot.
+#[derive(Resource, Default, Debug)]
+pub struct ObjTable(pub Vec<Entity>);
+
+fn obj_added(mut world: DeferredWorld, ctx: HookContext) {
+    let Some(mut table) = world.get_resource_mut::<ObjTable>() else {
+        return;
+    };
+    table.0.push(ctx.entity);
+    let slot = (table.0.len() - 1) as u32;
+    if let Some(mut o) = world.get_mut::<Obj>(ctx.entity) {
+        o.slot = slot;
+    }
+}
+
+fn obj_removed(mut world: DeferredWorld, ctx: HookContext) {
+    let Some(slot) = world.get::<Obj>(ctx.entity).map(|o| o.slot as usize) else {
+        return;
+    };
+    let Some(mut table) = world.get_resource_mut::<ObjTable>() else {
+        return;
+    };
+    if table.0.get(slot) != Some(&ctx.entity) {
+        return;
+    }
+    table.0.swap_remove(slot);
+    let moved = table.0.get(slot).copied();
+    if let Some(mut o) = moved.and_then(|m| world.get_mut::<Obj>(m)) {
+        o.slot = slot as u32;
+    }
+}
+
+/// The entities of `objs` in object-table order. Every simulation loop whose
+/// result depends on the visiting order (random numbers drawn per object,
+/// spawns, first-come picks, messages and reports, pairs) goes through this
+/// instead of iterating the query directly: the query order follows the
+/// ECS tables, which are not part of the replayed state.
+pub fn table_order<'a>(objs: impl IntoIterator<Item = (Entity, &'a Obj)>) -> Vec<Entity> {
+    let mut v: Vec<(u32, Entity)> = objs.into_iter().map(|(e, o)| (o.slot, e)).collect();
+    v.sort_unstable_by_key(|p| p.0);
+    v.into_iter().map(|p| p.1).collect()
+}
+
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
+        // The fixed-tick schedules run on one thread. Systems without an
+        // ordering between them (Bevy reports a few hundred conflicting
+        // pairs in `FixedUpdate`) then always run in the schedule's own
+        // topological order, the same in every run of a build; the
+        // multi-threaded executor would run them in whatever order the
+        // threads happen to reach them, and a replay could diverge on the
+        // order of two systems drawing from `Rng`. The simulation is small;
+        // it doesn't need the threads.
+        use bevy::ecs::schedule::ScheduleLabel;
+        for label in [FixedPreUpdate.intern(), FixedUpdate.intern(), FixedPostUpdate.intern()] {
+            app.edit_schedule(label, |s| {
+                s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+        }
+        det_check::plugin(app);
         app.init_resource::<Trig>()
+            .init_resource::<ObjTable>()
             .add_systems(Startup, |mut commands: Commands, data: Res<GameData>| {
                 let rng = Rng::load(&data);
                 commands.insert_resource(rng.visual());

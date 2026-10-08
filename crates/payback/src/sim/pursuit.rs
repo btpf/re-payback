@@ -107,7 +107,8 @@ fn select_pursuers(
 ) {
     let aggr = aggr.map_or(2, |a| a.0);
     let wanted = player_wanted(&player);
-    for (e, mut obj, veh, mut ai, pursuit) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, veh, mut ai, pursuit)) = q.get_mut(e__) else { continue };
         if !TYPES[veh.kind].police || veh.kind == vk::POLICE_VAN {
             continue;
         }
@@ -207,7 +208,10 @@ fn pursue(
         lights: lights.phase,
         occ: &occ,
     };
-    for (e, mut obj, veh, pursuit, mut nav, mut stick, mut drive) in &mut set.p2() {
+    let order = crate::sim::table_order(set.p2().iter().map(|(e, o, ..)| (e, o)));
+    let mut objs = set.p2();
+    for e__ in order {
+        let Ok((e, mut obj, veh, pursuit, mut nav, mut stick, mut drive)) = objs.get_mut(e__) else { continue };
         if !matches!(obj.state, State::PursuitRoute | State::Pursuit) {
             continue;
         }
@@ -561,7 +565,8 @@ fn despawn_far(
     let Some(cam) = cam else { return };
     let c = cam.square();
     let h = cam.window();
-    for (e, obj, veh, siren, roadblock) in &q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, obj, veh, siren, roadblock)) = q.get(e__) else { continue };
         let drone = matches!(obj.state, State::PursuitRoute | State::Pursuit)
             || (roadblock && obj.state == State::Barrier);
         let sq = IVec2::new(obj.pos.x >> 11, obj.pos.y >> 11);

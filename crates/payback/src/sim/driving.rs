@@ -179,7 +179,8 @@ fn drive(
 ) {
     let (Some(city), Some(library)) = (city, library) else { return };
     let mut glass = Vec::new();
-    for (e, mut obj, veh, mut d, stick, is_player) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, veh, mut d, stick, is_player)) = q.get_mut(e__) else { continue };
         let t = &TYPES[veh.kind];
         let info = &library.model(obj.model).info;
         let (hw, front, rear) = (info.radius.max(1), info.max_y, info.min_y);

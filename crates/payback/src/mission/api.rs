@@ -535,17 +535,18 @@ impl<'w> Script<'w> {
 
     // ---- Actors ----------------------------------------------------------
 
-    /// Every live actor with script id `id`.
+    /// Every live actor with script id `id`, in object-table order (the
+    /// original's `GetObject` scans the object array from index 0).
     pub fn actors(&mut self, id: i32) -> Vec<Entity> {
         if id == -1 {
             return self.player().into_iter().collect();
         }
-        self.world
-            .query::<(Entity, &Obj)>()
-            .iter(self.world)
-            .filter(|(_, o)| o.script_id == id && o.state != State::Removed)
-            .map(|(e, _)| e)
-            .collect()
+        crate::sim::table_order(
+            self.world
+                .query::<(Entity, &Obj)>()
+                .iter(self.world)
+                .filter(|(_, o)| o.script_id == id && o.state != State::Removed),
+        )
     }
 
     /// `CreateActor(id, model, x, y, floor, angle, colour)`: model < 0 is
@@ -752,13 +753,12 @@ impl<'w> Script<'w> {
 
     /// `RemoveAllActors()`.
     pub fn remove_all_actors(&mut self) {
-        let all: Vec<Entity> = self
-            .world
-            .query::<(Entity, &Obj)>()
-            .iter(self.world)
-            .filter(|(_, o)| o.state != State::Player && o.class != crate::sim::Class::Projectile)
-            .map(|(e, _)| e)
-            .collect();
+        let all = crate::sim::table_order(
+            self.world
+                .query::<(Entity, &Obj)>()
+                .iter(self.world)
+                .filter(|(_, o)| o.state != State::Player && o.class != crate::sim::Class::Projectile),
+        );
         for e in all {
             self.world.entity_mut(e).despawn();
         }

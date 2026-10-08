@@ -256,7 +256,7 @@ fn cops(
         (Entity, &mut Obj, Has<Person>, Option<&mut Drive>, Option<&Person>, Option<&Vehicle>),
         (With<CameraTarget>, Without<Busted>),
     >,
-    mut q: Query<(&mut Obj, &mut Stick, &Person, Option<&mut Arsenal>), Without<CameraTarget>>,
+    mut q: Query<(Entity, &mut Obj, &mut Stick, &Person, Option<&mut Arsenal>), Without<CameraTarget>>,
 ) {
     let Some(mut library) = library else { return };
     let aggr = aggr.map(|a| a.0).unwrap_or(2);
@@ -285,7 +285,8 @@ fn cops(
                 (-door_lat * s >> 8) + (door_lon * c >> 8),
             )
     };
-    for (cop, mut stick, person, ars) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((_, cop, mut stick, person, ars)) = q.get_mut(e__) else { continue };
         if person.kind != COP || cop.state == State::Player {
             continue;
         }

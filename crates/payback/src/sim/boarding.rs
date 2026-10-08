@@ -168,7 +168,8 @@ fn use_pressed(
 ) {
     let Some(mut library) = library else { return };
     // On foot: choose a vehicle (nearest door point, no range limit).
-    for (pe, p, stick, boarding) in &on_foot {
+    for e__ in crate::sim::table_order(on_foot.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((pe, p, stick, boarding)) = on_foot.get(e__) else { continue };
         if !stick.use_vehicle || p.state != State::Player {
             continue;
         }
@@ -200,7 +201,8 @@ fn use_pressed(
                     door_y(veh.kind, info.max_y),
                     -PERSON_RADIUS,
                 ) - p.pos;
-                ((d.x >> 5) as i64).pow(2) + ((d.y >> 5) as i64).pow(2)
+                // Ties: the earlier object in the table.
+                (((d.x >> 5) as i64).pow(2) + ((d.y >> 5) as i64).pow(2), v.slot)
             })
             .map(|(e, v, veh, _)| (e, v.pos, veh.kind, library.model(v.model).info.radius));
         commands.entity(pe).remove::<Touched>();
@@ -228,7 +230,10 @@ fn use_pressed(
     }
     // Driving: get out, at any speed. A cop who has opened the door pulls
     // the player out (`PullOut`, police.rs).
-    for (ve, mut v, mut veh, mut drive, stick, ars, pull, armed) in &mut set.p1() {
+    let order = crate::sim::table_order(set.p1().iter().map(|(e, o, ..)| (e, o)));
+    let mut cars = set.p1();
+    for e__ in order {
+        let Ok((ve, mut v, mut veh, mut drive, stick, ars, pull, armed)) = cars.get_mut(e__) else { continue };
         let forced = pull.is_some();
         if forced {
             commands.entity(ve).remove::<PullOut>();
@@ -389,7 +394,8 @@ fn walk_to_door(
 ) {
     let Some(mut library) = library else { return };
     let mut timer = timer;
-    for (pe, mut p, mut stick, mut b, ars, touched) in &mut walkers {
+    for e__ in crate::sim::table_order(walkers.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((pe, mut p, mut stick, mut b, ars, touched)) = walkers.get_mut(e__) else { continue };
         let Ok((mut v, veh, mut drive, v_ars, ai_driver)) = vehicles.get_mut(b.vehicle) else {
             commands.entity(pe).remove::<Boarding>();
             continue;

@@ -159,7 +159,13 @@ impl Plugin for MissionPlugin {
                 (|mut clock: ResMut<LevelClock>| clock.0 += 1)
                     .run_if(in_state(crate::level::AppState::Playing)),
             )
-            .add_systems(Update, eval::flash_phones);
+            .init_resource::<eval::FlashedPhones>()
+            .add_systems(
+                FixedUpdate,
+                eval::flash_phones
+                    .after(eval::run_triggers)
+                    .run_if(in_state(crate::level::AppState::Playing)),
+            );
     }
 }
 
@@ -249,6 +255,7 @@ fn start_random(world: &mut World, spec: &crate::level::LevelSpec, police: u8) {
 
 /// Clear the level script and every trigger when the level is left.
 fn reset_missions(world: &mut World) {
+    world.resource_mut::<eval::FlashedPhones>().0.clear();
     let sounds = world.resource_mut::<Triggers>().clear();
     for e in sounds {
         if let Ok(em) = world.get_entity_mut(e) {

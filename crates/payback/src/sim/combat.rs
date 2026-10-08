@@ -237,10 +237,11 @@ fn select_weapon(
     mut commands: Commands,
     mut inputs: ResMut<PlayerInputs>,
     mut triggers: ResMut<Triggers>,
-    mut q: Query<(&Obj, &mut Arsenal, &mut Person), With<CameraTarget>>,
+    mut q: Query<(Entity, &Obj, &mut Arsenal, &mut Person), With<CameraTarget>>,
 ) {
     let slots = inputs.0.each_mut().map(|i| i.weapon_pressed.take());
-    for (obj, mut ars, mut person) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((_, obj, mut ars, mut person)) = q.get_mut(e__) else { continue };
         let Some(slot) = slots[obj.player.unwrap_or(0).min(3) as usize] else {
             continue;
         };
@@ -348,7 +349,8 @@ fn fire_weapons(
     // Snapshot of targets for melee.
     let targets: Vec<(Entity, IVec3)> = shooters.iter().map(|(e, o, ..)| (e, o.pos)).collect();
     let mut punched: Vec<(Entity, Entity)> = Vec::new();
-    for (e, mut obj, mut ars, stick, is_player) in &mut shooters {
+    for e__ in crate::sim::table_order(shooters.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, mut ars, stick, is_player)) = shooters.get_mut(e__) else { continue };
         if ars.pose > 0 {
             ars.pose -= 1;
         }
@@ -768,7 +770,8 @@ fn move_projectiles(
     mut q: Query<(Entity, &mut Obj, &Projectile)>,
 ) {
     let Some(city) = city else { return };
-    for (e, mut obj, p) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, p)) = q.get_mut(e__) else { continue };
         let kind = p.kind;
         obj.health -= kind.decay();
         if kind.gravity() {
@@ -986,11 +989,13 @@ fn projectile_hits(
     };
     // Hit money for the shooting player, paid after the loop.
     let mut pay: Vec<(u8, i32)> = Vec::new();
-    for (pe, po, p) in &projectiles {
+    for e__ in crate::sim::table_order(projectiles.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((pe, po, p)) = projectiles.get(e__) else { continue };
         if matches!(p.kind, ProjectileKind::Grenade | ProjectileKind::Bomb) {
             continue;
         }
-        for (te, mut t, is_person) in &mut targets {
+        for e__ in crate::sim::table_order(targets.iter().map(|(e, o, ..)| (e, o))) {
+            let Ok((te, mut t, is_person)) = targets.get_mut(e__) else { continue };
             if Some(te) == p.shooter || t.state == State::Removed {
                 continue;
             }
@@ -1163,7 +1168,8 @@ fn explosions(
         // Score for the player (single player only), paid after the loop.
         let pays = ex.by_player && !mode.is_multiplayer();
         let mut score: i64 = 0;
-        for (e, mut o, is_person, proj, is_target) in &mut q {
+        for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+            let Ok((e, mut o, is_person, proj, is_target)) = q.get_mut(e__) else { continue };
             if Some(e) == ex.source || proj.is_some() {
                 continue;
             }
@@ -1200,7 +1206,7 @@ fn explosions(
             }
         }
         if score > 0 {
-            if let Some((_, mut pl, ..)) = q.iter_mut().find(|(.., t)| *t) {
+            if let Some((_, mut pl, ..)) = q.iter_mut().filter(|(.., t)| *t).min_by_key(|(_, o, ..)| o.slot) {
                 let add = score * session.multiplier.max(1) as i64;
                 pl.score = (pl.score as i64 + add).min(i32::MAX as i64) as i32;
             }
@@ -1273,7 +1279,8 @@ fn deaths(
     mut killed: MessageWriter<super::score::Killed>,
     mut q: Query<(Entity, &mut Obj, &Person)>,
 ) {
-    for (e, mut o, _) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut o, _)) = q.get_mut(e__) else { continue };
         let police = library.as_ref().is_some_and(|l| l.model(o.model).info.police);
         let was_alive = !matches!(o.state, State::Dead | State::Removed);
         if o.burn > 0 {
@@ -1363,10 +1370,12 @@ fn pickups(
     mut set: MessageWriter<SetScenery>,
     mut rng: ResMut<Rng>,
     mut effects: ResMut<Effects>,
-    mut q: Query<(&Obj, &mut Arsenal), With<CameraTarget>>,
+    mut q: Query<(Entity, &Obj, &mut Arsenal), With<CameraTarget>>,
 ) {
     let Some(city) = city else { return };
-    for (o, mut ars) in &mut q {
+    // Players in object-table order: the first one there takes a pickup.
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((_, o, mut ars)) = q.get_mut(e__) else { continue };
         if o.state != State::Player {
             continue;
         }

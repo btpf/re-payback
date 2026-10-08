@@ -214,7 +214,8 @@ pub fn people_orders(
         .chain(player_foot.iter())
         .map(|(e, o)| (e, o.pos))
         .next();
-    for (e, mut obj, mut ai, mut stick, ars) in &mut q {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, mut obj, mut ai, mut stick, ars)) = q.get_mut(e__) else { continue };
         if matches!(
             obj.state,
             State::Dead | State::Removed | State::Wander | State::Flee
