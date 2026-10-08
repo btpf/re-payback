@@ -21,7 +21,7 @@ public class ExportAll extends GhidraScript {
              PrintWriter idx = new PrintWriter(new FileWriter(new File(out, "functions.tsv")))) {
             for (Function f : fm.getFunctions(true)) {
                 if (monitor.isCancelled()) break;
-                DecompileResults r = di.decompileFunction(f, 60, monitor);
+                DecompileResults r = di.decompileFunction(f, 300, monitor);
                 String c = r.decompileCompleted() ? r.getDecompiledFunction().getC() : "/* decompile failed */\n";
                 w.printf("// ==== %s @ %s size=%d\n%s\n", f.getName(), f.getEntryPoint(), f.getBody().getNumAddresses(), c);
                 idx.printf("%s\t%s\t%d\n", f.getEntryPoint(), f.getName(), f.getBody().getNumAddresses());
