@@ -5,9 +5,16 @@
 //! Workbench icon (`Payback.info`). Both come from the extracted game data at
 //! build time (`PAYBACK_MAC_DATA` / `PAYBACK_DATA`, or `extracted/`), so no
 //! game art is stored in the repository; without the data there is no icon.
+//!
+//! Also stages the game data next to the executable, so the profile folder
+//! (`target/<profile>/`) runs as it is: the files chosen by `data_files.txt`
+//! from the Amiga data into `data/amiga` and from the Mac `Payback` folder
+//! into `data/mac` (see [`stage_data`]).
 
 use payback_formats::icon::{self, Rgba};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Icon sizes written to the .ico.
 const SIZES: [u32; 6] = [16, 24, 32, 48, 128, 256];
@@ -58,6 +65,9 @@ fn main() {
     // The web build has no window icon (the page has none either), and
     // keeps game art out of the .wasm.
     let web = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
+    if !web {
+        stage_data(&manifest, &out);
+    }
     let imgs = if web { None } else { source_images(&manifest) };
     // Window icon for the game: width, height (u32 LE) then RGBA; empty
     // when there is no icon.
@@ -91,5 +101,193 @@ fn main() {
     std::fs::write(&rc, format!("1 ICON \"{escaped}\"\n")).expect("write rc");
     if let Err(e) = embed_resource::compile(&rc, embed_resource::NONE).manifest_optional() {
         println!("cargo:warning=could not embed the exe icon: {e}");
+    }
+}
+
+/// The selection rules of `data_files.txt` (also read by
+/// `tools/dist/stage_data.py` and `tools/web/pack_web_data.py`), names
+/// lower-cased.
+#[derive(Default)]
+struct Rules {
+    skip_dir: Vec<String>,
+    skip_file: Vec<String>,
+    skip_suffix: Vec<String>,
+    skip_prefix: Vec<String>,
+}
+
+impl Rules {
+    fn parse(text: &str) -> Rules {
+        let mut r = Rules::default();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let (kind, name) = line.split_once(' ').unwrap_or((line, ""));
+            let name = name.trim().to_lowercase();
+            match kind {
+                "skip-dir" => r.skip_dir.push(name),
+                "skip-file" => r.skip_file.push(name),
+                "skip-suffix" => r.skip_suffix.push(name),
+                "skip-prefix" => r.skip_prefix.push(name),
+                "film" => {}
+                _ => panic!("data_files.txt: bad rule {line:?}"),
+            }
+        }
+        r
+    }
+
+    fn skip_file(&self, name: &str) -> bool {
+        let low = name.to_lowercase();
+        self.skip_file.contains(&low)
+            || self.skip_suffix.iter().any(|s| low.ends_with(s.as_str()))
+            || self.skip_prefix.iter().any(|p| low.starts_with(p.as_str()))
+    }
+
+    /// The selected files under `root`, relative to it.
+    fn select(&self, root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root.join(rel)) else { return };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Ok(ty) = e.file_type() else { continue };
+            if ty.is_dir() {
+                if !self.skip_dir.contains(&name.to_lowercase()) {
+                    self.select(root, &rel.join(&name), out);
+                }
+            } else if !self.skip_file(&name) {
+                out.push(rel.join(&name));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SyncStats {
+    files: usize,
+    bytes: u64,
+    updated: usize,
+    removed: usize,
+}
+
+/// Mirrors the selected files of `src` into `dst`: a file whose size and
+/// modification time match is left alone, a new or changed one is
+/// hard-linked (same volume; else copied with the source's time), a file
+/// no longer selected is removed. Touches nothing outside `dst`.
+fn sync(src: &Path, dst: &Path, rules: &Rules, copy: bool) -> std::io::Result<SyncStats> {
+    let mut files = Vec::new();
+    rules.select(src, Path::new(""), &mut files);
+    let mut st = SyncStats::default();
+    let mut wanted = HashSet::new();
+    for rel in &files {
+        wanted.insert(rel.to_string_lossy().to_lowercase());
+        let (from, to) = (src.join(rel), dst.join(rel));
+        let meta = std::fs::metadata(&from)?;
+        st.files += 1;
+        st.bytes += meta.len();
+        if let Ok(have) = std::fs::metadata(&to) {
+            if have.len() == meta.len() && have.modified().ok() == meta.modified().ok() {
+                continue;
+            }
+            std::fs::remove_file(&to)?;
+        }
+        std::fs::create_dir_all(to.parent().unwrap())?;
+        if copy || std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to)?;
+            if let Ok(t) = meta.modified() {
+                std::fs::File::options().write(true).open(&to)?.set_modified(t)?;
+            }
+        }
+        st.updated += 1;
+    }
+    remove_stale(dst, Path::new(""), &wanted, &mut st.removed)?;
+    Ok(st)
+}
+
+/// Removes the files under `dst` not in `wanted` (and folders left empty).
+fn remove_stale(dst: &Path, rel: &Path, wanted: &HashSet<String>, removed: &mut usize) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(dst.join(rel)) else { return Ok(()) };
+    for e in entries.flatten() {
+        let r = rel.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            remove_stale(dst, &r, wanted, removed)?;
+            if std::fs::read_dir(dst.join(&r))?.next().is_none() {
+                std::fs::remove_dir(dst.join(&r))?;
+            }
+        } else if !wanted.contains(&r.to_string_lossy().to_lowercase()) {
+            std::fs::remove_file(dst.join(&r))?;
+            *removed += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Stages the game data next to the executable: `target/<profile>/data/amiga`
+/// (from `PAYBACK_DATA` or `extracted/game`) and `data/mac` (from
+/// `PAYBACK_MAC_DATA` or `extracted/mac/Payback`), the files chosen by
+/// `data_files.txt`. `PAYBACK_STAGE_DATA=0` turns it off, `=copy` copies
+/// instead of hard-linking.
+///
+/// Cargo reruns this when the rules, the source folders (it scans them for
+/// changes) or `data/.staged` change. The stamp's time is set far back so
+/// writing it does not itself trigger the next build; deleting `data/`
+/// removes it, so the next build stages again.
+fn stage_data(manifest: &Path, out: &Path) {
+    println!("cargo:rerun-if-env-changed=PAYBACK_STAGE_DATA");
+    let mode = std::env::var("PAYBACK_STAGE_DATA").unwrap_or_default();
+    if mode == "0" {
+        return;
+    }
+    // OUT_DIR is <target>/<profile>/build/payback-<hash>/out.
+    let Some(profile) = out.ancestors().nth(3).filter(|p| p.join("build").is_dir()) else {
+        println!("cargo:warning=unexpected OUT_DIR {}; game data not staged", out.display());
+        return;
+    };
+    let rules_path = manifest.join("data_files.txt");
+    println!("cargo:rerun-if-changed={}", rules_path.display());
+    let rules = Rules::parse(&std::fs::read_to_string(&rules_path).expect("read data_files.txt"));
+    let extracted = manifest.ancestors().nth(2).unwrap_or(manifest).join("extracted");
+    let env_or = |var: &str, default: PathBuf| std::env::var_os(var).map(PathBuf::from).unwrap_or(default);
+    let game = env_or("PAYBACK_DATA", extracted.join("game"));
+    let mac = env_or("PAYBACK_MAC_DATA", extracted.join("mac").join("Payback"));
+    let sources = [
+        (game.join("Payback.exe").is_file(), game, "amiga"),
+        (mac.join("CubeTextures").is_dir(), mac, "mac"),
+    ];
+    let data = profile.join("data");
+    // Written to the stamp, not as cargo warnings: cargo replays a build
+    // script's warnings on every build until it runs again.
+    let mut summary = String::from("written by crates/payback/build.rs; delete data/ to stage it again\n");
+    let mut staged = false;
+    for (ok, src, sub) in sources {
+        if !ok {
+            if sub == "amiga" {
+                println!(
+                    "cargo:warning=no game data at {} (run tools/extract/extract.py or set PAYBACK_DATA); {} not staged",
+                    src.display(),
+                    data.join(sub).display()
+                );
+            }
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", src.display());
+        match sync(&src, &data.join(sub), &rules, mode == "copy") {
+            Ok(st) => {
+                staged = true;
+                summary.push_str(&format!(
+                    "{sub}: {} files, {:.1} MB from {} ({} updated, {} removed in the last run)\n",
+                    st.files,
+                    st.bytes as f64 / 1e6,
+                    src.display(),
+                    st.updated,
+                    st.removed
+                ));
+            }
+            Err(e) => println!("cargo:warning=staging {} failed: {e}", data.join(sub).display()),
+        }
+    }
+    if staged {
+        let stamp = data.join(".staged");
+        let written = std::fs::write(&stamp, summary)
+            .and_then(|()| std::fs::File::options().write(true).open(&stamp))
+            .and_then(|f| f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)));
+        if written.is_ok() {
+            println!("cargo:rerun-if-changed={}", stamp.display());
+        }
     }
 }

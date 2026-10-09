@@ -49,8 +49,28 @@ web build see [`docs/web.md`](docs/web.md).
    cargo run --release -p payback -- --map 0       # straight into city 0, level 0
    ```
 
-   `--data <dir>` / `PAYBACK_DATA` and `--mac-data <dir>` / `PAYBACK_MAC_DATA`
-   point at other installs. `--screenshot out.png` saves a frame and exits; the
+   The build copies the data files the game reads next to the executable
+   (`target/<profile>/data/amiga` and `data/mac`, hard links where it can;
+   the list is [`crates/payback/data_files.txt`](crates/payback/data_files.txt)),
+   so `target/release/` is a self-contained folder: double-click
+   `payback.exe`, or copy the folder elsewhere and run it there. The data is
+   your own copy of the game: never commit or share it.
+
+   Where the game looks for its data, first match wins: `PAYBACK_DATA` /
+   `PAYBACK_MAC_DATA`, `--data <dir>` / `--mac-data <dir>`; `data/amiga` and
+   `data/mac` next to the executable; the folder remembered in
+   `payback-data.cfg` next to the executable; `extracted/game` and
+   `extracted/mac/Payback` in the executable's folder or any folder above it,
+   then in the working directory or above. If the Amiga data is still not
+   found, a folder picker asks for it (the folder with `Payback.exe`) and
+   remembers the choice; the Mac data is optional and never asked for. The log
+   says which folders were used. `PAYBACK_NO_DIALOG=1` turns the picker and
+   message boxes off (headless runs). `PAYBACK_STAGE_DATA=0` builds without
+   staging the data (`=copy` copies instead of linking);
+   `python tools/dist/stage_data.py <dir>` stages it next to an executable
+   elsewhere.
+
+   `--screenshot out.png` saves a frame and exits; the
    full option list is at the top of `crates/payback/src/main.rs`, the controls
    in [`docs/controls.md`](docs/controls.md).
 
@@ -92,6 +112,7 @@ Then read [`docs/README.md`](docs/README.md), the index of the notes, and
 | `tools/` | extraction, Ghidra, RE helpers, checks, reports, web build ([index](tools/README.md)) |
 | `web/` | the WebAssembly loader page |
 | `Dockerfile` | RE workbench: Ghidra, radare2, amitools, FS-UAE, Rust |
+| `target/<profile>/data/` | git-ignored: the game data staged next to the built executable |
 | `extracted/`, `analysis/`, `out/`, `scratch/` | git-ignored: your game data, the decompiles, generated output, throwaway work |
 
 ## Contributing

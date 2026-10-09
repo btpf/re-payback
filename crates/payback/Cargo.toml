@@ -14,6 +14,11 @@ rodio = { version = "0.22", default-features = false }
 # Same winit as Bevy, for the window icon.
 winit = { version = "0.30", default-features = false }
 
+# Native only: the folder picker and message box when the game data is not
+# found (`locate.rs`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.17"
+
 # The web build (docs/web.md): JS glue, the page's URL and localStorage.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.129"

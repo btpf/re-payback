@@ -1,12 +1,16 @@
 //! Payback reimplementation (Bevy).
 //!
-//! Usage: `payback [--data <dir>] [--map <n>] [--level <0|1>] [--free]
+//! Usage: `payback [--data <dir>] [--mac-data <dir>] [--map <n>] [--level <0|1>] [--free]
 //!                 [--rampage <police 0..5>] [--multiplayer <2..4> [--kills <n>]]
 //!                 [--screenshot <out.png>] [--resolution <w>x<h>]
 //!                 [--window-mode windowed|borderless|fullscreen]
 //!                 [--record <file> | --play <file>] [--ticks <n>]
 //!                 [--autoplay [--autoplay-ticks <n>]] [--fast <n>]`
 //!
+//! The game data is searched for (env, `--data`, `payback-data.cfg`, next
+//! to the executable, `extracted/` above it or the working directory, else
+//! a folder picker; `locate.rs`). `PAYBACK_NO_DIALOG=1` disables the picker
+//! and message boxes.
 //! `--record`/`--play` are the replay determinism check (see `replay.rs`).
 //! `--autoplay` plays the story level's missions (see `autoplay.rs`);
 //! `--fast n` runs the game n times faster.
@@ -31,6 +35,8 @@ mod hud;
 mod intro;
 mod level;
 mod lighting;
+#[cfg(not(target_arch = "wasm32"))]
+mod locate;
 mod mapedit;
 mod mission;
 mod music;
@@ -91,6 +97,10 @@ fn run_game() -> AppExit {
     let data = match loaded {
         Ok(d) => d,
         Err(e) => {
+            // Shown in a message box too: the game may run without a console.
+            #[cfg(not(target_arch = "wasm32"))]
+            locate::report_error(&e);
+            #[cfg(target_arch = "wasm32")]
             eprintln!("{e}");
             return AppExit::error();
         }
@@ -137,6 +147,7 @@ fn run_game() -> AppExit {
             (autoplay::AutoplayPlugin, perf::PerfPlugin, arrow::ArrowPlugin, cheats::CheatsPlugin),
         ))
                 .add_systems(Update, screenshot_and_exit)
+        .add_systems(Startup, data::log_data_roots)
         // `--map` starts a level directly; otherwise the menus come first.
         .add_systems(Startup, |mut next: ResMut<NextState<level::AppState>>| {
             if arg("--map").is_some() || arg("--play").is_some() {

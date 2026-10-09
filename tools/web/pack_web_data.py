@@ -5,7 +5,9 @@ Writes <out>/payback.pak (the files back to back) and <out>/payback.json
 ({"files": [[path, offset, length], ...]}); the page fetches both and the
 game reads them through `crates/payback/src/vfs.rs`. Paths are
 `data/game/<rel>` for the Amiga data, `data/mac/<rel>` for the Mac data and
-`Music/<rel>` for user-ripped CD music.
+`Music/<rel>` for user-ripped CD music. The files are those the game reads,
+chosen by crates/payback/data_files.txt (shared with the native build's
+data staging, tools/dist/stage_data.py).
 
 The output is the user's own copy of the original data: never commit it
 (web/dist/ is git-ignored).
@@ -20,36 +22,14 @@ import json
 import os
 import sys
 
-# Not read by the game: other executables, editors, docs, Finder junk, the
-# extractor's resource forks, and the two Mac films it does not play
-# (`GetPaybackMovie` @ 100fcbc0 opens payback_high_mpeg1.mpg only).
-SKIP_NAMES = {
-    ".ds_store", "mapeditor.exe", "paybackwos.exe", "payback (os 9)", "payback (os x)",
-    "payback_high_mpeg2.mpg", "payback_low_mpeg1.mpg",
-}
-SKIP_DIRS = {"docs", "map editor (os 9)", "mapeditor (os x)"}
-FILM = "payback_high_mpeg1.mpg"
-
-
-def skip(name: str, no_film: bool) -> bool:
-    low = name.lower()
-    return (
-        low in SKIP_NAMES
-        or low.endswith(".rsrc")
-        or low.startswith(".fbc")
-        or (no_film and low == FILM)
-    )
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist"))
+import stage_data  # noqa: E402  (the shared file selection, crates/payback/data_files.txt)
 
 
 def walk(root: str, prefix: str, no_film: bool):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIP_DIRS)
-        for name in sorted(filenames):
-            if skip(name, no_film):
-                continue
-            full = os.path.join(dirpath, name)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
-            yield f"{prefix}/{rel}", full
+    rules = stage_data.load_rules()
+    for rel, full in stage_data.walk(root, rules, no_film):
+        yield f"{prefix}/{rel}", full
 
 
 def main() -> int:

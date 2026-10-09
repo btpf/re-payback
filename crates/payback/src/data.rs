@@ -1,12 +1,15 @@
 //! Locating and loading the original game data.
 //!
 //! The reimplementation ships no original assets. It reads them from an
-//! installed copy (CD contents + Update 7), found via, in order:
-//! the `PAYBACK_DATA` environment variable, `--data <dir>`, or
-//! `extracted/game` relative to the working directory.
+//! installed copy (CD contents + Update 7). Natively it is searched for
+//! (`PAYBACK_DATA`, `--data <dir>`, a remembered folder, next to the
+//! executable, `extracted/game` above the executable or the working
+//! directory, else a folder picker: `locate.rs`); the web build reads its
+//! pack's `data/game`.
 //!
-//! The Mac release (`docs/re/mac_version.md`) is an optional second root:
-//! `PAYBACK_MAC_DATA`, `--mac-data <dir>`, or `extracted/mac/Payback`. Where
+//! The Mac release (`docs/re/mac_version.md`) is an optional second root,
+//! searched the same way (`PAYBACK_MAC_DATA`, `--mac-data <dir>`,
+//! `extracted/mac/Payback`, ...) but never asked for. Where
 //! the Mac and Amiga content differ, the player picks per item in the
 //! settings (`frontend::progress::Variants`); `read_variant` serves either.
 //! A changed variant takes effect when that content is next loaded: the
@@ -31,17 +34,25 @@ use payback_formats::{CubeTextureList, CustomTextures, IndexedImage, Palette, pa
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Where the data is found by default: the extracted CD (and Mac CD) next
-/// to the working directory, or in the web build the pack's folders
-/// (`vfs`, docs/web.md).
-#[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_DATA: &str = "extracted/game";
-#[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_MAC_DATA: &str = "extracted/mac/Payback";
+/// Where the web build finds the data: the pack's folders (`vfs`,
+/// docs/web.md).
 #[cfg(target_arch = "wasm32")]
 const DEFAULT_DATA: &str = "data/game";
 #[cfg(target_arch = "wasm32")]
 const DEFAULT_MAC_DATA: &str = "data/mac";
+
+/// Logs which data roots the search used and how it found them
+/// (`locate.rs`; queued until Bevy's logger is up).
+pub fn log_data_roots() {
+    #[cfg(not(target_arch = "wasm32"))]
+    for (warn, text) in crate::locate::take_log() {
+        if warn {
+            warn!("{text}");
+        } else {
+            info!("{text}");
+        }
+    }
+}
 
 #[derive(Resource, Clone)]
 pub struct GameData {
@@ -59,6 +70,20 @@ pub struct GameData {
 }
 
 impl GameData {
+    /// The Amiga data root (`locate.rs`; may show a folder picker).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn locate() -> Result<PathBuf, String> {
+        crate::locate::locate_game()
+    }
+
+    /// The Mac data folder (`Payback` in `PaybackMac.toast`, extracted by
+    /// `tools/extract/extract_mac.py`), if the search finds one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn locate_mac() -> Option<PathBuf> {
+        crate::locate::locate_mac()
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn locate() -> Result<PathBuf, String> {
         let from_args = crate::args()
             .skip_while(|a| a != "--data")
@@ -81,8 +106,8 @@ impl GameData {
         )
     }
 
-    /// The Mac data folder (`Payback` in `PaybackMac.toast`, extracted by
-    /// `tools/extract/extract_mac.py`), if there is one.
+    /// The web build's Mac data, if the pack has it.
+    #[cfg(target_arch = "wasm32")]
     pub fn locate_mac() -> Option<PathBuf> {
         let from_args = crate::args()
             .skip_while(|a| a != "--mac-data")

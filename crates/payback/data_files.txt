@@ -1,0 +1,41 @@
+# The game-data files the port reads: everything in the Amiga data root (the
+# folder holding Payback.exe) and in the Mac `Payback` folder, except what
+# these rules leave out. The one list shared by
+#   - crates/payback/build.rs (stages the data next to the built executable,
+#     target/<profile>/data/amiga and data/mac),
+#   - tools/dist/stage_data.py (the same by hand, into any folder),
+#   - tools/web/pack_web_data.py (the web build's data pack).
+#
+# One rule per line: `<kind> <name>`; names compare case-insensitively and
+# may contain spaces. Kinds:
+#   skip-dir     a directory of that name, at any depth, with everything in it
+#   skip-file    a file of that name
+#   skip-suffix  files whose name ends with it
+#   skip-prefix  files whose name starts with it
+#   film         the intro film: kept, but the web pack can leave it out
+#                (`pack_web_data.py --no-film`)
+#
+# Payback.exe stays in: it marks the Amiga data root and holds the palette
+# (`palette::find_in_executable`).
+
+# Editors and docs.
+skip-dir    docs
+skip-dir    map editor (os 9)
+skip-dir    mapeditor (os x)
+skip-file   mapeditor.exe
+
+# Other executables (the WarpOS build, the Mac applications).
+skip-file   paybackwos.exe
+skip-file   payback (os 9)
+skip-file   payback (os x)
+
+# The two Mac films the game does not play (`GetPaybackMovie` @ 100fcbc0
+# opens payback_high_mpeg1.mpg only).
+skip-file   payback_high_mpeg2.mpg
+skip-file   payback_low_mpeg1.mpg
+film        payback_high_mpeg1.mpg
+
+# Finder and Sherlock junk, the extractor's resource forks.
+skip-file   .ds_store
+skip-prefix .fbc
+skip-suffix .rsrc

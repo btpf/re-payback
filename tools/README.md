@@ -61,10 +61,11 @@ git-ignored `out/`, `analysis/` or `extracted/`, never into git.
 | `coverage.py` | `coverage.html`: every Mac function as a treemap box, coloured by how the port and the notes cite it |
 | `mac_differences.py` | `mac_differences.html`: the consolidated Mac-vs-Amiga report (embeds renders from `out/img/` when present; never commit it) |
 
-## `web/` and `dev/`
+## `web/`, `dist/` and `dev/`
 
 | Tool | Does |
 |---|---|
 | `web/build_web.sh` | the WebAssembly build into `web/dist/` (`docs/web.md`); cargo cache in `target/web` |
-| `web/pack_web_data.py` | packs your game data for the web build |
+| `web/pack_web_data.py` | packs your game data for the web build (the files of `crates/payback/data_files.txt`) |
+| `dist/stage_data.py DIR` | stages the game data the port reads into `DIR/data/amiga` and `DIR/data/mac` (incremental; hard links, `--copy`); `cargo build` does the same into `target/<profile>/` (`crates/payback/build.rs`) |
 | `dev/buildgate.sh CMD...` | runs CMD when one of `BUILDGATE_SLOTS` (3) build slots is free; for parallel agents |
