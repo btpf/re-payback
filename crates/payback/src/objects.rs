@@ -1264,6 +1264,27 @@ pub struct Scenery {
     pub rotation: u8,
     /// Model currently shown.
     pub model: usize,
+    /// Render height of the cube top it stands on (the model origin).
+    pub ground: f32,
+}
+
+/// How far (render units) scenery turned by `rot` must be raised so that
+/// no vertex is below its origin. The original draws scenery at its cube
+/// top, after that cube, in painter's order (Mac `DrawMap` @ 1005a260
+/// passes `height << 4` to `DrawScenery`, no offset), so a model reaching
+/// below its origin still shows whole over the ground: the tumbling `Info`
+/// sign (z ±8, y ±28, centred on the origin) and the `Briefcase` (z ±6).
+/// The port's depth test would cut those parts off; lifting by the depth
+/// they reach keeps them visible (port approximation: a slightly nearer
+/// projection than the original's).
+fn sunk_lift(model: &LoadedModel, rot: Quat) -> f32 {
+    let low = model
+        .obj
+        .vertices
+        .iter()
+        .map(|v| (rot * Vec3::from_array(static_vertex(v))).y)
+        .fold(0.0f32, f32::min);
+    -low
 }
 
 /// Scenery ids that animate (`FUN_01049374` scenery pass).
@@ -1365,6 +1386,7 @@ fn animate_scenery(
                         .tumble
                         .map(|t| t as f32 / 5760.0 * std::f32::consts::TAU);
                     rot = rot * Quat::from_rotation_x(yz) * Quat::from_rotation_z(xz);
+                    tf.translation.y = sc.ground + sunk_lift(library.model(sc.model), rot);
                 }
                 tf.rotation = rot;
                 continue;
@@ -1708,18 +1730,20 @@ fn spawn_one(
     let mesh = library.model(model).mesh.clone();
     // Scenery stands on its cube's top; heading = rotation * 22.5 angle
     // units (rendering.md §0).
-    let h = city.square_cubes(x, y)[level].top_at(0.5, 0.5);
+    let ground = city.square_cubes(x, y)[level].top_at(0.5, 0.5) / H_PER_SQUARE;
+    let rot = heading_to_render(cube.rotation as f32 * 22.5);
+    let lift = sunk_lift(library.model(model), rot);
     let e = commands
         .spawn((
             Mesh3d(mesh),
             MeshMaterial3d(library.material.clone()),
-            Transform::from_xyz(x as f32 + 0.5, h / H_PER_SQUARE, y as f32 + 0.5)
-                .with_rotation(heading_to_render(cube.rotation as f32 * 22.5)),
+            Transform::from_xyz(x as f32 + 0.5, ground + lift, y as f32 + 0.5).with_rotation(rot),
             Scenery {
                 id: cube.scenery,
                 special: cube.special,
                 rotation: cube.rotation,
                 model,
+                ground,
             },
             LevelEntity,
         ))

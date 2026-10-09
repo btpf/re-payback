@@ -19,6 +19,12 @@
 //! - Every point moves by `(z_ground − z + K)/4` in +x and +y, K = 0x80
 //!   for people, helicopters and the RC car (`+0x8160`), 0x200 for other
 //!   vehicles: shadows fall to the south-east and grow with height.
+//! - `DrawShadow` returns for objects in state 6 and for those with both
+//!   `+0x81a` and `+0x818` set: the shots that fly straight. People
+//!   (`do_Person` @ 1013fbd0) and vehicles (`DoVehicleFire` @ 10070c20)
+//!   set both on every bullet, pellet, petrol drop and missile they fire,
+//!   and `MoveObject_General` @ 1006e4f0 sets them again each tick for
+//!   those models; grenades and bombs fall under gravity and keep theirs.
 //! - Scenery, by day only (`GetObjectNight() == 0`): every face of the
 //!   model flattened onto the ground of its cube, each vertex moved by
 //!   −z/4 in +x and +y (z up is negative), the slot picked by the projected
@@ -34,8 +40,8 @@
 //! depth-tested, so an object hides its own shadow as in the painter's
 //! order. The table-1 subtraction `d − s` (palette values) becomes a
 //! darkening factor on the linear framebuffer, exact for a mid-grey
-//! ground (`shaders/shadows.wgsl`); table 2's −16 likewise. Not reproduced: the `+0x81a`/`+0x818`
-//! skip, the camera-depth cut of scenery shadows (`6000 < depth`),
+//! ground (`shaders/shadows.wgsl`); table 2's −16 likewise. Not reproduced:
+//! the camera-depth cut of scenery shadows (`6000 < depth`),
 //! scenery-shadow lines, the pickup spin (spinning pickups get no shadow),
 //! and the clone textures in hardware (the face texture's own mask is used,
 //! INFERRED to match).
@@ -45,6 +51,7 @@ use crate::data::GameData;
 use crate::level::LevelEntity;
 use crate::sim::driving::Drive;
 use crate::sim::people::Person;
+use crate::sim::combat::Projectile;
 use crate::sim::{Obj as SimObj, State, Trig, collide};
 use crate::vehicles::Vehicle;
 use crate::world::{City, H_PER_SQUARE, to_render};
@@ -331,14 +338,18 @@ fn object_shadows(
     city: Option<Res<City>>,
     trig: Option<Res<Trig>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    q: Query<(&SimObj, Option<&Person>, Option<&Vehicle>, Option<&Drive>), With<Mesh3d>>,
+    q: Query<(&SimObj, Option<&Person>, Option<&Vehicle>, Option<&Drive>, Option<&Projectile>), With<Mesh3d>>,
 ) {
     let (Some(assets), Some(library), Some(city), Some(trig)) = (assets, library, city, trig) else {
         return;
     };
     let mut tris = Tris::default();
-    for (obj, person, vehicle, drive) in &q {
+    for (obj, person, vehicle, drive, shot) in &q {
         if obj.state == State::Removed || obj.model >= library.models.len() {
+            continue;
+        }
+        // `+0x81a` and `+0x818` both set: a shot flying straight.
+        if shot.is_some_and(|p| !p.kind.gravity()) {
             continue;
         }
         let m = library.model(obj.model);
@@ -431,7 +442,9 @@ fn scenery_shadows(
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(assets.material.clone()),
-            Transform::from_translation(Vec3::Y * LIFT).with_rotation(tf.rotation.inverse()),
+            // On the ground under a lifted model (`sunk_lift`).
+            Transform::from_translation(Vec3::Y * (LIFT + sc.ground - tf.translation.y))
+                .with_rotation(tf.rotation.inverse()),
             ChildOf(e),
         ));
     }

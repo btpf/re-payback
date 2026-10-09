@@ -168,7 +168,7 @@ impl ProjectileKind {
         }
     }
 
-    fn gravity(self) -> bool {
+    pub fn gravity(self) -> bool {
         matches!(self, ProjectileKind::Grenade | ProjectileKind::Bomb)
     }
 }
