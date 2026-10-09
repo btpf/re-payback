@@ -83,7 +83,13 @@ Name = phrase `+0x493c` (Global phrases 2330 + n).
 | 26 | rocketcar_thrust2.obj | (2354) | default | animation frame |
 | 27 | vapour racer.obj | Vapour GT (2355) | default | |
 
-(*) The tank and the boat use `objects/weapons/petrol.obj` (OS4 `DAT_012a6754`) as their "door".
+(*) The tank and the boat use `objects/weapons/petrol.obj` (OS4 `DAT_012a6754`, Mac weapon table
+`_DAT_1017c4a0[1]`) as their "door". That model has six vertices and no faces, so their open door draws nothing
+(CONFIRMED: Mac `InitStructures` @ 1005ffb0, data). The door hinge `+0x48f4` (Mac `+0x8150`) is −max|X| for every
+model (`LoadStructure` @ 10074630) except the helicopter, −max|X|/3 (its max|X| is the rotor square's corner, the
+cabin is a third of that): the helicopter's default door hangs at the cabin (CONFIRMED, Mac and OS4 loaders). Only
+`+0x8fc` ≠ 0 draws it (`DrawObject` @ 10075880 tail); getting out (`GetOutVehicle`), a carjack and a cop's
+arrest open it, the driver closes it.
 
 Variant models outside the table: `police_red`/`police_blue` (OS4 `DAT_0114c720/71c`, base `DAT_0114c718`) and
 `policevan_red`/`_blue` (`DAT_0114c714/710`, base `DAT_0114c70c`). They have the same parameters. The light bar
@@ -639,6 +645,26 @@ Also in `CheckForCollisions` (C, Mac @ 1006a150), now in the port:
 ## 4. Special vehicles
 
 (See below.)
+
+### 4.1 Helicopter rotor (CONFIRMED: Mac `do_Other` @ 10146280, `DrawObject` @ 10075880; OS4 `FUN_010c101c`)
+
+`helicopter.obj` has one animated part: the `Blades` square (two mode-4 additive faces, vertices 13–16 tagged
+limbs 2, 1, 4, 3). There is no tail rotor; no other vehicle has animated vertices (the rocket car swaps whole
+models, the police cars swap light-bar models).
+
+* `do_Other` runs for every object not in state 6, each frame. With the model flag `+0x8186` it sets frame P
+  (`+0x1c`) = 0 and moves frame N (`+0x18`, [6]) by −2·ticks with the engine on (`+0x984`), else by
+  −((ticks >> 1) + 1), wrapped into 0..11. So the rotor always turns: slowly when parked or with the engine off
+  (1 frame per tick at 1–2 ticks a frame), twice as fast with it on. Speed and height play no part.
+* `DrawObject`, both frames ≠ −1 and `+0x8186` set: a vertex of limb l = 1..4 goes to angle
+  a = N·0x78 + (4 − l)·0x5a0 (12 frames = a quarter turn, the square's symmetry closes the loop), x = sin a·16,
+  y = cos a·16 (×16 units, i.e. 256 model units from the centre where the static corners are ~141), z unchanged.
+  With the burn timer `+0x81c` ≥ 1 all four go to (0, 0, z): a burning or burnt helicopter has no rotor.
+* The dent offsets (`+0x93a`) only apply on the static path (both frames −1), so the helicopter never looks
+  dented.
+
+Port: `objects.rs` `advance_rotors` (render-side phase per helicopter, fixed tick) and `pose_rotors` (rotation
+and horizontal scale of the model's additive overlay, which holds exactly the `Blades` faces).
 
 ---
 

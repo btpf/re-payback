@@ -1341,22 +1341,27 @@ impl Plugin for SceneryPlugin {
             .init_resource::<SceneryIndex>()
             .init_resource::<FlareOccluders>()
             .init_resource::<SceneryClock>()
+            .init_resource::<RotorPhases>()
             .add_message::<SetScenery>()
             .add_systems(FixedPostUpdate, apply_scenery_changes)
             .add_systems(
                 FixedUpdate,
-                (advance_clock, chimney_smoke).run_if(in_state(AppState::Playing)),
+                (advance_clock, advance_rotors, chimney_smoke).run_if(in_state(AppState::Playing)),
             )
-            .add_systems(OnExit(AppState::Playing), |mut c: ResMut<SceneryClock>| {
-                *c = SceneryClock::default();
-            })
+            .add_systems(
+                OnExit(AppState::Playing),
+                |mut c: ResMut<SceneryClock>, mut r: ResMut<RotorPhases>| {
+                    *c = SceneryClock::default();
+                    r.0.clear();
+                },
+            )
             .add_systems(
                 Update,
                 (follow_settings, animate_scenery, (vehicle_skins, vehicle_doors).chain(), sync_mode, mark_gamma),
             )
             .add_systems(
                 PostUpdate,
-                (sync_overlays, follow_owners)
+                (sync_overlays, pose_rotors, follow_owners)
                     .chain()
                     .after(crate::frame::SmoothSet)
                     .before(TransformSystems::Propagate),
@@ -1602,7 +1607,12 @@ fn vehicle_skins(
         let paint = usize::try_from(vehicle.colour).ok().filter(|&c| c < PAINTS.len());
         let burnt = obj.burn > 0 || forced.as_deref() == Some("burnt");
         let skin = if burnt { Skin::Burnt } else { Skin::Normal };
-        let dented = drive.is_some_and(|d| d.dented) || forced.as_deref().is_some_and(|f| f != "clean");
+        // The helicopter always takes the animated vertex path (its rotor
+        // phase is never -1 once `do_Other` has run), and `DrawObject`
+        // displaces dented vertices only on the static path (Mac
+        // `DrawObject` @ 10075880, `+0x93a` test): it never looks dented.
+        let dented = (drive.is_some_and(|d| d.dented) || forced.as_deref().is_some_and(|f| f != "clean"))
+            && vehicle.kind != crate::vehicles::kind::HELICOPTER;
         let dent = dented.then_some(&*rng);
         let h = library.variant_mesh(&mut meshes, obj.model, skin, dent, paint);
         if mesh.0 != h {
@@ -1622,6 +1632,15 @@ fn door_model(kind: usize) -> Option<&'static str> {
         Door::Taxi => "doors/taxi.obj",
         Door::Without => return None,
     })
+}
+
+/// Lateral distance of the door hinge from the centre line, ×16 units
+/// (`+0x8150` = −that). `LoadStructure` @ 10074630 sets −max|X|;
+/// `InitStructures` @ 1005ffb0 (OS4 `FUN_0104e13c`) divides the
+/// helicopter's max|X| (the rotor square's corner) by 3 first, so its door
+/// hangs at the cabin, not out at the rotor tip.
+fn door_hinge(kind: usize, radius: i32) -> i32 {
+    if kind == crate::vehicles::kind::HELICOPTER { radius / 3 } else { radius }
 }
 
 /// The open door of a vehicle (a [`Follow`] entity), if one is drawn. On
@@ -1662,7 +1681,7 @@ fn vehicle_doors(
             continue;
         };
         let shape = &library.model(obj.model).shape;
-        let lat = -shape.radius as f32 / 16.0;
+        let lat = -door_hinge(vehicle.kind, shape.radius) as f32 / 16.0;
         let fwd = crate::sim::boarding::door_y(vehicle.kind, shape.max_y) as f32 / 16.0;
         let sh = 2.0 / H_PER_SQUARE;
         let tf = Transform::from_xyz(lat * sh, 0.0, fwd * sh)
@@ -1687,6 +1706,71 @@ fn vehicle_doors(
                     ))
                     .id();
                 panel.0 = Some(child);
+            }
+        }
+    }
+}
+
+/// Helicopter rotor phase 0..11 per helicopter (the object's animation
+/// frame N, Mac `+0x18`, OS4 `[6]`; frame P `+0x1c` is held at 0). Only
+/// `DrawObject` reads it, so the port keeps it render-side.
+#[derive(Resource, Default)]
+pub struct RotorPhases(HashMap<Entity, i32>);
+
+/// `do_Other` @ 10146280 (every vehicle not in state 6, each frame):
+/// a helicopter's N −= 2·ticks with the engine on (`+0x984`, the port's
+/// `Vehicle::flying`), else (ticks >> 1) + 1, wrapped into 0..11. Per
+/// tick that is 2 and 1 (exact at 1–2 ticks a frame), so even a parked,
+/// empty helicopter turns its rotor slowly.
+fn advance_rotors(mut phases: ResMut<RotorPhases>, q: Query<(Entity, &SimObj, &Vehicle)>) {
+    phases.0.retain(|e, _| q.contains(*e));
+    for (e, obj, v) in &q {
+        if v.kind != crate::vehicles::kind::HELICOPTER || obj.state == crate::sim::State::Removed {
+            continue;
+        }
+        let n = phases.0.entry(e).or_insert(0);
+        *n = (*n - if v.flying { 2 } else { 1 }).rem_euclid(12);
+    }
+}
+
+/// Turn the helicopter's rotor (Mac `DrawObject` @ 10075880 with
+/// `+0x8186` set, OS4 `FUN_010c101c` `+0x492a`): each blade-square corner
+/// of limb l = 1..4 is placed at angle a = N·0x78 + (4 − l)·0x5a0 (a
+/// quarter turn per 12 frames; the square's 4-fold symmetry makes it
+/// seamless), x = sin a·16, y = cos a·16 in ×16 units, i.e. 256 model
+/// units out, its own z kept; burning (`+0x81c` ≥ 1) puts every corner at
+/// the centre and the rotor vanishes. The `Blades` square is the only
+/// limb-tagged part and the only additive face of the model, so this is
+/// a rotation and horizontal scale of the model's additive overlay.
+fn pose_rotors(
+    library: Option<Res<ObjectLibrary>>,
+    phases: Res<RotorPhases>,
+    helis: Query<(Entity, &SimObj, &Vehicle, &OverlayChildren)>,
+    mut parts: Query<(&mut Follow, &MeshMaterial3d<ObjectMaterial>)>,
+) {
+    let Some(library) = library else { return };
+    for (e, obj, v, children) in &helis {
+        if v.kind != crate::vehicles::kind::HELICOPTER {
+            continue;
+        }
+        let model = &library.model(obj.model).obj;
+        // A blade corner's static angle and radius (model units).
+        let Some(c) = model.vertices.iter().find(|c| (1..=4).contains(&c.limb)) else {
+            continue;
+        };
+        let (x, y) = (c.x as f32, c.y as f32);
+        let r = x.hypot(y).max(1.0);
+        let still = x.atan2(y) * crate::world::ANGLE_TURN / std::f32::consts::TAU;
+        let n = phases.0.get(&e).copied().unwrap_or(0);
+        let a = (n * 0x78 + (4 - c.limb) * 0x5a0) as f32;
+        let k = if obj.burn > 0 { 0.0 } else { 256.0 / r };
+        let local = Transform::from_rotation(heading_to_render(a - still)).with_scale(Vec3::new(k, 1.0, k));
+        for &child in &children.0 {
+            if let Ok((mut f, m)) = parts.get_mut(child)
+                && m.0 == library.additive
+                && f.local != local
+            {
+                f.local = local;
             }
         }
     }

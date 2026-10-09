@@ -1125,7 +1125,13 @@ Additive blending happens in linear colour rather than palette space.
   (`+0x8158`) at the hinge (`+0x8150` = −max|X|, `+0x8154` = door position) with heading
   + `+0x418`, the vehicle's depth, pitch and roll, paint (`+0x8a4/8a8`) and burn timer
   (`+0x81c`), not its dents. No offset: the Mac's raised cars keep the ±18 default
-  door. Port: `objects.rs` `vehicle_doors` (child entity).
+  door. Port: `objects.rs` `vehicle_doors` (child entity). The hinge is −max|X| except
+  on the helicopter, −max|X|/3 (`InitStructures` @ 1005ffb0); the tank's and boat's
+  door model is the faceless `petrol.obj`, so nothing shows (vehicles.md §1.1).
+* **Helicopter rotor.** `+0x8186` models with both animation frames set place the limb
+  1..4 vertices (the `Blades` square) at angle N·0x78 + (4 − l)·0x5a0, radius 256
+  model units, and at the centre while burning; N turns in `do_Other` (vehicles.md
+  §4.1). Port: `objects.rs` `pose_rotors`.
 * **Shadows** (`DrawShadow` @ 1007f7d0, `DrawSceneryShadow` @ 1007ea20, called from the
   `DrawMap` square loops after each layer's effects; object shadows once per frame,
   flag `+0x816`): details and the port in `objects/shadows.rs`. Scenery shadows are
