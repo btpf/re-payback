@@ -1,11 +1,11 @@
 //! Frame pacing and presentation (port-added; the originals render one
-//! frame per game loop iteration, docs/research.md "Frame pacing").
+//! frame per game loop iteration, docs/port_engineering.md "Frame pacing").
 //!
 //! The Mac main loop (`amiga_levelloop__Fv` @ 10100f50) and OS4
 //! (`FUN_0110761c`) run `clamp(elapsed 30 Hz ticks, 1, 5)` game ticks and
 //! then draw one frame, so in game at most 30 frames a second are shown and
 //! every frame shows a new state; there is no interpolation and no vsync
-//! request (`aglSetInteger` is not imported; `analysis/mac/audio_platform.md`
+//! request (`aglSetInteger` is not imported; `docs/re/mac/audio_platform.md`
 //! §4.1). The port draws at the display's rate, so it adds:
 //!
 //! - **Smooth motion** ([`Settings::smooth_motion`], Graphics options, on

@@ -7,9 +7,9 @@
 //! scenery test (`AddCollideObj` @ 10055c70). The Amiga builds have the
 //! same code: 68k `FUN_000e3a58` (vehicle branch), `FUN_000a197a`,
 //! `FUN_00044f82`, `FUN_000a1758`, `FUN_000a241c`; OS4 `FUN_0105f594`
-//! (`analysis/vehicles_os4/main.c`), `FUN_0105b9ec`, `FUN_01070868`,
+//! (`analysis/ghidra_os4/long_timeout.c`), `FUN_0105b9ec`, `FUN_01070868`,
 //! `FUN_010cd198`, `FUN_010cbc7c`, `FUN_010cc288`, `FUN_010ccc5c`.
-//! docs/re/vehicles.md §2 and analysis/mac/driving_review.md.
+//! docs/re/vehicles.md §2 and docs/re/reviews/2026-10-08-driving.md.
 //!
 //! Per tick: the car moves by last tick's velocity (gravity first), hits
 //! walls and bounces; then, from the virtual stick, throttle and brake

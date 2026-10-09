@@ -17,9 +17,10 @@ AI steering atan calls 0x1064050..0x1065750; cop drop-off `FUN_01052714` at 0x10
 Everything else is cross-checked in both builds.
 
 Each fact is tagged **[C]** CONFIRMED (read in code, or verified against the data) or **[I]**
-INFERRED. Scratch notes with more line references are in
-`analysis/combat/notes_{weapons,police,effects}.md`. The route verifier is
-`analysis/combat/route_check.py`.
+INFERRED. The working notes behind this file, with more line references, are
+[`notes/combat_weapons.md`](notes/combat_weapons.md), [`notes/combat_police.md`](notes/combat_police.md),
+[`notes/combat_effects.md`](notes/combat_effects.md) and [`notes/route_score_draft.md`](notes/route_score_draft.md).
+The route verifier is `tools/re/route_check.py`.
 
 ## 0. Conventions
 
@@ -178,7 +179,7 @@ So the metric is hop count (first link wins ties), but the visited stamps `b·4 
 shared by every source `a` and never reset, and the target is only recognised when first
 expanded: a stamp left by an earlier search hides nodes (sometimes `b` itself) from a later
 one. That is why 0.01 % of the pairs are not shortest paths (map0 12, map1 15, map2 30;
-`analysis/combat/route_check.py` compared plain BFS). Port:
+`tools/re/route_check.py` compared plain BFS). Port:
 `payback_formats::Route::calculate_routing`, checked against map 0 in the tests; the game
 still loads the shipped tables. Every node reaches every other node in the shipped maps.
 

@@ -1,6 +1,6 @@
 //! Sound effects, reimplementing the original software mixer's behaviour
 //! (docs/re/frontend_audio.md, OS4 `FUN_01007290` / `FUN_0100815c`; Mac
-//! `DoAudio` @ 100f32f0 / `AddSound` @ 100f4000, analysis/mac/audio_platform.md).
+//! `DoAudio` @ 100f32f0 / `AddSound` @ 100f4000, docs/re/mac/audio_platform.md).
 //!
 //! The original mixes at 22050 Hz; every AddSound call gives the playback
 //! rate in Hz (kept as a rate byte, Hz / 200) and a volume. Positional

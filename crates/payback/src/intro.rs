@@ -1,5 +1,5 @@
 //! Intro video player: the Amiga FLC or the Mac MPEG film
-//! (docs/re/frontend_audio.md §5, analysis/mac/audio_platform.md §3).
+//! (docs/re/frontend_audio.md §5, docs/re/mac/audio_platform.md §3).
 //!
 //! Amiga: `Videos/intro.video` + `intro.audio` (68k `FUN_00010364` load,
 //! `FUN_000106c0` play), 15 frames per second locked to 1470-byte chunks of

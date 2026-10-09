@@ -7,7 +7,7 @@ case-insensitive; the game refers to files in lower case.
 Status: **confirmed** = verified against code (address given) and every
 shipped file; **observed** = consistent with the data but not traced in code.
 Details of how the renderer and the simulation use these fields are in
-`docs/re/*.md` (index in `docs/research.md`).
+`docs/re/*.md` (index in `docs/README.md`).
 
 ## Maps — `Maps/<n>.map`, `UserMaps/*.map` (confirmed)
 

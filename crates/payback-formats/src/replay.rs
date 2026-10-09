@@ -340,7 +340,7 @@ impl Replay {
 /// The Mac's replay record stream (CONFIRMED: `AddFrame` @ 100fa5d0,
 /// `GetAbbreviatedVals` @ 100fa2b0, `GetNextFrame` @ 100f9ea0, `WriteBits`
 /// / `ReadBits` @ 100f9700 / 100f97b0, `TidyMovie` @ 100faaa0;
-/// analysis/mac/scratch_followup/input_movie.md §1).
+/// docs/re/mac/input_movie.md §1).
 ///
 /// The words are the Amiga's (`FUN_01051a10`): flags in bits 14..8, the
 /// weapon in 7..3 (10 = none), ticks in 2..0. Bits are written LSB first

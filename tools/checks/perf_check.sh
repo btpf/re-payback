@@ -4,15 +4,15 @@
 # the limits after a 5 s warm-up (frame p95 / max, main-app CPU time p95).
 # Catches regressions such as a system rebuilding something every tick.
 #
-# usage: tools/perf_check.sh [seconds] [game args...]
-#   e.g. tools/perf_check.sh 30 --map 0
-#        tools/perf_check.sh 30 --map 2 --level 1 --hardware
+# usage: tools/checks/perf_check.sh [seconds] [game args...]
+#   e.g. tools/checks/perf_check.sh 30 --map 0
+#        tools/checks/perf_check.sh 30 --map 2 --level 1 --hardware
 # env:   PAYBACK_EXE   the game (default target/release/payback[.exe], else
 #                      target/debug/...; debug builds need looser limits)
 #        PAYBACK_PERF_MAX_P95, PAYBACK_PERF_MAX_FRAME, PAYBACK_PERF_MAX_MAIN
 #                      limits in ms (defaults 25, 150, 16)
 # Exit status: 0 PASS, 1 FAIL, 2 the game did not run.
-cd "$(dirname "$0")/.." || exit 2
+cd "$(dirname "$0")/../.." || exit 2
 if [ -z "$PAYBACK_EXE" ]; then
     for p in target/release/payback.exe target/release/payback target/debug/payback.exe target/debug/payback; do
         [ -f "$p" ] && { PAYBACK_EXE=$p; break; }

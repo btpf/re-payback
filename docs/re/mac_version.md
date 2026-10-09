@@ -11,7 +11,7 @@ an additional cross-reference.
 
 - `Payback Game + Updates/PaybackMac.toast`: a classic **HFS** volume (`BD`
   signature at 0x400, volume name `PaybackMac`), not ISO 9660.
-- `python tools/extract_mac.py` (needs `pip install machfs`) writes
+- `python tools/extract/extract_mac.py` (needs `pip install machfs`) writes
   `extracted/mac/`: data forks under their HFS paths, resource forks as
   `<name>.rsrc`, and type/creator codes in `extracted/mac/_finder_info.tsv`.
 - Layout: `Payback/` holds the game (`Payback (OS 9)`, `Payback (OS X)`, the
@@ -37,22 +37,13 @@ used: `OpenScreenTags`, `LoadRGB32`, `MatchFirst`, `WritePixelArray8`,
 
 ## Decompiling
 
-Ghidra headless in the `payback-re` Docker image (see `Dockerfile`). The PEF
-loader picks the wrong language by default (`PowerPC:BE:64:VLE`), so force
-32-bit PowerPC. Run `MacJumpTables.java` before `ExportAll.java`:
-
-```sh
-docker run -d --rm -v "D:/Payback Reverse Engineered:/work/impl" payback-re sh -c   "mkdir -p /tmp/proj && analyzeHeadless /tmp/proj p_macx    -import '/work/impl/extracted/mac/Payback/Payback (OS X)'    -processor PowerPC:BE:32:default -scriptPath /work/impl/tools/ghidra    -postScript MacJumpTables.java tsv=/work/impl/analysis/ghidra_macx/jumptables.tsv    -postScript ExportAll.java /work/impl/analysis/ghidra_macx    > /work/impl/analysis/ghidra_macx.log 2>&1"
-```
-
-For the OS 9 build, use `Payback (OS 9)`, `p_mac9` and `ghidra_mac9`; for the map
-editor, `MapEditor (OS X)`, `p_mapedx` and `ghidra_mapedx` (names kept too: routing,
-`.textures`, thumbnail and minimap writers, `LoadMap`/`SaveMap`; about a minute). Each
-build takes about 5 minutes to analyse and 5 minutes to export. To iterate on a
-script without analysing again, import once into a Docker volume
-(`-v payback_ghidra_proj:/proj`, `analyzeHeadless /proj p_macx -import ...`), then
-run `analyzeHeadless /proj p_macx -process -readOnly -noanalysis -scriptPath ...
--postScript ...`.
+`tools/ghidra/decompile_all.sh macx mac9 mapedx` regenerates the three Mac exports
+(`analysis/ghidra_macx`, `ghidra_mac9`, `ghidra_mapedx`; recipe and options in
+[`../decompiling.md`](../decompiling.md)). The PEF loader picks the wrong language by default
+(`PowerPC:BE:64:VLE`), so the script forces 32-bit PowerPC, and it runs `MacJumpTables.java`
+before `ExportAll.java`. The map editor keeps its names too (routing, `.textures`, thumbnail
+and minimap writers, `LoadMap`/`SaveMap`). Each build takes about 5 minutes to analyse and
+5 minutes to export.
 
 **Jump tables (`tools/ghidra/MacJumpTables.java`).** CodeWarrior compiles a
 `switch` into a table that it reaches through the TOC. The sequence is
@@ -84,12 +75,12 @@ form, the table address, the count and the targets in index order.
 
 Output: `analysis/ghidra_macx/` and `analysis/ghidra_mac9/`, each with
 `decompiled.c`, `functions.tsv` and `strings.tsv`, in the same format as the Amiga
-exports, plus `jumptables.tsv`. The exports from before the jump-table pass are
-kept as `analysis/ghidra_macx_v1/` and `analysis/ghidra_mac9_v1/`.
+exports, plus `jumptables.tsv`. (The exports from before the jump-table pass were
+dropped; skipping `MacJumpTables.java` reproduces them.)
 `ExportAll.java` now gives each function 300 s to decompile, up from 60 s,
 because the level scripts are large.
 
-## Data differences (first pass, `analysis/mac_datadiff.py`)
+## Data differences (first pass, `tools/re/mac_datadiff.py`)
 
 Compared against the merged Amiga data (`extracted/game`), by directory: same /
 differ / Mac only / Amiga only.
@@ -162,7 +153,7 @@ required root and the Mac `Payback` folder as an optional second one.
 ## Findings
 
 The full comparison report is `mac_differences.html` in the repository root
-(git-ignored, local only; regenerate with `python analysis/mac/build_report.py`).
+(git-ignored, local only; regenerate with `python tools/reports/mac_differences.py`).
 Headlines:
 - The Mac game code is the same C source as the Amiga OS4 build.
 - There's no higher frame rate: a 30 Hz tick, a 30 fps cap in game and 60 fps
@@ -174,7 +165,7 @@ Headlines:
 - 225 cube textures were repainted.
 - `Alpha.256` is rebuilt from the final palette.
 - A 72 s MPEG intro film.
-- The sound samples are identical. Per-area research notes are in `analysis/mac/*.md`.
+- The sound samples are identical. Per-area research notes are in `docs/re/mac/*.md`.
 Confirmed facts get merged into the relevant `docs/re/*.md` notes, citing the
 Mac function name and address (e.g. `drawCubeTop_None` @ `100c8160`).
 

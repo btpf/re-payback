@@ -450,7 +450,7 @@ after LoadMap:
 
    The effect-light jitter (`DoEffectsLighting` @ 100a82b0 on the Mac) is drawn from the
    cosmetic generator `random3`, B first, then G, then R (the Mac and 68k builds evaluate
-   arguments last first; OS4 first to last, the odd one out; analysis/mac/followup.md). The burning-object and petrol-bomb jitter is drawn from the game's
+   arguments last first; OS4 first to last, the odd one out; docs/re/mac/followup.md). The burning-object and petrol-bomb jitter is drawn from the game's
    generator inside the object update in both builds; the port draws it from the
    cosmetic generator as well (spread, B, G, R, then the z, y, x offsets).
 
@@ -565,7 +565,7 @@ rain: PlaySound(61 Rain, loop, vol 0xff, 14000 Hz, non-positional)
     list 3)` at the old drop's x, y. These random numbers come from `FUN_0103acc4`
     (`random3`). Argument order: the Mac and the 68k evaluate a call's random arguments
     last first, OS4 first to last (so OS4's order is the exception, not a Mac change;
-    analysis/mac/followup.md). `AddEffect` arguments 9-11 match OS4 at all 112 call
+    docs/re/mac/followup.md). `AddEffect` arguments 9-11 match OS4 at all 112 call
     sites. The port draws last first everywhere.
 * Drawing (software): type 0xC is an ordinary sprite (Dust through table 0, mirrored);
   type 0xD is a **1-pixel line** (`FUN_010360fc`) from the projection of `pos − v` to
@@ -1243,8 +1243,8 @@ drawn by `hud/mod.rs`).
 
 The launcher (PaybackSetup, config field 19) starts the OS4 build with
 `DAT_0114c7d8 != 0`: every renderer function then takes its Warp3D branch. Sources:
-`analysis/ghidra_os4/decompiled.c`; the scratch extracts in `analysis/scratch/hw/`
-(city, lighting) and `analysis/scratch/hw2/` (effects, objects, front end).
+`analysis/ghidra_os4/decompiled.c` (the per-area extracts used while writing this
+section were local working files).
 
 ### 11.1 The Warp3D layer (`API_3D_*`, 0x01001eb8–0x01005000)
 
@@ -1420,7 +1420,7 @@ Approximate or not done:
   depth) with a 4×4 ordered dither (state 0x80000 / `GL_DITHER` is on; the pattern is
   INFERRED) once, before the HUD (`resolve.wgsl`), not after every primitive;
 * textures are filtered inside their own atlas tile: the effect sprites (each 64×64
-  sprite or quarter its own texture, `GL_REPEAT` on the Mac, analysis/mac/rendering.md
+  sprite or quarter its own texture, `GL_REPEAT` on the Mac, docs/re/mac/rendering.md
   §5) wrap within the tile; object textures are clamped half a texel inside their
   256×128 slot (clamp rather than repeat at the very edge); tree-shadow clones wrap;
 * fades are hudplat's (`frontend/`): still drawn as in software;

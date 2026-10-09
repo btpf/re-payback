@@ -11,7 +11,7 @@
 // EFFECT_HARDWARE: the Warp3D look (`effects.rs`), blend set per material;
 // every 64x64 sprite (and every quarter of a 128x128 one) is its own
 // texture there, filtered bilinearly with GL_REPEAT wrapping (Mac
-// `W3D_AllocTexObj` on OpenGL, analysis/mac/rendering.md §5), so the
+// `W3D_AllocTexObj` on OpenGL, docs/re/mac/rendering.md §5), so the
 // filter wraps inside the atlas tile instead of reading its neighbours.
 // GAMMA_TARGET (the game views): the output is gamma-encoded palette RGB,
 // so the blends add, subtract and average the palette bytes as the

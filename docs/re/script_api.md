@@ -476,8 +476,8 @@ All CONFIRMED (2026-10-09) from the CD-release `Payback.exe`'s own dispatcher `D
 Mac/U7 level code; stub addresses are script00's (01, 10, 21 share them; 11 and 20 are
 shifted, e.g. 0x0d at `0x106da`). Code 0x08 takes (font, phrase); CD `ShowMessage` 2022
 also plays 0x1a and raises the multiplier, 2028 plays 0x19. CD object offsets differ
-(script id `+0x472`, map cell `x·0x3300 + y·0x66 + cube·0x22`). Scratch:
-`analysis/scratch/testsre/re6/`.
+(script id `+0x472`, map cell `x·0x3300 + y·0x66 + cube·0x22`). (The call listings behind
+this comparison were local working files.)
 
 Game → script messages: type 1 connect, type 2 goodbye, event messages carry the event
 number in `+0x16`.

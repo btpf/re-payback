@@ -1,15 +1,15 @@
 #!/bin/sh
 # Replay determinism check: record a scripted run, play it back, compare the
 # world hashes logged every 50 ticks (`replay.rs`). Compares the port with
-# itself only; see tools/replay_check.py (same check, cross-platform, with
+# itself only; see tools/checks/replay_check.py (same check, cross-platform, with
 # the standard --suite of story, rampage, multiplayer and cheat cases).
 #
-# usage: tools/replay_check.sh <name> <ticks> [record args...]
-#   e.g. tools/replay_check.sh story 1000 --map 0 --seed 1234
+# usage: tools/checks/replay_check.sh <name> <ticks> [record args...]
+#   e.g. tools/checks/replay_check.sh story 1000 --map 0 --seed 1234
 # env:   PAYBACK_EXE   the game (default target/debug/payback[.exe])
 #        REPLAY_OUT    output directory (default target/replay_check)
 # Exit status: 0 MATCH, 1 DIFFER, 2 a run failed.
-cd "$(dirname "$0")/.." || exit 2
+cd "$(dirname "$0")/../.." || exit 2
 if [ -z "$PAYBACK_EXE" ]; then
     PAYBACK_EXE=target/debug/payback.exe
     [ -f "$PAYBACK_EXE" ] || PAYBACK_EXE=target/debug/payback

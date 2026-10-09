@@ -667,8 +667,8 @@ has none). `Mission_Shutdown` (`0xca322`, only for city 0 / level 1): `Actor_Rel
 
 ## 6. Differences from the legacy CD script (`Maps/01.script`)
 
-Compared call-by-call (argument reconstruction of `script01:0x11704`, helper script
-`analysis/m01/cdcalls.py`, output `analysis/m01/cdcalls.txt`). **The mission logic,
+Compared call-by-call (argument reconstruction of `script01:0x11704`, with a one-off script that
+folds the stack-slot stores of the decompile into call arguments; its listing was a local working file). **The mission logic,
 events, coordinates, phrases and rewards are identical.** Differences are structural only:
 
 * CD: blocking `GetEvent()` loop; global events 0x834/0x835/0x836/0x898 fall through into

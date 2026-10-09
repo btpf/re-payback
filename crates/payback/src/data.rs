@@ -13,7 +13,7 @@
 //! cube textures at the next level load, the title screen at the next
 //! start, the blood slot at once.
 //!
-//! Mac data quirks handled here (`analysis/mac/assets.md` §14):
+//! Mac data quirks handled here (`docs/re/mac/assets.md` §14):
 //! - the texture lists are `CubeTextureList.txt` / `CubeTextureRemapList.txt`
 //!   (Mac OS X hides dot-files; the Mac game opens those names, strings at
 //!   `1018a4f9` / `10193015`), byte-identical to the Amiga dot-files;
@@ -76,13 +76,13 @@ impl GameData {
         }
         Err(
             "Payback data not found. Set PAYBACK_DATA or pass --data <dir> pointing at an \
-             install containing Payback.exe (run `python tools/extract.py` to unpack the CD)."
+             install containing Payback.exe (run `python tools/extract/extract.py` to unpack the CD)."
                 .into(),
         )
     }
 
     /// The Mac data folder (`Payback` in `PaybackMac.toast`, extracted by
-    /// `tools/extract_mac.py`), if there is one.
+    /// `tools/extract/extract_mac.py`), if there is one.
     pub fn locate_mac() -> Option<PathBuf> {
         let from_args = crate::args()
             .skip_while(|a| a != "--mac-data")

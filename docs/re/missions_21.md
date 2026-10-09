@@ -7,11 +7,10 @@ API and trigger names follow `docs/re/script_api.md`. Coordinates are world unit
 map squares given as `(x>>11, y>>11)`. Map = `Maps/2.map`. North is −y: phrases that say
 "North/South-West/..." agree with this, except the one noted in §8.
 
-How this was produced: `analysis/missions21/trace68k.py` disassembles the handler
+How this was produced: `tools/re/trace68k.py` disassembles the handler
 recursively and tracks the arguments each call pushes on the stack.
-Its output is `analysis/missions21/handler_c79cc.txt` (full) and `handler_c79cc_short.txt`
-(calls only). `; from X top=[...]` lines show the stack top on each branch into a shared tail.
-`analysis/missions21/rng.py <listing> <a> <b>` prints an address range from a listing.
+Run it as `python tools/re/trace68k.py 68k c79cc` (the full listing and a calls-only version
+were local working files, `handler_c79cc*.txt`). `; from X top=[...]` lines show the stack top on each branch into a shared tail.
 All argument values below were taken from this trace and checked against
 the OS4 decompile (`0x010df934`).
 

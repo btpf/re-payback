@@ -4,7 +4,7 @@
 //! (`wasm32`, docs/web.md) there is no file system:
 //! - the game data is a read-only in-memory pack that `web/index.html`
 //!   fetches (`data/payback.pak` + `data/payback.json`, written by
-//!   `tools/pack_web_data.py`) and hands over with [`vfs_load`] before the
+//!   `tools/web/pack_web_data.py`) and hands over with [`vfs_load`] before the
 //!   game starts; its files live under `data/game/` (Amiga) and
 //!   `data/mac/` (Mac);
 //! - everything under [`SAVES`] (`frontend::progress::saves_dir`) is kept in

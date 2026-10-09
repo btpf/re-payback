@@ -211,7 +211,7 @@ impl Rgba {
 }
 
 /// A resource from a classic Mac resource fork (the `.rsrc` files written
-/// by `tools/extract_mac.py`): the data of `kind`/`id`, if present.
+/// by `tools/extract/extract_mac.py`): the data of `kind`/`id`, if present.
 pub fn resource<'a>(fork: &'a [u8], kind: &[u8; 4], id: i16) -> Option<&'a [u8]> {
     let be32 = |p: usize| fork.get(p..p + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
     let be16 = |p: usize| fork.get(p..p + 2).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize);

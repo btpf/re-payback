@@ -25,8 +25,8 @@ Map: city 1 → `Maps/1.map`. CONFIRMED by phone positions: the map has phones (
 special *n*) 10–13 at squares (111,107..110) and 14–17 at (31,115..118). Those are exactly the
 phone numbers this script uses.
 
-Working files: `analysis/m11/` (call listings made with `analysis/m11/calls68k.py`, a
-symbolic-stack 68k call tracker that follows switch tables).
+Call listings were made with `tools/re/calls68k.py`, a symbolic-stack 68k call tracker
+(`tools/re/trace68k.py` follows switch tables); the listings themselves were local working files.
 
 ## 0. Level globals
 

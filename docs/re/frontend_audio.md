@@ -7,16 +7,17 @@ Addresses are in the AmigaOS4 PPC build (`analysis/ghidra_os4/decompiled.c`) unl
 marked "68k". **CONFIRMED** = read in code and/or verified against every shipped file;
 **INFERRED** = consistent with the data/code but not fully traced. Abbreviated (C) / (I).
 
-Scripts written for this document (all in `analysis/`):
+Scripts written for this document (in `tools/re/`; renders go to the git-ignored `out/img/`):
 
 | Script | Purpose |
 |---|---|
-| `os4mem.py` | read bytes/strings from the OS4 ELF by virtual address |
-| `render_icons.py` | renders every `Icons/*` file to `analysis/img/icons/*.png` + contact sheets |
-| `fontmap.py`, `fontmap2.py` | dump the font glyph-slot tables built by `FUN_0100e088`/`FUN_0100f450` |
+| `os4bin.py` | read bytes/strings from the OS4 ELF by virtual address |
+| `render_icons.py` | renders every `Icons/*` file to `out/img/icons/*.png` + contact sheets |
 | `intro_video.py` | FLC + raw-PCM intro decoder (§5) |
-| `scratch/replay_decode.py` | replay decoder (§3.8) |
-| `scratch/hud_mock.py` | HUD mock-up at 320×256 (§2) |
+| `replay_decode.py` | replay decoder (§3.8) |
+| `hud_mock.py` | HUD mock-up at 320×256 (§2) |
+
+The font glyph-slot dumps (`fontmap.py`, tables built by `FUN_0100e088`/`FUN_0100f450`) were one-off working scripts and are not kept.
 
 
 ## 1. Icons and fonts — `Icons/*`
@@ -24,12 +25,12 @@ Scripts written for this document (all in `analysis/`):
 ### 1.1 File format (CONFIRMED)
 
 Every file in `Icons/` (except `TitleScreen.w3d`) is **headerless 8-bit chunky,
-palette-indexed** (game palette, `analysis/palette.bin`), row-major top-to-bottom.
+palette-indexed** (game palette, read from `Payback.exe` like `payback_formats::palette`), row-major top-to-bottom.
 Rows are padded to a **stride of `ceil(w/16)*16` bytes** (Amiga 16-pixel words), so
 `filesize = stride × h`. **Colour 0 is transparent.** The dimensions are *not* in the
 file; they are hard-coded at the call sites in `FUN_010138dc` (front-end/HUD asset
 loader) and `FUN_0104feb0` (screen setup, `Loading`). Verified for every shipped icon:
-all bytes beyond column `w` are zero (`render_icons.py`; output `analysis/img/icons/`).
+all bytes beyond column `w` are zero (`render_icons.py`; output `out/img/icons/`).
 
 `LoadIcon` = `FUN_0100d3c4(out, path, w, h, filesize)`: allocates `w*h`, reads
 `filesize` bytes, `stride = filesize / h`, copies the `w×h` rectangle; returns a
@@ -82,7 +83,7 @@ In software mode the title picture is copied into a back buffer and remapped thr
 the menu background (`FUN_010138dc`, end). `FadeDarken` / `FadeDarken2`
 (`FUN_0103500c`) are effect tables created next to it.
 
-Contact sheets: `analysis/img/icons/sheet_*.png`, `sheet_misc.png`.
+Contact sheets: `out/img/icons/sheet_*.png`, `sheet_misc.png`.
 
 ### 1.3 Font naming and character mapping (CONFIRMED)
 
@@ -112,7 +113,7 @@ Loader for Big: `FUN_0100e088(prefix, font, w, h, size)`; for You/Them:
   and `£` (0xA3) are drawn with the `?` glyph. The port (`hud/icons.rs`) does the same.
 * `You.c0`..`You.c11` → control codes **1..12**: controller-button symbols for control
   hints — c0–c3 arrows left/up/right/down, c4–c7 PlayStation-style ✕ □ ○ △, c8–c11 CD32
-  red/yellow/blue/green buttons (`analysis/img/icons/sheet_you_c.png`). CONFIRMED by the key-name
+  red/yellow/blue/green buttons (`out/img/icons/sheet_you_c.png`). CONFIRMED by the key-name
   code `FUN_0103c690` / `FUN_0103d7b0` (lowlevel JPF bits): PSX 0x106 → 5 ✕, 0x108 → 6 □,
   0x107 → 7 ○, 0x109 → 8 △; CD32 0x11D Red → 9, 0x120 Yellow → 10, 0x11F Blue → 11,
   0x11E Green → 12; Play/Reverse/Forward use phrases 1510–1512. Produced only for key names in
@@ -132,8 +133,8 @@ Loader for Big: `FUN_0100e088(prefix, font, w, h, size)`; for You/Them:
 ## 2. In-game HUD
 
 Main routine `FUN_01019bd8` (68k `FUN_00024a3e`), called from the frame renderer
-`FUN_0105bd98`. Mock-up of all elements at 320×256: `analysis/img/hud_mock_320x256.png`
-(`analysis/scratch/hud_mock.py`); per-icon renders in `analysis/img/hud/`.
+`FUN_0105bd98`. Mock-up of all elements at 320×256: `out/img/hud_mock_320x256.png`
+(`tools/re/hud_mock.py`); per-icon renders in `out/img/hud/`.
 
 ### 2.1 Coordinates, scaling, blending
 
@@ -549,7 +550,7 @@ player), eased scroll `p = (7p+target)>>3`, rows y = (50+10i)/200, key names 150
 prompt 2468 (0 = disable), Done 2148 / Cancel 2192. CD Audio Setup `FUN_0102dd30` (2131):
 Device 2140, Unit 2141, mode 2142+m at 80/200, Done at 170/200.
 
-### 3.8 Replays — `Replays/*` (C; decoder `analysis/scratch/replay_decode.py`)
+### 3.8 Replays — `Replays/*` (C; decoder `tools/re/replay_decode.py`)
 
 List `FUN_01009b48` (`PROGDIR:replays/#?`, ≤ 2000), load `FUN_010bc000`, save
 `FUN_010bc3b0`, picker `FUN_0101fdcc` (2113 "SELECT REPLAY"), info `FUN_0101e618`.
@@ -769,7 +770,7 @@ thread fails). **No music volume**; FX volume `DAT_0114c2a0` 0..100 step 10 (def
 100) scales hardware volume. `extracted/iso` is data-only, so track contents are unknown.
 
 
-### 4.7 Mac release: what the port follows (C; analysis/mac/audio_platform.md §1–§2)
+### 4.7 Mac release: what the port follows (C; docs/re/mac/audio_platform.md §1–§2)
 
 The Mac keeps the game-side sound code (`DoAudio__Fiiii` @ 100f32f0 is a line-for-line port of
 `FUN_01007290`; `AddSound__Ficiiiii` @ 100f4000 = `FUN_0100815c`) and hands mixing to the Sound
@@ -837,8 +838,8 @@ Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_ver
 
 ## 5. Intro video — `Videos/intro.video` + `intro.audio`
 
-Decoder: `analysis/intro_video.py` (`python intro_video.py --all` from `analysis/`) →
-`analysis/img/intro_frame_0000..0449.png`, `intro_contact.png`, `intro_audio.wav`.
+Decoder: `tools/re/intro_video.py` (`python tools/re/intro_video.py --all`) →
+`out/img/intro/intro_frame_0000..0449.png`, `intro_contact.png`, `intro_audio.wav`.
 **Verified bit-exact**: decoding the trailing loop frame (index 450) on top of frame 449
 reproduces frame 0 with 0/64000 differing pixels, so every chunk in the file decodes
 correctly.
@@ -898,7 +899,7 @@ and the last 68 bytes are never played. Paula period **163**, volume **63**, one
 21,760 Hz PAL / 21,961 Hz NTSC; nominal rate **22,050 Hz** = 1470 × 15 fps (INFERRED).
 The reimplementation should play the file at 22,050 Hz in sync with a 15 fps video.
 
-### 5.3 Mac release: MPEG-1 film (CONFIRMED; analysis/mac/audio_platform.md §3)
+### 5.3 Mac release: MPEG-1 film (CONFIRMED; docs/re/mac/audio_platform.md §3)
 
 The Mac plays a different, longer film through QuickTime. `OpenAnimation` @ `100fb130`
 ignores its argument (`"intro"`); `GetPaybackMovie` @ `100fcbc0` opens the hard-coded
@@ -929,15 +930,15 @@ pixels correlate at r = 0.997; transposed r = 0.03). Pre-rendered top-down pictu
 the city. Loaded by `LoadTex` = `FUN_01011698(path)`: allocates 0x10004 bytes, reads
 0x10000, stores the W3D texture handle at +0x10000. `FUN_010138dc` loads
 `PROGDIR:maps/0.thumb`..`2.thumb` at start-up into `DAT_0117bbec/f0/f4`; user maps load
-`"%s.thumb"` in `FUN_01027164`. (Rendering: `analysis/img/thumb0_check.png`.)
+`"%s.thumb"` in `FUN_01027164`. (Checked by rendering the file; the render was a local working file.)
 
 ### 6.2 `<map>.mini` — in-game minimap (CONFIRMED format; drawing see §2)
 
 65×65 headerless 8bpp (4225 bytes, stride 65), same orientation as `.thumb`, **one
 pixel = 2×2 map squares** (correlation with `.thumb` road pixels r ≈ 0.5–0.75 vs. ≈ 0.05
 transposed). Only three values occur in all shipped files: **0** transparent, **4** white
-(road), **8** black (drop shadow of the road pixels, offset +1,+1). Rendering:
-`analysis/img/minis.png`.
+(road), **8** black (drop shadow of the road pixels, offset +1,+1). Checked by rendering
+all the shipped files (a local working render).
 
 Load: end of LoadMap (`FUN_01079300`) builds `"%s.mini"` from the map base name
 (`FUN_01009ff8`: `PROGDIR:Maps/0..2` or user-map name) and calls `FUN_010727f0`:

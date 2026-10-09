@@ -1,5 +1,5 @@
 //! Parse every file of the original game. Skipped when the data is absent;
-//! point `PAYBACK_DATA` at an install, or run `python tools/extract.py`.
+//! point `PAYBACK_DATA` at an install, or run `python tools/extract/extract.py`.
 
 use payback_formats::{CubeTextureList, IndexedImage, Map, Obj, Phrases, palette};
 use std::path::{Path, PathBuf};
@@ -228,7 +228,7 @@ fn mac_app_icon_decodes() {
     assert!(big.pixels[c] > 0);
 }
 
-/// The Mac release's `Payback` folder (`tools/extract_mac.py`), if present.
+/// The Mac release's `Payback` folder (`tools/extract/extract_mac.py`), if present.
 fn mac_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("PAYBACK_MAC_DATA")
         .map(PathBuf::from)

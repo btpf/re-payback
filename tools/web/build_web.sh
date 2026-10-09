@@ -3,18 +3,19 @@
 #   web/dist/index.html, payback.js, payback_bg.wasm  - the game
 #   web/dist/data/payback.{pak,json}                  - YOUR extracted game data
 #
-# usage: tools/build_web.sh [--debug] [--no-data] [--no-film]
+# usage: tools/web/build_web.sh [--debug] [--no-data] [--no-film]
 #   --debug    unoptimised build (faster to compile, much slower to run)
 #   --no-data  skip packing the game data (keeps an existing web/dist/data)
 #   --no-film  leave the Mac intro film out of the pack (the FLC plays)
-# Environment: CARGO_TARGET_DIR, CARGO_FLAGS (e.g. "-j 4"), PAYBACK_DATA,
+# Environment: CARGO_TARGET_DIR (default target/web, kept apart from the
+# native builds so neither invalidates the other's cache), CARGO_FLAGS (e.g. "-j 4"), PAYBACK_DATA,
 # PAYBACK_MAC_DATA, LLVM_BIN (a clang with the wasm32 target, for pl_mpeg).
 #
 # Needs: rustup target add wasm32-unknown-unknown; wasm-bindgen-cli of the
 # same version as the wasm-bindgen crate in Cargo.lock; clang/llvm-ar with
 # wasm32 support; python 3. wasm-opt (binaryen) is used when present.
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 profile=web
 data=1
@@ -28,7 +29,8 @@ for a in "$@"; do
     esac
 done
 
-target_dir=${CARGO_TARGET_DIR:-target}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/web}
+target_dir=$CARGO_TARGET_DIR
 out=web/dist
 
 # The C compiler for the vendored pl_mpeg (crates/payback-mpeg/build.rs).
@@ -66,7 +68,7 @@ if command -v wasm-opt > /dev/null && [ $profile = web ]; then
 fi
 
 if [ $data = 1 ]; then
-    python tools/pack_web_data.py --out $out/data $pack_args \
+    python tools/web/pack_web_data.py --out $out/data $pack_args \
         ${PAYBACK_DATA:+--game "$PAYBACK_DATA"} ${PAYBACK_MAC_DATA:+--mac "$PAYBACK_MAC_DATA"}
 fi
 

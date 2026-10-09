@@ -1246,7 +1246,7 @@ const VS: f32 = 0.5 / 256.0;
 /// 0 for the Mac people, whose origin is at the feet; 90, 92 or 100 for
 /// the Amiga files, the shifts the Mac applied in data), so either set
 /// stands on the floor as on the Mac (Mac `DrawObject` @ 10075880 draws
-/// people at their origin; `analysis/mac/scratch_gameplay/people.md` M3).
+/// people at their origin; `docs/re/mac/gameplay_people.md` M3).
 ///
 /// [`LoadedModel::foot`]: crate::objects::LoadedModel::foot
 fn standing(v: &Vertex, dz: f32, dy: f32, foot: f32) -> [f32; 3] {

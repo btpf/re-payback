@@ -1,6 +1,6 @@
 //! Object and scenery shadows (Mac `DrawShadow` @ 1007f7d0 = OS4
 //! `FUN_010c9f28`, Mac `DrawSceneryShadow` @ 1007ea20 = OS4 `FUN_010c9360`;
-//! analysis/mac/rendering.md §6.1, docs/re/rendering.md §7).
+//! docs/re/mac/rendering.md §6.1, docs/re/rendering.md §7).
 //!
 //! The city pass (Mac `DrawMap`, OS4 `FUN_01049374`) draws, square by
 //! square after the effects of a layer, the shadow of every scenery model

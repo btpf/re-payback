@@ -30,7 +30,7 @@
 //!    the buffers (Mac `ToggleMotionBlur` @ 10053210 → `BlankChunky`; the
 //!    OS4 `FUN_01042308` left a stale frame), so the first blended frame
 //!    is averaged with black. The blend loop runs `(W·H >> 5) − 1` times
-//!    32 pixels (both builds, analysis/mac/rendering.md §4), so the last 32
+//!    32 pixels (both builds, docs/re/mac/rendering.md §4), so the last 32
 //!    pixels of the display buffer are never written while blur is on:
 //!    here the view's last 32 pixels (bottom row, right end) show palette
 //!    colour 0 (INFERRED: the display buffer's untouched content);

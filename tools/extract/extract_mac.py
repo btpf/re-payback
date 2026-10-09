@@ -13,7 +13,7 @@ import sys
 
 import machfs
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, 'Payback Game + Updates', 'PaybackMac.toast')
 OUT = os.path.join(ROOT, 'extracted', 'mac')
 

@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- Loader for the web build of the Payback reimplementation (docs/web.md).
-     tools/build_web.sh copies it to web/dist/ next to payback.js,
+     tools/web/build_web.sh copies it to web/dist/ next to payback.js,
      payback_bg.wasm and data/ (the user's own packed game data).
      Query options: ?map=3&level=1, ?intro, ... (as the command line);
      ?autostart skips the click-to-start (audio needs a user gesture). -->
@@ -27,7 +27,7 @@
 <canvas id="payback" tabindex="0"></canvas>
 <div id="status"><div id="msg">Loading...</div><div id="bar"><div id="fill"></div></div></div>
 <script type="module">
-// __BUILD__ / __DATA__ are replaced by tools/build_web.sh with content
+// __BUILD__ / __DATA__ are replaced by tools/web/build_web.sh with content
 // hashes, so a browser never pairs a cached payback.js with a new .wasm.
 import init, { vfs_load, start } from "./payback.js?v=__BUILD__";
 
@@ -83,7 +83,7 @@ try {
     status.append(b);
   }
 } catch (e) {
-  fail(`Could not start: ${e}\n\nThe game data is not part of the build: run tools/build_web.sh ` +
+  fail(`Could not start: ${e}\n\nThe game data is not part of the build: run tools/web/build_web.sh ` +
        `with the extracted original data (docs/web.md).`);
 }
 </script>

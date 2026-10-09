@@ -6,7 +6,7 @@ unlock `0xb506e`); OS4 Update 7 (init `0x010eabc0`, handler `0x010d2b24`, unlock
 main `FUN_000115ba`); phrases `extracted/game/Phrases/00.English.phrases`; map `Maps/0.map`.
 
 The handler was read from an annotated 68k disassembly produced by
-`analysis/tools_mission/calls68k.py` (folds argument pushes into `CALL Name(args)`, decodes
+`tools/re/calls68k.py` (folds argument pushes into `CALL Name(args)`, decodes
 the switch tables, shows arguments pushed before a `bra` into a shared tail). Every value
 below comes from that listing. The OS4 decompile was used as a cross-check: it agrees
 everywhere it was compared (slots 0, 1, 2, 3 and 19, init, unlock).

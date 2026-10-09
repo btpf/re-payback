@@ -16,9 +16,9 @@ the recording run of the same build (or of `--play-exe`, to compare two
 builds: record with one, play back with the other).
 
 usage:
-  tools/replay_check.py [--exe PATH] [--play-exe PATH] [--out DIR] [--fast N]
+  tools/checks/replay_check.py [--exe PATH] [--play-exe PATH] [--out DIR] [--fast N]
                         NAME TICKS [record args...]
-  tools/replay_check.py [--exe PATH] ... --suite [CASE ...]
+  tools/checks/replay_check.py [--exe PATH] ... --suite [CASE ...]
 
   --suite runs the standard cases (story, story2, rampage, multiplayer,
   cheats; all when none is named). Extra record args go to the recording
@@ -36,7 +36,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 # name -> (ticks, record args). Seeds are fixed so a failure reproduces.
 SUITE = {

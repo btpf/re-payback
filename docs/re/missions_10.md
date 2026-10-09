@@ -5,8 +5,8 @@ Status markers: **CONFIRMED** means read from the 68k disassembly (and cross-che
 Coordinates are given raw and as map squares `(x>>11, y>>11)`. One square is 0x800 units, and a square centre is
 `sq<<11 | 0x400`. Phrase numbers refer to `Phrases/10.English.phrases` unless marked "global".
 
-Working files (scratch): `analysis/missions_10/` (`h68k.dis` is the full disassembly with decoded jump
-tables, `h68k.calls` holds the reconstructed call arguments of every call site, and the `calls.py` and `dis_all.py` tools).
+Working files (local, not kept): the full disassembly with decoded jump tables (now `tools/re/dis68k.py 68k
+START END`) and the reconstructed call arguments of every call site (now `tools/re/calls68k.py`).
 
 ## 0. Code map
 

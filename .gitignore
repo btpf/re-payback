@@ -3,21 +3,32 @@
 /Payback Game + Updates/
 /extracted/
 
-# Generated RE output (reproducible from tools/).
+# Ghidra exports of the original binaries (decompiled code, strings): only
+# regenerable output, rebuilt by tools/ghidra/decompile_all.sh. Nothing
+# hand-made belongs here.
 /analysis/
 
+# Generated reports, renders and check output (tools/re, tools/checks).
+/out/
+
+# Throwaway work (agents and people): safe to delete at any time. Promote
+# anything worth keeping to tools/ or docs/ before citing it.
+/scratch/
+
 /target/
+__pycache__/
 
 # Local saves and settings written by the game.
 /Saves/
 
-# Local progress dashboard (kept up to date, not committed).
+# Local report pages in the repository root (not committed): progress.html and
+# remaining_gaps.html are hand-edited; coverage.html is written by
+# tools/reports/coverage.py; mac_differences.html by
+# tools/reports/mac_differences.py (it embeds renders of the game's art).
 /progress.html
-
-# Local Mac-vs-Amiga comparison report (not committed).
-/mac_differences.html
 /remaining_gaps.html
 /coverage.html
+/mac_differences.html
 
-# Web build output (tools/build_web.sh); data/ holds the packed original data.
+# Web build output (tools/web/build_web.sh); data/ holds the packed original data.
 /web/dist/

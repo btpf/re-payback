@@ -5,8 +5,8 @@ Reverse-engineering notes for vehicles in Payback (Update 7). Status marks:
 
 Builds: **68k** = Update 7 `Payback.exe` (flat base 0x10000, `analysis/ghidra_68k`);
 **OS4** = `PaybackOS4` (`analysis/ghidra_os4`). The OS4 main vehicle update `FUN_0105f594` failed in the bulk
-export; it was re-decompiled with a long timeout to `analysis/vehicles_os4/main.c` (script
-`analysis/ghidra_scripts_vehicles/DecompOne.java`). Model-struct offsets are quoted in **OS4** form; in the 68k
+export; it was re-decompiled with a long timeout to `analysis/ghidra_os4/long_timeout.c` (script
+`tools/ghidra/DecompOne.java`). Model-struct offsets are quoted in **OS4** form; in the 68k
 build every model field after `+0x4909` sits **2 bytes lower** (68k packs structs to 2 bytes, OS4 to 4). Example:
 engine sound is OS4 `+0x4924` = 68k `+0x4922`. Instance offsets up to about `+0x338` are identical; later 68k
 instance fields are also 2 lower (68k speed `+0x3ae` = OS4 `+0x3b0` = `[0xec]`).
@@ -383,8 +383,8 @@ If skid > 0:
   - In water: spray particles instead, size 500+random(500).
 - Marks start from the wheel's last point or, when its trail is −1, from where the wheel was at the tick start;
   `n = max(|dx|,|dy|)/(size·7/8) + 1` points at `k·d/n`, z = the car's, level `+0x8b0`. Tables: dirt 0x30000
-  (DirtSkidmark), snow/slush/ice 0 (Dust), else 0x10000 (Dust with the shadow flag) (C, Mac `SkidUnit`,
-  `analysis/mac/scratch_followup/addeffect_calls.tsv`). Puffs: grass/sand `Dirt` 0x30000 size `skid·hw>>7`, snow
+  (DirtSkidmark), snow/slush/ice 0 (Dust), else 0x10000 (Dust with the shadow flag) (C, Mac `SkidUnit`;
+  every `AddEffect` call with all its arguments was listed, see [`mac/followup.md`](mac/followup.md)). Puffs: grass/sand `Dirt` 0x30000 size `skid·hw>>7`, snow
   (0x32 only) `Dust` `>>7`, else `Dust` `>>8`; the tank puffs too (only the marks and the sound need `!4928`);
   boats get nothing. Spray: `random(2) == 0`, `Dust`, `500 + random(500)`, velocity `v/4 + random(50)`, level + 1.
 - Skid sound handle `[0x10d]`:
@@ -605,7 +605,7 @@ roll beside a wall depends on the box never reaching into the wall's square, whi
 ### 2.11 Vehicle ↔ vehicle, people, scenery
 
 See §3 (damage and collisions). Object contacts (Mac `CheckForCollisions` @ 1006a150) are reviewed item by item in
-`analysis/mac/driving_review.md` (items 34-42: speed damping `(8s + s·m_self/(mi+mj))/9` per touching pair, z push,
+`docs/re/reviews/2026-10-08-driving.md` (items 34-42: speed damping `(8s + s·m_self/(mi+mj))/9` per touching pair, z push,
 integer distance, live positions, the RC car excluded, sparks per touching circle pair between two vehicles,
 vehicle-vehicle Thud/Thud2 for both, run-over blood with droplets); the port follows them (`sim/contact.rs`).
 

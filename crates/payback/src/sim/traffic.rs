@@ -344,7 +344,7 @@ fn spawn_person_world(
     level: usize,
 ) -> Option<Entity> {
     // A system state, not `resource_scope`: taking a resource out and back
-    // marks it newly added (docs/research.md "Performance").
+    // marks it newly added (docs/port_engineering.md "Performance").
     let mut st: bevy::ecs::system::SystemState<(
         Commands,
         Res<GameData>,

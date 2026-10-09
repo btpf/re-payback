@@ -6,10 +6,14 @@
     extracted/warp3d   - Warp3D-42.lha
     extracted/game     - merged install: CD Payback/ dir overlaid with Update 7
 
-Needs 7z on PATH. Run from the repository root.
+Needs 7z on PATH. Paths are relative to the repository root, whatever the
+current directory.
 """
+import os
 import shutil
 import subprocess
+
+os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 SRC = 'Payback Game + Updates'
 OUT = 'extracted'

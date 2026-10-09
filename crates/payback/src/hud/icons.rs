@@ -99,7 +99,7 @@ pub struct Font {
 /// Named glyph files. `Dollar`, `Percent` and `Pound` exist in `Icons/`
 /// but no build loads them (OS4 `LoadFont` in `FUN_010138dc`, 68k, Mac
 /// `LoadFont` @ 10089380 / `LoadFontPartial` @ 10087d80), so '$', '%' and
-/// '£' fall back to '?' as in the originals (`analysis/mac/frontend.md`
+/// '£' fall back to '?' as in the originals (`docs/re/mac/frontend.md`
 /// §5.3).
 const NAMED: [(&str, u8); 23] = [
     ("FullStop", b'.'),

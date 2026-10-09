@@ -94,7 +94,7 @@ fn prefer_mac(path: &str) -> bool {
 /// Y of the feet of an Amiga people model (the model's max Y; Amiga
 /// people have their origin at the hips). The Mac release re-based every
 /// `People/*.Obj` by exactly these amounts so the feet sit at Y = 0
-/// (vertex diff, `analysis/mac/scratch_gameplay/people.md` M3); its
+/// (vertex diff, `docs/re/mac/gameplay_people.md` M3); its
 /// `DrawObject` @ 10075880 kept the Amiga people transform. Rendering
 /// either set with this shift gives the Mac picture.
 fn amiga_foot_y(path: &str) -> i32 {

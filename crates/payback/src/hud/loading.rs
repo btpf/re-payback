@@ -6,7 +6,7 @@
 //! (`FUN_01042688`, Mac `DrawProgress__Fi` @ 100538c0) adds a
 //! `LoadingPiece` (6×16) per segment at `(cx−46+8i, cy+2)`. The pieces
 //! and `Loading` are never doubled, so in hi-res (every Mac size) the box
-//! is half the size it has on the lo-res screen (`analysis/mac/
+//! is half the size it has on the lo-res screen (`docs/re/mac/
 //! rendering.md` §7, frontend.md §5.6).
 //!
 //! The front end's canvases are always lo-res (256 lines), so the box is

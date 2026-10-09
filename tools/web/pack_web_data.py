@@ -10,7 +10,7 @@ game reads them through `crates/payback/src/vfs.rs`. Paths are
 The output is the user's own copy of the original data: never commit it
 (web/dist/ is git-ignored).
 
-usage: python tools/pack_web_data.py [--game extracted/game]
+usage: python tools/web/pack_web_data.py [--game extracted/game]
            [--mac extracted/mac/Payback] [--music Music] [--no-film]
            [--out web/dist/data]
 """
@@ -62,7 +62,7 @@ def main() -> int:
     a = ap.parse_args()
 
     if not os.path.isfile(os.path.join(a.game, "Payback.exe")):
-        print(f"no Payback.exe in {a.game}: run tools/extract.py or pass --game", file=sys.stderr)
+        print(f"no Payback.exe in {a.game}: run tools/extract/extract.py or pass --game", file=sys.stderr)
         return 1
     sources = [(a.game, "data/game")]
     if os.path.isdir(a.mac):

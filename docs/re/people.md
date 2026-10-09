@@ -14,8 +14,7 @@ port (`analysis/ghidra_os4`) is cited when it reads more clearly. Its main per-o
 - **C** = CONFIRMED: read directly in code.
 - **I** = INFERRED: deduced from code or data, not proven.
 
-Scratch dumps of the functions quoted here are in `analysis/people/` and `analysis/people_ai/`.
-`python analysis/people/fn.py {os4|68k} ADDR` prints a function.
+`python tools/re/fn.py {os4|68k} ADDR` prints any function quoted here from the Ghidra exports.
 
 Units match `docs/re/rendering.md`:
 
@@ -53,7 +52,7 @@ tick there is **1/30 s** (C).
 
 **Mac release.** `amiga_levelloop` @ 10100f50 has the same code on `TickCount()` (60 Hz), halved:
 `ticks_raw = (TickCount() − last + 1) >> 1`, a busy-wait of at least 2 Mac ticks per game tick, clamp 1..5. A
-tick is **1/30 s** (CONFIRMED; `analysis/mac/gameplay.md` §1). Both builds mix 735 audio samples per tick
+tick is **1/30 s** (CONFIRMED; `docs/re/mac/gameplay.md` §1). Both builds mix 735 audio samples per tick
 (22050/30, `UpdateAudio(ticks*0x2df − 1)`), so 30 Hz looks like the design rate and the 68k's 25 Hz an artefact
 of the 50 Hz DateStamp (I).
 
@@ -943,7 +942,7 @@ main loop right before every frame's `Trigger_Update` (OS4 ~49717 `*local_54 = 1
 
 ## 7. Pedestrian AI
 
-Summary of the sub-investigation; details in `analysis/people_ai/`. All from 68k `FUN_000e3a58` unless noted.
+Summary of the sub-investigation; the per-function dumps were local working files. All from 68k `FUN_000e3a58` unless noted.
 
 ### 7.1 States and virtual stick
 

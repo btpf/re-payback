@@ -2,7 +2,7 @@
 //! from the CD (neither release ships them as data: the Amiga plays the CD
 //! with SCSI commands, OS4 "Payback CDDA Thread" `0x010087a0`; the Mac OS X
 //! build plays the cddafs AIFF tracks as QuickTime movies, `UCDAudio::Play`
-//! @ 10103fc0). Game-side logic follows the Mac (analysis/mac/audio_platform.md
+//! @ 10103fc0). Game-side logic follows the Mac (docs/re/mac/audio_platform.md
 //! §2, docs/re/frontend_audio.md §4.6).
 //!
 //! **Files.** Put the tracks in a `Music` folder in the working directory,
@@ -16,7 +16,7 @@
 //! the files go ([`NO_MUSIC_HINT`]) and the log lists the folders searched.
 //! The disc images (`Payback.iso`, ISO 9660, and `PaybackMac.toast`, HFS)
 //! hold only the data track, so the tracks cannot be extracted from them:
-//! rip them from the CD (docs/research.md, "CD music").
+//! rip them from the CD (docs/status.md, the Audio row).
 //!
 //! **Modes** (`Settings.cd_mode`, `DAT_0114c30c` / Mac `DAT_10188fb0`):
 //! 0 Off, 1 Radio (the Mac default), 2 Continuous, 3 Disabled (forced

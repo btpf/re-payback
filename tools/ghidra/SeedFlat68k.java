@@ -1,4 +1,4 @@
-// Pre-script for raw 68k images produced by `tools/hunk.py --flat`.
+// Pre-script for raw 68k images produced by `tools/extract/hunk.py --flat`.
 // Script args: <code_start_hex> <code_end_hex>. Disassembles the entry point
 // and every LINK A5 (0x4E55) in the code range and creates functions there,
 // since a raw binary gives Ghidra nothing to start from.

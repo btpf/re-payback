@@ -8,7 +8,7 @@
 #           -v "$PWD":/work/impl \
 #           payback-re
 #
-# game-data is the unpacked CD + updates (see tools/extract.py).
+# game-data is the unpacked CD + updates (see tools/extract/extract.py).
 # Original game files are mounted read-only and never baked into the image.
 
 FROM ubuntu:24.04

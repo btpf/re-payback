@@ -57,7 +57,7 @@ pub struct FrontendIcons {
 impl FrontendIcons {
     /// `mac_title`: the Mac title screens (`Variants::title`): the
     /// repainted art with the Apex and Virtual Programming logos (same
-    /// sizes and formats; `analysis/mac/assets.md` §6). Read at start-up.
+    /// sizes and formats; `docs/re/mac/assets.md` §6). Read at start-up.
     pub fn load(data: &GameData, mac_title: bool) -> FrontendIcons {
         let cup = |n: &str| Icon::load(data, &format!("Cup.{n}"), 15, 20);
         FrontendIcons {

@@ -2,7 +2,7 @@
 //!
 //! For `wasm32-unknown-unknown` (the web build, docs/web.md) the C compiler
 //! is clang with its wasm32 target (`CC_wasm32_unknown_unknown`, set by
-//! `tools/build_web.sh`); that target has no C library, so the few libc
+//! `tools/web/build_web.sh`); that target has no C library, so the few libc
 //! calls pl_mpeg makes come from `wasm-libc/` and `src/wasm_libc.rs`.
 
 fn main() {

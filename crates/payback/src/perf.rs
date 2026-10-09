@@ -21,7 +21,7 @@
 //! per mixer block ([`audio_block`]).
 //!
 //! `--perf-check [s]` (default 30 s) is the automatic check
-//! (`tools/perf_check.sh`): the logger runs, the game quits after `s`
+//! (`tools/checks/perf_check.sh`): the logger runs, the game quits after `s`
 //! seconds and the run fails (exit code 1, "perf-check: FAIL") when, after
 //! a 5 s warm-up, the frames exceed the thresholds ([`Thresholds`],
 //! overridable with `PAYBACK_PERF_MAX_P95`, `PAYBACK_PERF_MAX_FRAME`,

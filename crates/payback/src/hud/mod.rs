@@ -5,7 +5,7 @@
 //! over the 3D view with nearest-neighbour scaling. By default the canvas
 //! has the hi-res layout whenever the window is at least 640×400, as on
 //! the Mac, which only offers 640×480 and up and so always shows it
-//! (`analysis/mac/frontend.md` §5.1): window-sized (divided by a whole
+//! (`docs/re/mac/frontend.md` §5.1): window-sized (divided by a whole
 //! factor, see [`hud_canvas`]), with the hi-res offsets and doubled icons.
 //! `Settings::hires_hud` off, or a smaller window, gives the lo-res
 //! layout: 256 lines tall and as wide as the window's aspect ratio (the
@@ -426,7 +426,7 @@ impl Default for Language {
 /// files come first: they are the baseline for English, Deutsch and
 /// Francais (`Français`; global, level and credits texts: "Difficulty:",
 /// "Music setup", the control-neutral hints, the Mac credits;
-/// `analysis/mac/frontend.md` §6). The other 11 languages exist only in
+/// `docs/re/mac/frontend.md` §6). The other 11 languages exist only in
 /// the Amiga data.
 pub fn load_phrases(data: &GameData, name: &str, language: &str) -> Phrases {
     let prefix = format!("{name}.");

@@ -1,8 +1,8 @@
-//! Replay determinism (docs/research.md, determinism rules): record a
+//! Replay determinism (docs/port_engineering.md "Determinism"): record a
 //! scripted run of the game, play the recording back, and require the world
 //! hashes logged every 50 ticks (`replay.rs`, `debug_hash`) to match.
 //!
-//! The cases are those of `tools/replay_check.py --suite`: a story level
+//! The cases are those of `tools/checks/replay_check.py --suite`: a story level
 //! in two cities, Rampage with random missions, a three-player match and a
 //! run with cheats (replay events). This compares the port with itself;
 //! nothing here can check it against the original game (its state is not

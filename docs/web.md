@@ -16,17 +16,17 @@ cargo install -f wasm-bindgen-cli --version 0.2.129   # or: cargo binstall wasm-
 
 optionally `cargo binstall wasm-opt` (binaryen; shrinks the module), plus
 clang and llvm-ar with the wasm32 target (the LLVM release for Windows
-has it; `tools/build_web.sh` looks in `C:\Program Files\LLVM\bin`, else on
+has it; `tools/web/build_web.sh` looks in `C:\Program Files\LLVM\bin`, else on
 `PATH`, or set `LLVM_BIN`) for the vendored pl_mpeg, and Python 3 for the
 data packer. `wasm-opt` (binaryen) is used when on `PATH`.
 
 Build:
 
 ```sh
-tools/build_web.sh            # release build + data pack -> web/dist/
-tools/build_web.sh --no-data  # code only, keep web/dist/data
-tools/build_web.sh --no-film  # pack without the Mac intro film (-46 MB)
-CARGO_FLAGS="-j 4" CARGO_TARGET_DIR=target/web tools/build_web.sh
+tools/web/build_web.sh            # release build + data pack -> web/dist/
+tools/web/build_web.sh --no-data  # code only, keep web/dist/data
+tools/web/build_web.sh --no-film  # pack without the Mac intro film (-46 MB)
+CARGO_FLAGS="-j 4" tools/web/build_web.sh    # limit jobs; cargo output goes to target/web
 ```
 
 The build uses the `web` cargo profile (release with `opt-level = "s"`,
@@ -39,7 +39,7 @@ Output, all git-ignored:
 |---|---|
 | `web/dist/index.html` | copy of the committed loader `web/index.html` |
 | `web/dist/payback.js`, `payback_bg.wasm` | wasm-bindgen output (about 48 MB, 12.7 MB gzipped) |
-| `web/dist/data/payback.pak`, `payback.json` | **your** game data, packed by `tools/pack_web_data.py` |
+| `web/dist/data/payback.pak`, `payback.json` | **your** game data, packed by `tools/web/pack_web_data.py` |
 
 The data pack is the original game's data and must never be committed or
 published. It is made from the locally extracted copy (`extracted/game`
@@ -106,7 +106,8 @@ Command-line options become query parameters: `?map=3&level=1`,
 ## Testing
 
 Checked with headless Chrome (SwiftShader WebGL2) driven over the DevTools
-protocol (`analysis/scratch/web/cdp.mjs`, a fixed `--user-data-dir`): the
+protocol (`node tools/checks/web_smoke.mjs <url> scratch/chrome-profile <steps>`; a fixed
+`--user-data-dir` keeps localStorage between runs): the
 Mac intro film plays, the language chooser, main menu and a level
 (`?map=0`) render with no console errors; `Payback.cfg` and a save slot
 written in one page load are read back in the next (the language is not

@@ -13,7 +13,7 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
-# The web build (tools/build_web.sh, docs/web.md): a smaller download.
+# The web build (tools/web/build_web.sh, docs/web.md): a smaller download.
 [profile.web]
 inherits = "release"
 opt-level = "s"

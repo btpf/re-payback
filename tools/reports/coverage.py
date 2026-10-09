@@ -14,8 +14,8 @@ are evidence of attention, not proof of equivalence:
 * yellow - cited in the Rust sources, but a gap in remaining_gaps.html, a
            departure, or an "approximate / not reproduced / not done" note
            in the docs or code comments mentions it;
-* blue   - cited only in the RE notes (docs/*.md, docs/re/*.md and the
-           analysis/mac/*.md reviews): analysed, but nothing in the port
+* blue   - cited only in the RE notes (docs/**/*.md, including the Mac
+           reviews in docs/re/mac/): analysed, but nothing in the port
            points at it (maybe intentionally not needed);
 * red    - game code that nothing cites;
 * grey   - not applicable: Mac OS imports, PowerPlant, Mac platform classes
@@ -27,18 +27,17 @@ Citation forms recognised (in Rust comments, the docs and remaining_gaps.html):
 Mac names (``DrawMap``, ``do_Person__Fv``, ``UCDAudio::SetVolume``), Mac
 addresses (``@ 1013fbd0``; any address inside a function counts for it), OS4
 ``FUN_01xxxxxx`` / bare ``01xxxxxx`` and 68k ``FUN_000xxxxx`` / ``68k 0xa4a68``
-addresses, mapped to Mac functions through ``analysis/mac/symbols.tsv`` (the
+addresses, mapped to Mac functions through ``docs/xref/symbols.tsv`` (the
 Amiga<->Mac symbol match) and the OS4/68k function tables.
 
-Inputs (read at run time; analysis/ and remaining_gaps.html are git-ignored):
+Inputs (read at run time; analysis/ and remaining_gaps.html are git-ignored and local):
 analysis/ghidra_macx/functions.tsv, analysis/ghidra_os4/functions.tsv,
-analysis/ghidra_68k/functions.tsv, analysis/mac/symbols.tsv, crates/**/*.rs,
-docs/*.md, docs/re/*.md, analysis/mac/*.md (except symbols.md) and
-remaining_gaps.html. The output contains only function names, addresses,
+analysis/ghidra_68k/functions.tsv, docs/xref/symbols.tsv, crates/**/*.rs,
+docs/**/*.md (except docs/xref/) and remaining_gaps.html. The output contains only function names, addresses,
 sizes, file:line references and short status notes - no game data and no
 decompiled code.
 
-Usage: python tools/coverage.py [--out coverage.html]
+Usage: python tools/reports/coverage.py [--out coverage.html]
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 # --------------------------------------------------------------------------
 # Areas
@@ -254,7 +253,7 @@ GAP_KW = re.compile(
 # Doc lines whose gap note is known to be stale (remaining_gaps.html STALE list).
 STALE_NOTE_LINES = {
     ("docs/re/rendering.md", 1088),
-    ("docs/re/combat_police.md", 743),
+    ("docs/re/combat_police.md", 744),
 }
 
 CONF_C = re.compile(r"CONFIRMED|\[C\]|\(C\)|\*\*C\*\*")
@@ -321,7 +320,7 @@ def load_functions():
             "demangled": mangled, "name": mangled, "cat": "game",
             "os4": None, "m68k": None, "match": "",
         }
-    sym_rows = read_tsv(ROOT / "analysis/mac/symbols.tsv")
+    sym_rows = read_tsv(ROOT / "docs/xref/symbols.tsv")
     header = sym_rows[0]
     col = {h: i for i, h in enumerate(header)}
     os4_to_mac, m68k_to_mac = {}, {}
@@ -562,9 +561,9 @@ def scan_rust(resolver, cites):
 
 
 def doc_files():
-    out = sorted((ROOT / "docs").glob("*.md")) + sorted((ROOT / "docs/re").glob("*.md"))
-    out += [p for p in sorted((ROOT / "analysis/mac").glob("*.md")) if p.name != "symbols.md"]
-    return out
+    # Every note under docs/ except the symbol cross-reference (docs/xref/), which
+    # names nearly every function and would make everything look analysed.
+    return [p for p in sorted((ROOT / "docs").rglob("*.md")) if "xref" not in p.relative_to(ROOT / "docs").parts]
 
 
 def scan_docs(resolver, cites):
@@ -935,7 +934,7 @@ function tally(list) {
 }
 const T = tally(F);
 document.getElementById('meta').textContent =
-  `Generated ${M.generated} from HEAD ${M.head} (working tree) by tools/coverage.py: ${M.nFuncs} Mac OS X functions, ` +
+  `Generated ${M.generated} from HEAD ${M.head} (working tree) by tools/reports/coverage.py: ${M.nFuncs} Mac OS X functions, ` +
   `${M.nRust} Rust files, ${M.nDocs} notes files, ${M.nGaps} entries of remaining_gaps.html.`;
 (function stats() {
   const ported = T.green.b + T.yellow.b, portedN = T.green.n + T.yellow.n;
@@ -1158,7 +1157,7 @@ function selectAddr() { const r = document.createRange(); r.selectNodeContents(d
   t.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => { pin(F[+tr.dataset.i]); document.getElementById('panel').scrollIntoView({behavior: 'smooth', block: 'nearest'}); });
 })();
 document.getElementById('rules').innerHTML = [
-  `<b>Boxes</b>: the ${M.nFuncs} functions of the Mac OS X build (<code>analysis/ghidra_macx/functions.tsv</code>), sized by Ghidra's byte size, grouped by area. Readable names come from <code>analysis/mac/symbols.tsv</code> (demangled CodeWarrior names).`,
+  `<b>Boxes</b>: the ${M.nFuncs} functions of the Mac OS X build (<code>analysis/ghidra_macx/functions.tsv</code>), sized by Ghidra's byte size, grouped by area. Readable names come from <code>docs/xref/symbols.tsv</code> (demangled CodeWarrior names).`,
   `<b>Citations</b> are found in Rust comments (<code>crates/**/*.rs</code>), the notes (${M.docs.map(d => '<code>' + esc(d) + '</code>').join(', ')}) and <code>remaining_gaps.html</code>. Recognised forms: Mac names (bare names only in backticks unless distinctive, e.g. <code>DisplayMinimap</code>; names that are also Rust types such as <code>Explosion</code> count in Rust only with an address or the mangled form), mangled names, <code>Class::Method</code>, Mac addresses (any address inside a function counts), OS4 <code>FUN_01xxxxxx</code> / bare <code>01xxxxxx</code> and 68k <code>FUN_000xxxxx</code> / <code>68k 0x…</code> addresses mapped through the Amiga↔Mac symbol match.`,
   `<span class="sw" style="background:var(--s-grey)"></span><b>Grey, not applicable</b>: Mac OS imports, PowerPlant, Mac platform classes (CD audio, DrawSprocket, InputSprocket/HID, preferences, UI), the Amiga-API, Warp3D-on-OpenGL and Sound Manager emulation layers and the MSL runtime (symbols.tsv categories), plus a few named overrides (${Object.keys(M.naOverrides).length}). Grey functions keep their citations in the tooltip but never count towards coverage.`,
   `<span class="sw" style="background:var(--s-green)"></span><b>Green, ported</b>: cited in Rust, and no gap, departure or approximation note mentions it.`,
@@ -1176,10 +1175,9 @@ document.getElementById('caveats').innerHTML = [
   'Citations through Amiga addresses depend on the Amiga↔Mac symbol match, which includes medium- and low-confidence pairs (shown in the detail panel).',
   'Name matching is textual; a common word that is also a function name can produce a false citation, and a function only described in prose without its name or address is missed (it shows red or blue).',
   'Gap notes are matched by keywords per line and paragraph, so a yellow may come from a note about a neighbouring function in the same paragraph, and notes that went stale after a fix still count unless listed in the script.',
-  'analysis/mac/*.md are local, git-ignored review notes; they are counted as documentation.',
   'Only the Mac OS X build is drawn: the 105 OS4 functions without a Mac counterpart (Amiga-only code) are not boxes.'
 ].map(x => `<li>${esc(x)}</li>`).join('');
-document.getElementById('foot').textContent = 'Self-contained page; regenerate with python tools/coverage.py.';
+document.getElementById('foot').textContent = 'Self-contained page; regenerate with python tools/reports/coverage.py.';
 window.addEventListener('resize', () => layout());
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { readColours(); draw(); });
 layout();
