@@ -22,11 +22,14 @@
 //! palette brightening of explosions and lightning (`DAT_0114c748`), applied
 //! by the views' final pass (`crate::camera::postfx`).
 //!
-//! Not reproduced:
-//! - deletion of records outside the view rectangle (the simulation has no
-//!   view; records still expire through size and z);
-//! - type 15's looping 13 Flames sound (the per-type dynamic lights of OS4
-//!   `FUN_01036574` are in `crate::lighting`).
+//! Records outside the view rectangle are deleted before they are updated
+//! (Mac `UpdateEffects` @ 100aa1f0: a record is drawn and moved only when
+//! `x0 < x < x1` and `y0 < y < y1`; weather records outside wrap instead;
+//! split screen, `UpdateEffectsMulti1` @ 100a8580: outside every view's
+//! rectangle), so smoke left behind is gone when the view returns. Type
+//! 15's looping 13 Flames sound is played by `crate::audio`'s
+//! `fire_sounds`; the per-type dynamic lights of OS4 `FUN_01036574` are in
+//! `crate::lighting`.
 //!
 //! Debris (`FUN_01035438`, Mac `Split`) is a separate list, updated after
 //! the effects: `crate::debris`.
@@ -35,11 +38,11 @@
 //! layer, is one mesh rebuilt each frame on the view's render layer from
 //! horizontal quads ("screen-aligned" for the overhead camera: aligned with
 //! that view's yaw, which differs in the rotating view) that sample a
-//! 512x256 atlas of the effect textures. [`EffectMaterial`] sets the blend
-//! equation per [`Blend`], which gives the Alpha.256 operations exactly (in
-//! linear colour rather than palette space; the final pass snaps the result
-//! to the palette), including subtraction via
-//! `ReverseSubtract`. Sprites are depth-tested against the city, lifted 16
+//! 512x448 atlas of the effect textures. [`EffectMaterial`] sets the blend
+//! equation per [`Blend`], which gives the Alpha.256 operations exactly on
+//! the gamma-encoded palette bytes the game views hold
+//! (`crate::camera::postfx`; the resolve pass snaps the result to the
+//! palette), including subtraction via `ReverseSubtract`. Sprites are depth-tested against the city, lifted 16
 //! h-units; flares and weather are not (the original draws list 3 after
 //! everything). Layers are drawn bottom to top through the material's sort
 //! bias, after the city's transparent faces.
@@ -134,6 +137,9 @@ pub struct FlareSource {
     /// Hidden when the city is in front of it (`AddFlare` with a positive
     /// size; explosion flares pass a negative one).
     pub occlude: bool,
+    /// The object or scenery entity whose face it is (not tested against
+    /// itself, see `crate::objects::FlareOccluders`).
+    pub owner: Option<Entity>,
 }
 
 /// Flares added this frame; drawn and cleared by the effect renderer.
@@ -387,6 +393,35 @@ pub struct Effects {
     lists: [Vec<Effect>; LAYERS],
     /// Camera for the weather wrap/respawn, set before each tick.
     view: Option<View>,
+    /// Every view's rectangle `(x0, x1, y0, y1)` (object units), set before
+    /// each tick; empty: nothing is culled (tests).
+    rects: Vec<(i32, i32, i32, i32)>,
+}
+
+/// Whether `p` lies strictly inside one of the view rectangles (none: no
+/// culling).
+fn in_view(rects: &[(i32, i32, i32, i32)], p: IVec3) -> bool {
+    rects.is_empty() || rects.iter().any(|&(x0, x1, y0, y1)| x0 < p.x && p.x < x1 && y0 < p.y && p.y < y1)
+}
+
+/// The rectangle of every view (`View::rect` with that view's eye and drawn
+/// range, `ViewEyes::visible_squares`); views whose camera has not been
+/// placed yet are left out.
+pub(crate) fn view_rects(eyes: &crate::camera::ViewEyes, rotating: bool) -> Vec<(i32, i32, i32, i32)> {
+    eyes.cams
+        .iter()
+        .enumerate()
+        .filter(|(_, cam)| cam.initialised)
+        .map(|(i, cam)| {
+            View {
+                x: (cam.x >> 5) as i32,
+                y: (cam.y >> 5) as i32,
+                h: cam.h,
+                half: eyes.visible_squares(i, rotating),
+            }
+            .rect()
+        })
+        .collect()
 }
 
 impl Effects {
@@ -462,6 +497,20 @@ impl Effects {
             for i in (0..self.lists[layer].len()).rev() {
                 let list = &mut self.lists[layer];
                 let mut e = list[i];
+                // Outside every view: weather wraps, the rest is deleted
+                // (replaced by the last record, already done this tick).
+                if !in_view(&self.rects, e.pos) {
+                    match (e.kind, view) {
+                        (12..=14, Some(v)) => {
+                            e.wrap(v.rect());
+                            list[i] = e;
+                        }
+                        _ => {
+                            list.swap_remove(i);
+                        }
+                    }
+                    continue;
+                }
                 let spawned = e.update(rand);
                 if let (12..=14, Some(v)) = (e.kind, view) {
                     e.wrap(v.rect());
@@ -597,6 +646,7 @@ pub(crate) fn update_effects(
     // Wrapped around view 0's eye (rotating view, replay TV camera).
     let cam = eyes.cams.first().copied().unwrap_or_default();
     effects.view = Some(View::of(&cam, rotating.0));
+    effects.rects = view_rects(&eyes, rotating.0);
     if !effects.is_empty() {
         // Top of the ground cube under (x, y), as an object z.
         let ground = |x: i32, y: i32| {
@@ -963,6 +1013,10 @@ impl Material for EffectMaterial {
             depth.depth_compare = Some(CompareFunction::Always);
         }
         if let Some(fragment) = descriptor.fragment.as_mut() {
+            // Game views: gamma-encoded output (`crate::camera::postfx::GammaWorld`).
+            if crate::objects::gamma_view(key.mesh_key) {
+                fragment.shader_defs.push("GAMMA_TARGET".into());
+            }
             if hardware {
                 fragment.shader_defs.push("EFFECT_HARDWARE".into());
                 if pass == Pass::Flare {
@@ -1390,6 +1444,7 @@ fn build_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     city: Option<Res<City>>,
     render_mode: Res<crate::render_mode::RenderMode>,
+    occluders: Res<crate::objects::FlareOccluders>,
 ) {
     // Night maps draw `Blood.dark` instead of `Blood` (`FUN_01035250`).
     let night = city.as_ref().is_some_and(|c| c.map.night);
@@ -1414,6 +1469,7 @@ fn build_meshes(
                     size: e.size,
                     table: 0,
                     occlude: false,
+                    owner: None,
                 });
             }
         }
@@ -1472,7 +1528,8 @@ fn build_meshes(
 
         // Flares go last, in the top list's additive batch; the original
         // keeps at most 199 per view and tests whether each one's centre
-        // pixel was overdrawn (here: whether the city is in the way).
+        // pixel was overdrawn (here: whether the city or another model is
+        // in the way).
         let top = &mut quads[LAYERS - 1][Pass::Flare.rank()];
         let aspect = cam
             .logical_viewport_size()
@@ -1500,8 +1557,8 @@ fn build_meshes(
                 // Warp3D draws every flare (no overdraw test).
                 if f.occlude
                     && !hardware
-                    && let Some(city) = &city
-                    && crate::objects::occluded(city, f.pos, eye)
+                    && (city.as_ref().is_some_and(|city| crate::objects::occluded(city, f.pos, eye))
+                        || occluders.hides(&meshes, f.pos, eye, f.owner))
                 {
                     continue;
                 }
@@ -1591,6 +1648,24 @@ mod tests {
         assert_eq!(e.vel, IVec3::new(3, -3, 1));
         fx.tick(&mut never);
         assert_eq!(fx.lists[3][0].pos, IVec3::new(103, 197, 301));
+    }
+
+    /// Records outside every view rectangle are deleted before they move;
+    /// weather wraps instead (`UpdateEffects` @ 100aa1f0).
+    #[test]
+    fn view_rectangle_culling() {
+        let mut fx = Effects::default();
+        fx.lists[0].push(effect(1, 1000));
+        let mut far = effect(1, 1000);
+        far.pos.x = 50_000;
+        fx.lists[0].push(far);
+        fx.rects = vec![(0, 10_000, 0, 10_000)];
+        fx.tick(&mut never);
+        assert_eq!(fx.lists[0].len(), 1);
+        assert_eq!(fx.lists[0][0].pos.x, 1000);
+        // Strictly inside: on the edge counts as outside.
+        assert!(!in_view(&fx.rects, IVec3::new(0, 5, 0)));
+        assert!(in_view(&[], IVec3::new(-5, -5, 0)));
     }
 
     #[test]

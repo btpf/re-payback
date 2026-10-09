@@ -17,6 +17,7 @@ pub mod icons;
 pub mod labels;
 pub mod loading;
 pub mod paint;
+pub mod zoom;
 
 use crate::audio::{Sound, SoundPos, id};
 use crate::camera::CameraTarget;
@@ -287,6 +288,10 @@ struct Canvas {
     sub_px: Vec<u8>,
     w: usize,
     h: usize,
+    /// The original's frame counter (`_DAT_1017c898`, `_DAT_1017d2e4`):
+    /// one frame per game tick there (at most 30 fps in game), so it
+    /// advances once per tick here ([`tick_frame`]) and the blinks and
+    /// spins keep their speed at any display rate.
     frame: u32,
     minimap: Option<Icon>,
 }
@@ -302,12 +307,12 @@ impl Plugin for HudPlugin {
             .init_resource::<Banner>()
             .init_resource::<Language>()
             .init_resource::<Texts>()
-            .add_plugins((loading::plugin, labels::plugin, UiMaterialPlugin::<SubtractPlane>::default()))
+            .add_plugins((loading::plugin, labels::plugin, zoom::plugin, UiMaterialPlugin::<SubtractPlane>::default()))
             .add_systems(Startup, setup)
             .add_systems(PreUpdate, load_global_texts)
             .add_systems(OnEnter(crate::level::AppState::Playing), load_level_texts.in_set(crate::level::LevelLoaded))
             .add_systems(OnExit(crate::level::AppState::Playing), reset_hud)
-            .add_systems(FixedUpdate, (collect, tick_dialog, tick_title, tick_banner))
+            .add_systems(FixedUpdate, (collect, tick_dialog, tick_title, tick_banner, tick_frame))
             .add_systems(PostUpdate, (draw, upload_plane).chain());
     }
 }
@@ -434,7 +439,7 @@ pub fn load_phrases(data: &GameData, name: &str, language: &str) -> Phrases {
                     .and_then(|n| n.strip_suffix(".phrases"))
                     .is_some_and(|mid| crate::data::same_language(mid, l))
             })?;
-            std::fs::read(path).ok().and_then(|b| Phrases::parse(&b).ok())
+            crate::vfs::read(path).ok().and_then(|b| Phrases::parse(&b).ok())
         })
         .unwrap_or_default()
 }
@@ -537,6 +542,11 @@ fn collect(
         hud.player_pos = Some(obj.pos.truncate());
         (hud.weapon, hud.ammo) = weapons(ars);
     }
+}
+
+/// Advance the HUD's frame counter, once per game tick.
+fn tick_frame(mut canvas: ResMut<Canvas>) {
+    canvas.frame = canvas.frame.wrapping_add(1);
 }
 
 fn tick_dialog(mut commands: Commands, mut d: ResMut<Dialog>) {
@@ -858,18 +868,33 @@ fn draw(
     banner: Res<Banner>,
     texts: Res<Texts>,
     labels: Res<labels::Labels>,
-    view: Query<(&Camera, &GlobalTransform), With<crate::camera::GameCamera>>,
+    (view, extra_views): (
+        Query<(&Camera, &GlobalTransform), With<crate::camera::GameCamera>>,
+        Query<(&Camera, &GlobalTransform), With<crate::camera::ExtraView>>,
+    ),
     minimap_yaw: Res<crate::camera::MinimapYaw>,
+    playback: (
+        Res<crate::replay::ReplayState>,
+        Res<crate::mission::LevelClock>,
+        Res<zoom::ZoomIn>,
+    ),
 ) {
     let Some(lo) = icons else { return };
-    let physical = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
+    let window_px = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
+    // One player: the HUD fills the view, which the view size may shrink
+    // (`camera::view_size`; [`fit_hud_nodes`] places the nodes).
+    // (The UI is laid out in the game camera's viewport, so the HUD nodes
+    // follow the view.)
+    let single = (!hud.multiplayer).then(|| view.single().ok()).flatten();
+    let physical = single.and_then(|(c, _)| c.physical_viewport_rect()).map_or(window_px, |r| r.size());
+    // The HUD's area in logical window pixels (labels, checkpoint).
+    let hud_area = single.and_then(|(c, _)| c.logical_viewport_rect());
     let (w, h, hi) = hud_canvas(physical, settings.as_ref().is_none_or(|s| s.hires_hud));
     let bilinear = hi && crate::render_mode::is_hardware();
     let set: &HudIcons = match &icons2x {
         Some(d) if hi && !bilinear => &d.0,
         _ => &lo,
     };
-    canvas.frame = canvas.frame.wrapping_add(1);
     let frame = canvas.frame;
     let minimap = canvas.minimap.clone();
     if (canvas.w, canvas.h) != (w, h) {
@@ -896,10 +921,41 @@ fn draw(
     };
     let hardware = crate::render_mode::is_hardware();
     let mut pen = Pen { p: &mut p, sub: &mut sub, icons: set, hi, bilinear, hardware };
+    // Floating labels (`DoLabels__Fsiiii` @ 10094f20), drawn in each view
+    // before the HUD (`DrawView` @ 1006eb80, split screen included: the
+    // pickup names have no single-player check): font 2 at
+    // (sx − 7·len/2, sy + 3) of the projected point, the pitch doubled in
+    // hi-res but not the centring offset. A label whose point is outside
+    // a view is not drawn in it.
+    if let Ok(win) = window.single() {
+        let (hud_o, hud_s) = hud_area.map_or((Vec2::ZERO, win.size()), |r| (r.min, r.size()));
+        let scale = Vec2::new(w as f32, h as f32) / hud_s.max(Vec2::ONE);
+        let ic = pen.icons;
+        for (cam, eye) in view.iter().chain(&extra_views) {
+            let rect = cam.logical_viewport_rect();
+            let origin = rect.map_or(Vec2::ZERO, |r| r.min);
+            for l in &labels.0 {
+                let at = crate::world::object_to_render(l.pos.as_vec3());
+                let Ok(p) = cam.world_to_viewport(eye, at) else { continue };
+                if hud.multiplayer && rect.is_some_and(|r| !r.contains(p + origin)) {
+                    continue;
+                }
+                let p = (p + origin - hud_o) * scale;
+                let x = p.x.floor() as i32 - ((7 * text_len(&l.text)) >> 1);
+                pen.text(&ic.them, &l.text, x, p.y.floor() as i32 + 3, 7, Blend::Lighten);
+            }
+        }
+    }
     if hud.multiplayer {
         let label = texts.global(2189);
         let views = Views { title: &title, banner: &banner, label: &label, frame };
         views.draw(&mut pen, &hud.views, physical);
+        canvas.sub_px = sub;
+        return;
+    }
+    // No HUD during the level-start zoom (`zoom::paint` draws it).
+    let (replay, clock, zoom_in) = playback;
+    if zoom_in.zoom.is_some() {
         canvas.sub_px = sub;
         return;
     }
@@ -909,19 +965,9 @@ fn draw(
     let ymax = h as i32 - 1;
     let cx = (xmax >> 1) + 1;
 
-    // Floating labels (`DoLabels__Fsiiii` @ 10094f20), drawn in the view
-    // before the HUD: font 2 at (sx − 7·len/2, sy + 3) of the projected
-    // point, the pitch doubled in hi-res but not the centring offset.
     if let (Ok((cam, eye)), Ok(win)) = (view.single(), window.single()) {
-        let size = win.size();
-        let origin = cam.logical_viewport_rect().map_or(Vec2::ZERO, |r| r.min);
-        for l in &labels.0 {
-            let at = crate::world::object_to_render(l.pos.as_vec3());
-            let Ok(p) = cam.world_to_viewport(eye, at) else { continue };
-            let p = (p + origin) / size * Vec2::new(w as f32, h as f32);
-            let x = p.x.floor() as i32 - ((7 * text_len(&l.text)) >> 1);
-            pen.text(&ic.them, &l.text, x, p.y.floor() as i32 + 3, 7, Blend::Lighten);
-        }
+        let (hud_o, size) = hud_area.map_or((Vec2::ZERO, win.size()), |r| (r.min, r.size()));
+        let origin = cam.logical_viewport_rect().map_or(Vec2::ZERO, |r| r.min) - hud_o;
         // Checkpoint marker (`DrawCheckpoint__Fiiiiii` @ 10095240, after the
         // labels): `Checkpoint.red/blue` by the frame counter
         // (`_DAT_1017c898 >> 1`, 0..3) through `DrawIconAlpha` centred on
@@ -992,7 +1038,10 @@ fn draw(
     // off by default unless the view rotates), turned
     // by the rotating view's yaw, or by the yaw the rotating view would
     // have when the view does not rotate (`camera::MinimapYaw`).
-    if let Some(mm) = &minimap
+    if replay.playing() {
+        let total = replay.replay.as_ref().map_or(0, |r| r.records.len());
+        draw_playback(&mut pen, xmax, clock.0 as i32, replay.cursor as i32, total as i32);
+    } else if let Some(mm) = &minimap
         && settings.as_ref().is_some_and(|s| s.minimap_3d_on())
     {
         let yaw = minimap_yaw.0 as i32;
@@ -1096,8 +1145,67 @@ fn draw(
     canvas.sub_px = sub;
 }
 
+/// The replay clock and progress bar that replace the minimap during
+/// playback (Mac `DisplayPlayback__Fiii` @ 100909c0, OS4 `FUN_010176e0`,
+/// called by `amiga_levelloop` with the level clock, the replay position
+/// and `GetTotalFramesMovie`): `"%d:"` hours, `"%02d:"` minutes,
+/// `"%02d."` seconds and `"%02d"` hundredths of the level clock (30 ticks
+/// a second) in font 1 (`DisplayTextAlpha`, pitch 7) at (xmax − 78, 43);
+/// under it a bar on rows 37–41: a black frame (xmax − 78 .. xmax − 8),
+/// red 0xB4 inside (xmax − 77 .. xmax − 9, rows 38–40), green 0x78 up to
+/// `x = xmax − 77 + 68·pos/total` (at most xmax − 9) and a black line at
+/// x + 1. Hi-res: text at (xmax − 156, 86), frame xmax − 156 .. xmax − 16
+/// on rows 74–82, inside xmax − 154 .. xmax − 18 on 76–80, 136 px long.
+fn draw_playback(pen: &mut Pen, xmax: i32, ticks: i32, pos: i32, total: i32) {
+    let ticks = ticks.max(0);
+    let hours = ticks / 108_000;
+    let t = ticks % 108_000;
+    let (min, sec, cs) = (t / 1800, t % 1800 / 30, t % 30 * 100 / 30);
+    let clock = format!("{hours}:{min:02}:{sec:02}.{cs:02}");
+    let total = total.max(1);
+    // (text x, text y, frame x0, x1, row 0, inner x0, x1, rows, length)
+    let (tx, ty, fx0, fx1, fy0, fy1, ix0, ix1, iy0, iy1, len) = if pen.hi {
+        (xmax - 156, 86, xmax - 156, xmax - 16, 74, 82, xmax - 154, xmax - 18, 76, 80, 136)
+    } else {
+        (xmax - 78, 43, xmax - 78, xmax - 8, 37, 41, xmax - 77, xmax - 9, 38, 40, 68)
+    };
+    let ic = pen.icons;
+    pen.text(&ic.you, &clock, tx, ty, 7, Blend::Lighten);
+    let x = (ix0 + pos.clamp(0, total) * len / total).min(ix1);
+    let pal = pen.p.pal;
+    let rgb = |c: usize| [pal[c * 3], pal[c * 3 + 1], pal[c * 3 + 2]];
+    let mut rect = |c: usize, x0: i32, y0: i32, x1: i32, y1: i32| {
+        for y in y0..=y1 {
+            for xx in x0..=x1 {
+                pen.p.put_rgb(xx, y, rgb(c));
+            }
+        }
+    };
+    rect(0, fx0, fy0, fx1, fy1);
+    rect(0xB4, ix0, iy0, ix1, iy1);
+    rect(0x78, ix0, iy0, x, iy1);
+    rect(0, x + 1, iy0, x + 1, iy1);
+}
+
 /// Copy the subtract plane drawn by [`draw`] into its image.
-fn upload_plane(canvas: Res<Canvas>, mut images: ResMut<Assets<Image>>) {
+///
+/// When the canvas changes size (window, view size, the level-start zoom)
+/// the plane's image is replaced by a new texture, which a UI material's
+/// bind group does not follow by itself: the node gets a new material
+/// (otherwise the panels stop showing).
+fn upload_plane(
+    canvas: Res<Canvas>,
+    mut images: ResMut<Assets<Image>>,
+    mut planes: ResMut<Assets<SubtractPlane>>,
+    mut nodes: Query<&mut MaterialNode<SubtractPlane>>,
+    mut size: Local<(usize, usize)>,
+) {
+    if *size != (canvas.w, canvas.h) {
+        *size = (canvas.w, canvas.h);
+        for mut n in &mut nodes {
+            n.0 = planes.add(SubtractPlane { plane: canvas.sub.clone() });
+        }
+    }
     if let Some(mut img) = images.get_mut(&canvas.sub)
         && let Some(px) = img.data.as_mut()
         && px.len() == canvas.sub_px.len()

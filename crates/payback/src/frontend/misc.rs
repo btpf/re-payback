@@ -6,7 +6,7 @@
 use super::bindings::{self, COLUMNS, Controls, Table};
 use super::progress::{self, Profile, SLOTS};
 use super::ui::*;
-use bevy::prelude::{GamepadButton, KeyCode};
+use bevy::prelude::{GamepadAxis, GamepadButton, KeyCode};
 use crate::hud::paint::text_len;
 
 /// Characters accepted by text entry: letters, digits, space and
@@ -256,9 +256,17 @@ impl Screen for SaveGame {
     }
 }
 
+/// The Mac's About box (Apple menu "About Payback…", `ShowAboutBox__11CPaybackAppFl`
+/// @ 1004ea30, PPob 2000: the title, a caption and the `vers` 1 string),
+/// shown here at the end of the main menu's credits ([`Credits::with_about`])
+/// since the port has no menu bar.
+pub const ABOUT: [&str; 4] = ["", " Payback", "$Macintosh version by Alex Curylo", "$1.0.0, \u{a9}2002 VPL"];
+
 /// Scrolling credits: one phrase per line from `first` until `!`.
 pub struct Credits {
     lines: Vec<String>,
+    /// Lines added after the phrases ([`ABOUT`]).
+    extra: Vec<String>,
     speed: i32,
     skippable: bool,
     stop_y: i32,
@@ -282,6 +290,7 @@ impl Credits {
     pub fn new(first: u32, speed: i32, skippable: bool, stop_y: i32, hold: i32) -> Credits {
         Credits {
             lines: Vec::new(),
+            extra: Vec::new(),
             speed,
             skippable,
             stop_y,
@@ -290,6 +299,12 @@ impl Credits {
             loaded: false,
             first,
         }
+    }
+
+    /// With the Mac About box's text at the end ([`ABOUT`]).
+    pub fn with_about(mut self) -> Credits {
+        self.extra = ABOUT.iter().map(|s| s.to_string()).collect();
+        self
     }
 
     fn height(&self) -> i32 {
@@ -310,6 +325,7 @@ impl Screen for Credits {
                 self.lines.push(l);
                 n += 1;
             }
+            self.lines.append(&mut self.extra);
         }
         if self.skippable && (input.fire || input.back) {
             cx.sound(Sfx::Select);
@@ -433,11 +449,16 @@ impl Screen for LanguageChooser {
 }
 
 /// Key name for a binding (`FUN_0103c690`: "-?-" when disabled, phrases
-/// 1520.. for the special keys).
+/// 1520.. for the special keys). Character keys show what they print on
+/// the keyboard layout once they have been pressed (`bindings::key_label`),
+/// else their US name.
 pub fn key_name(cx: &Ctx, key: Option<KeyCode>) -> String {
     let Some(key) = key else {
         return "-?-".into();
     };
+    if let Some(label) = bindings::key_label(key) {
+        return label;
+    }
     let id = bindings::key_id(key);
     let phrase = match id.as_str() {
         "Space" => 1521,
@@ -462,11 +483,25 @@ pub fn key_name(cx: &Ctx, key: Option<KeyCode>) -> String {
     cx.g(phrase)
 }
 
-/// Gamepad button name (phrases 1500–1505 for Select, Start, L1/R1/L2/R2).
-pub fn pad_name(cx: &Ctx, b: Option<GamepadButton>) -> String {
+/// Gamepad control name (phrases 1500–1505 for Select, Start, L1/R1/L2/R2;
+/// axes as "LX+", "RY-", "LZ+" ...).
+pub fn pad_name(cx: &Ctx, b: Option<bindings::PadInput>) -> String {
     use GamepadButton::*;
-    let Some(b) = b else {
-        return "-?-".into();
+    let b = match b {
+        None => return "-?-".into(),
+        Some(bindings::PadInput::Axis(a, p)) => {
+            let name = match a {
+                GamepadAxis::LeftStickX => "LX",
+                GamepadAxis::LeftStickY => "LY",
+                GamepadAxis::RightStickX => "RX",
+                GamepadAxis::RightStickY => "RY",
+                GamepadAxis::LeftZ => "LZ",
+                GamepadAxis::RightZ => "RZ",
+                _ => "Axis",
+            };
+            return format!("{name}{}", if p { '+' } else { '-' });
+        }
+        Some(bindings::PadInput::Button(b)) => b,
     };
     let phrase = match b {
         Select => 1500,
@@ -485,7 +520,7 @@ pub fn pad_name(cx: &Ctx, b: Option<GamepadButton>) -> String {
         DPadDown => return "Down".into(),
         DPadLeft => return "Left".into(),
         DPadRight => return "Right".into(),
-        b => return bindings::pad_id(b),
+        b => return bindings::pad_id(bindings::PadInput::Button(b)),
     };
     cx.g(phrase)
 }
@@ -575,7 +610,8 @@ impl ControlSetup {
             cx.sound(Sfx::Refuse);
         }
         if !keyboard {
-            if let Some(&b) = input.pad.first() {
+            let pressed = input.pad.first().map(|&b| bindings::PadInput::Button(b));
+            if let Some(b) = pressed.or_else(|| input.pad_axes.first().copied()) {
                 cx.sound(Sfx::Select);
                 self.controls.set_pad(col, action, Some(b));
                 self.waiting = false;
@@ -776,6 +812,12 @@ impl Screen for CdSetup {
             } else {
                 let c = if i == self.sel { ui.flash() } else { 1 };
                 ui.text(s, x, *y, c);
+            }
+        }
+        // No tracks: say where they go (`music::NO_MUSIC_HINT`).
+        if !crate::music::available() {
+            for (i, l) in crate::music::NO_MUSIC_HINT.iter().enumerate() {
+                ui.centred(l, ui.hy(112) + 11 * i as i32, 2);
             }
         }
         let c = if self.sel == CD_DONE { ui.flash() } else { 1 };

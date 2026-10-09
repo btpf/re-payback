@@ -141,6 +141,19 @@ Low level: `Trigger_QueueAdd(ev,type,p1,p2,p3,door,p4,p5,p6)` `0xa6842`;
 (also stops the ring sound and restores the phone/door map cell); `Trigger_ClearAll`
 `0xa6834`; `Trigger_GetTimerSeconds()` `0xa6978` (first type-5 trigger's ticks / 30, used by the HUD clock).
 
+Removal (`Trigger_Remove`; Mac `RemoveTrigger` @ 100f4560) moves the **last** trigger into the
+freed index. The evaluation loop (`Trigger_Update`; Mac `CheckForTriggers` @ 100f4a50) fires
+the handler, removes the trigger and goes on with the next index, so the trigger moved in is
+skipped for that frame (a countdown loses a tick) and the table order changes; the kill loop
+(`ProcessToDoList` @ 100f4880) re-tests the index. The order matters for same-frame firing order
+and for the HUD clock (the first type 5). CONFIRMED. Port: the same (`mission/eval.rs`
+`evaluate`, `mission/triggers.rs` `apply_pending`), except that a trigger the original fires from
+an event hook (`ObjectDead`, `ObjectIntoPlVehicle`, `ObjectAtLocation`, weapon and cop-kill
+events, ...) is not skipped: those fire outside the loop in the original, and the port's reports
+of them last one frame, so skipping would lose the event. Handlers still run after the loop rather than
+inside it, so a handler's effects are seen by the next frame's evaluation only (adds and kills
+are queued in both).
+
 ### 3.1 Script-level AddTrigger
 
 `AddTrigger(ev, type, a, b, c, d)` = 68k `0xb41dc` → `0xb2b12(ev,type,a,b,c,d,0)`;
@@ -428,7 +441,43 @@ was established by comparing script00 `main` with 68k `0xb91dc/0xb9b6a`:
 | 0x0b | `0x10cf8` | `AddMoney` |
 | 0x13 | `0x10b80` | `SetPlayerVehicleId` |
 | 0x1b | `0x10e26` | `AddLives` |
-| others (0x05, 0x0c–0x12, 0x14–0x1a, 0x1c–0x36) | see `analysis/ghidra_script00/` | not mapped |
+| 0x05 | `0x10ba8` | `Actor_Release` (Mac `RemoveObjectAtWill`) |
+| 0x0c | `0x10c1c` | `KillTrigger` |
+| 0x0d | `0x10632` | `SetCube` (Mac `AdjustCube`) |
+| 0x0e–0x12 | `0x106da`, `0x1071e`, `0x10762`, `0x107a6`, `0x107ea` | `SetFaceTop/North/East/South/West` (Mac `AdjustFace*`) |
+| 0x14 | `0x10918` | `Ped_ExitPlayerVehicle` (Mac `AddObjectNearPlayer`) |
+| 0x15 | `0x109b0` | `SetWantedLevel` |
+| 0x16 | `0x10a52` | `Actor_Kill` (health −71; Mac `ExplodeObject`) |
+| 0x17 | `0x10cd0` | `SetTrafficModel` (Mac `RequestVehicle`) |
+| 0x18 | `0x10aa2` | `Explosion` |
+| 0x19 | `0x10a7a` | `Actor_ReleaseIdle` (Mac `MakeDrone`) |
+| 0x1a | `0x10ad4` | `Actor_Attack` (Mac `SetAggressiveness`) |
+| 0x1c | `0x10e4e` | `ShowCheckpointMarker` (Mac `SetCheckpoint`) |
+| 0x1d | `0x10944` | `Ped_ExitVehicle` (Mac `AddObjectNearObj`) |
+| 0x1e | `0x1068e` | `SetScenery` (Mac `AdjustCubeNew`) |
+| 0x1f | `0x108e2` | `CreateActorFx` (Mac `AddObjectSpecial`) |
+| 0x20 / 0x21 | `0x105a0` / `0x105e0` | `AddSound` / `DeleteSound` |
+| 0x23 / 0x24 | `0x109d8` / `0x10a00` | `SetStartLights` / `SetLapDisplay` |
+| 0x25 / 0x26 | `0x10b02` / `0x10b2c` | `Actor_SetAggro` / `Actor_SetControls` |
+| 0x27 / 0x28 | `0x10dd0` / `0x10a2a` | `AddGas` / `AddHealth` |
+| 0x29 / 0x2a | `0x10d44` / `0x10d76` | `StoreRegion` / `PasteRegion` (no callers; by the dispatcher's code) |
+| 0x2b | `0x10bd0` | `Actor_Remove` (no callers, as U7 `0xb459a`) |
+| 0x2c / 0x2d | `0x10c76` / `0x10da8` | `SetVisibleLayers` / `SetProjectileId` |
+| 0x2e / 0x2f | `0x10608` / `0x10978` | `Actor_Follow` / `Ped_ExitVehicleEx` |
+| 0x30 | `0x1082e` | `SetSpawnPoint` |
+| 0x31 / 0x32 | script20 `0x10d9e` / `0x10e80` | `LevelComplete` / `RemoveAllActors` (call counts alone suggest the reverse; the dispatcher settles it) |
+| 0x33 / 0x34 | script20 `0x10904` / `0x1092c` | `Heli_TakeOff` / `Heli_Land` |
+| 0x35 | `0x10b56` (script21 race helper) | `Actor_SetMaxSpeed` |
+| 0x36 | `0x10f3e` | `Dialog_Flush` |
+| 0x06, 0x22 | none | unused: no stub and no dispatcher case |
+
+All CONFIRMED (2026-10-09) from the CD-release `Payback.exe`'s own dispatcher `DoScript`
+(if-chain 0x55e38–0x57f60, flat at 0x10000) plus matching arguments and positions in the
+Mac/U7 level code; stub addresses are script00's (01, 10, 21 share them; 11 and 20 are
+shifted, e.g. 0x0d at `0x106da`). Code 0x08 takes (font, phrase); CD `ShowMessage` 2022
+also plays 0x1a and raises the multiplier, 2028 plays 0x19. CD object offsets differ
+(script id `+0x472`, map cell `x·0x3300 + y·0x66 + cube·0x22`). Scratch:
+`analysis/scratch/testsre/re6/`.
 
 Game → script messages: type 1 connect, type 2 goodbye, event messages carry the event
 number in `+0x16`.

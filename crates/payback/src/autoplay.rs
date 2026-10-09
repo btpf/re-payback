@@ -6,7 +6,10 @@
 //! live triggers, the current slot) every tick and moves the player to
 //! whatever the current objective needs: answer a phone, get into a
 //! vehicle, reach a checkpoint or garage, kill a target, collect a crate.
-//! It teleports instead of driving, but the triggers still fire through the
+//! In a vehicle it drives (the game's AI driver at the wheel, along the
+//! route graph, `drive_to`) unless a mission clock is too short, the goal
+//! is on another floor or the car gets nowhere; on foot, and for those
+//! cases, it teleports. The triggers still fire through the
 //! normal game logic (trigger evaluation, boarding, pickups, deaths). Small
 //! per-level hints (`hint`) cover what the trigger list alone can't tell
 //! (which "actor gone" trigger is a target and which a failure, when to run
@@ -15,9 +18,11 @@
 //!
 //! Bot shortcuts (none of them fires a trigger itself): teleporting the
 //! player (on foot or with the vehicle), kills by an explosion credited to
-//! the player at the target, steering the race car's velocity along the
-//! opponents' waypoints, and moving a passenger who can't walk to the
+//! the player at the target, and moving a passenger who can't walk to the
 //! player's car (another floor) next to it. Debug traces: `--autoplay-debug`.
+//!
+//! In Rampage on a map with phones it plays the Mac's random missions
+//! (`--rampage <p> --autoplay`; ends at the money goal or the tick cap).
 //!
 //! `--autoplay-all` holds money back between missions until every phone
 //! mission has been played (the level otherwise ends at the money goal).
@@ -44,7 +49,7 @@ use std::sync::OnceLock;
 /// The bot is on (`--autoplay`).
 pub fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::args().any(|a| a == "--autoplay"))
+    *ON.get_or_init(|| crate::args().any(|a| a == "--autoplay"))
 }
 
 /// Log a mission line while the bot plays.
@@ -74,6 +79,7 @@ impl Plugin for AutoplayPlugin {
                 bot_tick
                     .after(crate::replay::ReplayInput)
                     .before(PeopleThink)
+                    .before(crate::sim::traffic::SpawnSet)
                     .run_if(in_state(AppState::Playing)),
             )
             .add_systems(Update, watch_end);
@@ -120,7 +126,9 @@ pub enum Goal {
     Dump(Entity),
     /// Drive the current vehicle round this loop of points (a race
     /// course), each leg at most at its speed (units per tick).
-    Drive { route: Vec<(IVec2, i32)> },
+    /// `(point, speed cap, arrival radius)`: a point counts as passed
+    /// within |dx| + |dy| <= 2·radius, as the AI racers' goto (type 0x32).
+    Drive { route: Vec<(IVec2, i32, i32)> },
     /// Shoot `target` with weapon `slot` standing at `from`; `charge` > 0
     /// throws grenades with that power.
     Shoot {
@@ -169,6 +177,36 @@ pub struct Bot {
     /// `--autoplay-all`: money held back so the level doesn't end before
     /// every phone mission has been played.
     bank: i32,
+    /// Driving the player's vehicle somewhere ([`drive_to`]).
+    drv: Option<Driving>,
+    /// The bot driver's own random stream (a copy of the game's, so the
+    /// impatience rolls don't move the game's sequence).
+    rng: Option<crate::sim::Rng>,
+    /// The last target logged as "no time to drive".
+    drive_note: Option<IVec2>,
+}
+
+/// A drive in progress: the player's vehicle steered by the AI driver
+/// (`vehicle_ai::controller`) along the route graph.
+struct Driving {
+    target: IVec2,
+    nav: crate::sim::vehicle_ai::Nav,
+    goal_node: Option<usize>,
+    started: u32,
+    /// Where the car was and since when (stuck check).
+    anchor: (IVec3, u32),
+    /// Backing out of a wedge until this tick.
+    reverse_until: u32,
+    stucks: u32,
+}
+
+/// What [`drive_to`] did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Drove {
+    Driving,
+    Arrived,
+    /// No way to drive there (another floor, no progress): teleport.
+    CantDrive,
 }
 
 /// The player this tick.
@@ -271,7 +309,7 @@ fn bot_tick(world: &mut World) {
 }
 
 fn record_trails(world: &mut World, bot: &mut Bot) {
-    if std::env::args().any(|a| a == "--autoplay-debug") {
+    if crate::args().any(|a| a == "--autoplay-debug") {
         let mut q = world.query::<(Entity, &Obj)>();
         let all: Vec<(Entity, IVec3, i32, i32, i32)> =
             q.iter(world).map(|(e, o)| (e, o.pos, o.health, o.script_id, o.speed)).collect();
@@ -392,7 +430,7 @@ fn step(world: &mut World, bot: &mut Bot) {
         }
         return;
     }
-    if std::env::args().any(|a| a == "--autoplay-all") {
+    if crate::args().any(|a| a == "--autoplay-all") {
         hold_money(world, bot, &me);
     }
     let goal = choose(world, bot, &me);
@@ -632,8 +670,13 @@ fn spot_near(world: &World, pos: IVec3, level: usize, d: i32) -> (i32, i32) {
 fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
     match goal.clone() {
         Goal::Wait => {
-            if bot.tick % 25 == 0 && std::env::args().any(|a| a == "--autoplay-debug") {
-                let actors: Vec<Entity> = world.resource::<Triggers>().list.iter().filter_map(|t| t.actor).collect();
+            if bot.tick % 25 == 0 && crate::args().any(|a| a == "--autoplay-debug") {
+                let actors: Vec<Entity> = world
+                    .resource::<Triggers>()
+                    .list
+                    .iter()
+                    .flat_map(|t| t.actor.into_iter().chain(t.group.iter().copied()))
+                    .collect();
                 for a in actors {
                     if let Some(o) = world.get::<Obj>(a) {
                         log(format_args!("wait dbg: {a:?} id {:#x} pos {:?} lvl {} h {:#x} speed {} vel {:?} state {:?}", o.script_id, o.pos, o.level, o.heading, o.speed, o.vel, o.state));
@@ -710,6 +753,11 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             if foot == Some(false) && me.on_foot {
                 return act(world, bot, me, &Goal::EnterModel(-1));
             }
+            // In a vehicle: drive there (the AT_POINT types fire within
+            // 0x1000).
+            if !me.on_foot && drive_to(world, bot, me, IVec2::new(x, y), level, 0x600) != Drove::CantDrive {
+                return;
+            }
             let d = (me.pos.truncate() - IVec2::new(x, y)).abs();
             if d.x > 64 || d.y > 64 || me.level != level {
                 teleport(world, me.e, x, y, level);
@@ -722,7 +770,11 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             if me.on_foot {
                 return act(world, bot, me, &Goal::EnterModel(-1));
             }
-            teleport(world, me.e, sx << 11 | 0x400, sy << 11 | 0x400, level);
+            let centre = IVec2::new(sx << 11 | 0x400, sy << 11 | 0x400);
+            if drive_to(world, bot, me, centre, level, 700) != Drove::CantDrive {
+                return;
+            }
+            teleport(world, me.e, centre.x, centre.y, level);
         }
         Goal::Kill(e) => kill(world, bot, me, e),
         Goal::Approach { x, y, level, r } => {
@@ -730,6 +782,8 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             if d <= r + 1000 && me.level == level {
                 return;
             }
+            // (Teleported: driving straight in gets the bot seen by the
+            // people it is meant to watch.)
             let dir = (me.pos.truncate() - IVec2::new(x, y)).as_vec2().normalize_or_zero();
             let p = IVec3::new(x, y, me.pos.z);
             let mut spot = None;
@@ -782,62 +836,44 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             if me.on_foot || route.is_empty() {
                 return;
             }
-            let (target, leg_speed) = route[bot.route_idx % route.len()];
+            let (target, leg_speed, radius) = route[bot.route_idx % route.len()];
+            // The best AI's cap (car 11 gets the full cap; faster, the
+            // bot overshoots the corners into the walls).
             let speed = leg_speed.min(crate::vehicles::TYPES[me.vehicle.max(0) as usize].max_speed);
             let d = target - me.pos.truncate();
             let dist = d.as_vec2().length();
-            if dist < 900.0 {
+            if d.abs().element_sum() <= 2 * radius {
                 bot.route_idx += 1;
                 return;
             }
-            // Steer: point the car at the next waypoint at the leg's speed
-            // and let the driving physics move it (walls, jumps, other
-            // cars all apply). A car close ahead is passed on the side
-            // with more room.
-            let fwd = d.as_vec2() / dist;
-            let left = Vec2::new(-fwd.y, fwd.x);
-            let mut aim = d.as_vec2();
-            let mut q = world.query::<(Entity, &Obj, &Vehicle)>();
-            let ahead: Vec<Vec2> = q
-                .iter(world)
-                .filter(|(e, o, _)| *e != me.e && o.state != State::Removed)
-                .map(|(_, o, _)| (o.pos - me.pos).truncate().as_vec2())
-                .filter(|r| {
-                    let along = r.dot(fwd);
-                    (0.0..3000.0).contains(&along) && r.dot(left).abs() < 1500.0
-                })
-                .collect();
-            if let Some(r) = ahead.iter().min_by(|a, b| a.length().total_cmp(&b.length())) {
-                let side = if r.dot(left) > 0.0 { -left } else { left };
-                aim = fwd * 2500.0 + side * 1800.0;
-            }
-            let h = heading_of(aim.x as i32, aim.y as i32);
-            let (sn, cs) = {
-                let trig = world.resource::<Trig>();
-                (trig.sin(h), trig.cos(h))
-            };
-            if std::env::args().any(|a| a == "--autoplay-debug") && bot.tick % 10 == 0 {
+            // The game's AI driver at the wheel (`steer_car`, the race
+            // drivers' uncapped band), at most the leg's speed: the
+            // driving physics move the car (walls, jumps, other cars).
+            // It used to set the car's velocity directly, which rammed
+            // walls at full speed every tick until the car was wrecked
+            // (MS-1).
+            let mut nav = crate::sim::vehicle_ai::Nav::at(me.pos);
+            steer_car(world, bot, me, target, true, speed, &mut nav);
+            if crate::args().any(|a| a == "--autoplay-debug") && bot.tick % 10 == 0 {
                 let hp = world.get::<Obj>(me.e).map_or(0, |o| o.health);
                 log(format_args!("drive dbg: {:?} sq {:?} -> wp {} health {hp}", me.pos, me.pos.truncate() / 2048, bot.route_idx));
             }
-            if let Some(mut o) = world.get_mut::<Obj>(me.e) {
-                o.heading = h;
-                o.turn_rate = 0;
-                o.speed = speed;
-                o.vel.x = sn * speed >> 8;
-                o.vel.y = cs * speed >> 8;
-            }
-            // Wedged (against a wall or a car) for 2 s: hop ahead.
+            // Wedged (against a wall or a car) for 2 s: back out; after
+            // 6 s, hop ahead.
             let (anchor, since) = bot.drive_anchor.unwrap_or((me.pos, bot.tick));
             if (anchor - me.pos).truncate().abs().max_element() > 600 {
                 bot.drive_anchor = Some((me.pos, bot.tick));
-            } else if bot.tick - since > 50 {
+            } else if bot.tick - since > 150 {
                 let step = (d.as_vec2() * 1500f32.min(dist) / dist).as_ivec2();
                 let p = me.pos.truncate() + step;
                 log(format_args!("drive: stuck at {:?}, hopping ahead", me.pos.truncate() / 2048));
                 teleport(world, me.e, p.x, p.y, me.level);
                 bot.drive_anchor = None;
             } else {
+                if bot.tick - since > 50 && (bot.tick - since) % 50 < 25 {
+                    let mut i = input(world);
+                    *i = PlayerInput { reverse: true, left: i.right, right: i.left, ..default() };
+                }
                 bot.drive_anchor = Some((anchor, since));
             }
         }
@@ -845,7 +881,7 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
             if me.e != v {
                 return enter(world, bot, me, v);
             }
-            if std::env::args().any(|a| a == "--autoplay-debug") {
+            if crate::args().any(|a| a == "--autoplay-debug") {
                 if let Some(o) = world.get::<Obj>(v) {
                     log(format_args!("dump dbg: pos {:?} floor {} lvl {} water {} ground {}", o.pos, o.floor_z, o.level, o.in_water, o.on_ground));
                 }
@@ -913,7 +949,7 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                 input(world).weapon_pressed = Some(slot);
                 return;
             }
-            if std::env::args().any(|a| a == "--autoplay-debug") {
+            if crate::args().any(|a| a == "--autoplay-debug") {
                 let (h, ft) = (world.get::<Obj>(me.e).map_or(0, |o| o.health), world.get::<Arsenal>(me.e).map_or(0, |a| a.fire_timer));
                 let mut q = world.query::<(&Obj, &crate::sim::combat::Projectile)>();
                 let pr: Vec<IVec3> = q.iter(world).map(|(o, _)| o.pos).collect();
@@ -947,6 +983,12 @@ fn act(world: &mut World, bot: &mut Bot, me: &Me, goal: &Goal) {
                 return;
             };
             let d = (pos - me.pos).truncate().abs();
+            if !me.on_foot
+                && foot != Some(true)
+                && drive_to(world, bot, me, pos.truncate(), level, dist) != Drove::CantDrive
+            {
+                return;
+            }
             if d.x > dist || d.y > dist || level != me.level {
                 let (x, y) = spot_near(world, pos, level, dist.min(600).max(300));
                 teleport(world, me.e, x, y, level);
@@ -1200,6 +1242,149 @@ fn enter(world: &mut World, bot: &mut Bot, me: &Me, v: Entity) {
     }
 }
 
+// ---- Driving ---------------------------------------------------------------
+
+/// One tick of the game's own AI driver at the wheel of the player's
+/// vehicle (`vehicle_ai::controller`): skill 98, so it looks ahead and
+/// slows for traffic (`direct`: the race drivers' uncapped speed band),
+/// at most `cap` units per tick. Written into the player's controls, so
+/// the driving physics, walls and other cars all apply.
+fn steer_car(
+    world: &mut World,
+    bot: &mut Bot,
+    me: &Me,
+    aim: IVec2,
+    direct: bool,
+    cap: i32,
+    nav: &mut crate::sim::vehicle_ai::Nav,
+) {
+    use crate::sim::vehicle_ai::{Driver, Env, controller, occupancy};
+    let Some(obj) = world.get::<Obj>(me.e).cloned() else { return };
+    let Some(kind) = world.get::<Vehicle>(me.e).map(|v| v.kind) else { return };
+    let Some(drive) = world.get::<crate::sim::driving::Drive>(me.e).cloned() else { return };
+    let mut q = world.query::<(Entity, &Obj)>();
+    let objs: Vec<(Entity, Obj)> = q.iter(world).map(|(e, o)| (e, o.clone())).collect();
+    let rng = bot.rng.get_or_insert_with(|| world.resource::<crate::sim::Rng>().clone());
+    let (Some(city), Some(library)) = (world.get_resource::<City>(), world.get_resource::<ObjectLibrary>()) else {
+        return;
+    };
+    let trig = world.resource::<Trig>();
+    let occ = occupancy(objs.iter().map(|(e, o)| (*e, o)), library, trig);
+    let env = Env {
+        city,
+        lights: world.resource::<crate::sim::traffic::LightPhase>().phase,
+        occ: &occ,
+    };
+    let driver = Driver {
+        skill: 98,
+        police: false,
+        direct,
+        clamp: false,
+    };
+    let t = &crate::vehicles::TYPES[kind];
+    let front = library.model(obj.model).info.max_y;
+    let mut st = controller(me.e, &obj, t, front, &drive, driver, aim, &env, nav, rng, trig);
+    if obj.speed > cap {
+        st.throttle = if obj.speed > cap + 60 { 1 } else { 0 };
+    }
+    let mut i = input(world);
+    i.left = st.steer < 0;
+    i.right = st.steer > 0;
+    i.accel = st.throttle < 0;
+    i.reverse = st.throttle > 0;
+}
+
+/// Drive the player's vehicle to within `radius` of `target` (max norm)
+/// on `level`: along the route graph while far, then straight at it. A
+/// wedged car backs out; after four wedges or a time budget (or on another
+/// floor) it gives up and the caller teleports (DT-4: the bot used to
+/// teleport for every move).
+fn drive_to(world: &mut World, bot: &mut Bot, me: &Me, target: IVec2, level: usize, radius: i32) -> Drove {
+    use crate::sim::vehicle_ai::{Nav, RouteGraph, follow_route};
+    if me.on_foot || me.level != level {
+        bot.drv = None;
+        return Drove::CantDrive;
+    }
+    let dist = (me.pos.truncate() - target).abs().max_element();
+    if dist <= radius {
+        bot.drv = None;
+        let moving = world.get::<Obj>(me.e).is_some_and(|o| o.speed != 0);
+        input(world).brake = moving;
+        return Drove::Arrived;
+    }
+    let mut drv = match bot.drv.take() {
+        Some(d) if d.target == target => d,
+        _ => Driving {
+            target,
+            nav: Nav::at(me.pos),
+            goal_node: world.resource::<RouteGraph>().nearest(target.extend(me.pos.z)),
+            started: bot.tick,
+            anchor: (me.pos, bot.tick),
+            reverse_until: 0,
+            stucks: 0,
+        },
+    };
+    let budget = 900 + dist as u32 / 30;
+    // Against a mission clock, only while there is time to spare: about
+    // 200 units a tick, 1.5 times the straight distance by road.
+    let manhattan = (me.pos.truncate() - target).abs().element_sum();
+    let need = manhattan * 3 / 2 / 200 * 2 + 300;
+    let clock = world.resource::<Triggers>().countdown_seconds().map(|s| s * 30);
+    if clock.is_some_and(|t| t < need) {
+        if bot.drive_note.replace(target) != Some(target) {
+            log(format_args!("drive: no time to drive to {:?} ({} ticks on the clock)", target / 2048, clock.unwrap_or(0)));
+        }
+        return Drove::CantDrive;
+    }
+    if bot.tick - drv.started > budget || drv.stucks >= 4 {
+        log(format_args!(
+            "drive: giving up on {:?} after {} ticks ({} wedges), {} away",
+            target / 2048,
+            bot.tick - drv.started,
+            drv.stucks,
+            dist
+        ));
+        return Drove::CantDrive;
+    }
+    // Wedged: back out for a second, steering the other way.
+    if (drv.anchor.0 - me.pos).truncate().abs().max_element() > 600 {
+        drv.anchor = (me.pos, bot.tick);
+    } else if bot.tick.saturating_sub(drv.anchor.1) > 75 && bot.tick >= drv.reverse_until {
+        drv.stucks += 1;
+        drv.reverse_until = bot.tick + 30;
+        drv.anchor = (me.pos, bot.tick + 30);
+    }
+    if bot.tick < drv.reverse_until {
+        let mut i = input(world);
+        i.reverse = true;
+        i.right = drv.stucks % 2 == 0;
+        i.left = !i.right;
+        bot.drv = Some(drv);
+        return Drove::Driving;
+    }
+    let obj = world.get::<Obj>(me.e).cloned();
+    let aim = {
+        let route = world.resource::<RouteGraph>();
+        match obj {
+            Some(o) if !route.is_empty() && dist > 8000 => {
+                if follow_route(route, &mut drv.nav, &o, drv.goal_node, false) {
+                    target
+                } else {
+                    drv.nav.aim
+                }
+            }
+            _ => target,
+        }
+    };
+    // Slow down for the last stretch so it stops on the point.
+    let cap = if dist < 6000 { 120 + dist / 40 } else { i32::MAX };
+    let mut nav = std::mem::replace(&mut drv.nav, Nav::at(me.pos));
+    steer_car(world, bot, me, aim, false, cap, &mut nav);
+    drv.nav = nav;
+    bot.drv = Some(drv);
+    Drove::Driving
+}
+
 /// Put the player (on foot) at vehicle `v`'s driver door.
 fn stand_at_door(world: &mut World, me: &Me, v: Entity) -> bool {
     let Some((vo, kind)) = world.get::<Obj>(v).cloned().zip(world.get::<Vehicle>(v).map(|x| x.kind)) else {
@@ -1236,7 +1421,7 @@ fn follow(world: &mut World, bot: &mut Bot, me: &Me, e: Entity) {
             && crate::sim::angle_diff(heading, heading_of(p.x - pos.x, p.y - pos.y)).abs() <= 0x5a0 + 0x300
     };
     let good = |w: &World, p: IVec3| !seen(w, p) && (1500..28000).contains(&box_d(p));
-    if std::env::args().any(|a| a == "--autoplay-debug") {
+    if crate::args().any(|a| a == "--autoplay-debug") {
         let p = me.pos;
         log(format_args!(
             "follow dbg: actor {:?} h {heading:#x} me {:?} d {} ang {} los {} seen {}",
@@ -1325,7 +1510,7 @@ fn alive(world: &World, e: Entity) -> bool {
 /// Race driving: once the player's checkpoint trigger (20000, on car 10)
 /// is armed, drive the opponents' waypoint loop at the car's top speed
 /// (capped per leg where the script caps the AI's).
-fn race(world: &mut World, bot: &mut Bot, me: &Me, c: &Ctx, route: Vec<(IVec2, i32)>) -> Option<Goal> {
+fn race(world: &mut World, bot: &mut Bot, me: &Me, c: &Ctx, route: Vec<(IVec2, i32, i32)>) -> Option<Goal> {
     if !c.has(20000) {
         bot.route_idx = 0;
         bot.race_start = None;
@@ -1337,7 +1522,7 @@ fn race(world: &mut World, bot: &mut Bot, me: &Me, c: &Ctx, route: Vec<(IVec2, i
     // Let the grid pull away before setting off (the bot drives through
     // the pack badly).
     let start = *bot.race_start.get_or_insert(bot.tick);
-    if bot.tick - start < 60 {
+    if bot.tick - start < 20 {
         return Some(Goal::Wait);
     }
     let _ = world;
@@ -1353,7 +1538,7 @@ fn hint_10(world: &mut World, bot: &mut Bot, me: &Me, c: &Ctx) -> Option<Goal> {
             let route = AI_X
                 .iter()
                 .zip(AI_Y)
-                .map(|(&x, y)| (IVec2::new(x << 11 | 0x400, y << 11 | 0x400), i32::MAX))
+                .map(|(&x, y)| (IVec2::new(x << 11 | 0x400, y << 11 | 0x400), i32::MAX, 700))
                 .collect();
             race(world, bot, me, c, route)
         }
@@ -1382,7 +1567,7 @@ fn hint_21(world: &mut World, bot: &mut Bot, me: &Me, c: &Ctx) -> Option<Goal> {
         // M3 race: the AI's waypoints at the best AI's speed caps.
         3 if c.has(1) => None,
         3 => {
-            let route = RACE_WAYPOINTS.iter().map(|&(x, y, _, cap)| (IVec2::new(x, y), cap)).collect();
+            let route = RACE_WAYPOINTS.iter().map(|&(x, y, r, cap)| (IVec2::new(x, y), cap, r)).collect();
             race(world, bot, me, c, route)
         }
         // M4: wreck the surveillance van (its "destroyed" is the success).

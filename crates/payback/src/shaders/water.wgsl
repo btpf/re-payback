@@ -22,6 +22,17 @@
 // the vertex colour is clamp(L + (k >> 3), 0, 255) / 256 with L the corner's
 // Gouraud light, modulating the texture. Each quad is two triangles split
 // along corner 1 - corner 3 (NE-SW).
+// Rotating view (hardware branch of the reflect triangle filler, OS4
+// `FUN_01081ba4` / `FUN_0108a2a0`, Mac `DrawAffineTriangleReflect` @
+// 100ba910; CONFIRMED in both): with a = 0xb3f - yaw, b = 0x167f - yaw
+// (yaw = the view's `DAT_0114c7d0`, 5760 per turn) and the 256-amplitude
+// cos/sin tables C, S,
+//     u = 128 + 8 * ((dx C[a] + dy S[a]) >> 8) / fx - k (C[b] + S[b]) / 16384
+//     v = 128 + 8 * ((dy C[a] - dx S[a]) >> 8) / fy - k (C[b] - S[b]) / 16384
+// i.e. the offsets turn with the yaw and, at yaw 0 (north up), point the
+// opposite way to the top-down formula above.
+//
+// GAMMA_TARGET (the game views): the output is the gamma-encoded RGB.
 
 #import bevy_pbr::{
     mesh_functions,
@@ -125,6 +136,21 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3(0.04045));
 }
 
+// The colour written to the target from gamma-encoded RGB.
+fn out_colour(c: vec3<f32>) -> vec3<f32> {
+#ifdef GAMMA_TARGET
+    return c;
+#else
+    return to_linear(c);
+#endif
+}
+
+// cos / sin table entry i (5760 per turn, amplitude 256).
+fn cs_table(i: f32) -> vec2<f32> {
+    let a = i * TAU / 5760.0;
+    return round(vec2<f32>(cos(a), sin(a)) * 256.0);
+}
+
 // One background texel, gamma-encoded as the card holds it.
 fn sky_texel(p: vec2<f32>) -> vec4<f32> {
     let q = (vec2<i32>(p) % vec2<i32>(256) + vec2<i32>(256)) % vec2<i32>(256);
@@ -146,15 +172,19 @@ fn fragment_hw(in: VertexOutput) -> vec4<f32> {
         (in.position.x - vp.x) / vp.z * 320.0 - 160.0,
         (in.position.y - vp.y) / vp.w * 256.0 - 128.0,
     );
+    var uv = vec2<f32>(128.0) + 8.0 * d / 16.0 + vec2<f32>(255.0 * c.w / 16384.0);
     if (params.y > 0.5) {
-        // The rotating view turns the reflection with the camera yaw.
+        // The view's yaw: the camera's right vector is (cos, sin) of
+        // yaw · 2π / 5760 on the map (`camera.rs` `view_transform`).
         let right = view.world_from_view[0].xyz;
-        let a = atan2(right.z, right.x);
-        let cs = cos(a);
-        let sn = sin(a);
-        d = vec2<f32>(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+        let yaw = atan2(right.z, right.x) * 5760.0 / TAU;
+        let ca = cs_table(2879.0 - yaw);
+        let cb = cs_table(5759.0 - yaw);
+        let off = vec2<f32>(d.x * ca.x + d.y * ca.y, d.y * ca.x - d.x * ca.y) / 256.0;
+        let k = c.w;
+        uv = vec2<f32>(128.0) + 8.0 * off / 16.0
+            - k * vec2<f32>(cb.x + cb.y, cb.x - cb.y) / 16384.0;
     }
-    let uv = vec2<f32>(128.0) + 8.0 * d / 16.0 + vec2<f32>(255.0 * c.w / 16384.0);
     // Bilinear, texel centres at +0.5 (sky holds sRGB; filter encoded).
     let p = uv - vec2<f32>(0.5);
     let i = floor(p);
@@ -164,7 +194,7 @@ fn fragment_hw(in: VertexOutput) -> vec4<f32> {
         mix(sky_texel(i + vec2(0.0, 1.0)), sky_texel(i + vec2(1.0, 1.0)), f.x),
         f.y,
     );
-    return vec4<f32>(to_linear(t.rgb * c.rgb), 1.0);
+    return vec4<f32>(out_colour(t.rgb * c.rgb), 1.0);
 }
 
 @fragment
@@ -197,5 +227,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     let idx = sy * BG_W + sx + t;
     let p = vec2<i32>(idx % BG_W, clamp(idx / BG_W, 0, BG_H - 1));
+#ifdef GAMMA_TARGET
+    return vec4<f32>(to_srgb(textureLoad(sky, p, 0).rgb), 1.0);
+#else
     return textureLoad(sky, p, 0);
+#endif
 }

@@ -18,7 +18,7 @@ pub struct Icon {
 impl Icon {
     pub fn load(data: &GameData, name: &str, w: usize, h: usize) -> Icon {
         let stride = w.div_ceil(16) * 16;
-        let bytes = find(data, name).and_then(|p| std::fs::read(p).ok());
+        let bytes = find(data, name).and_then(|p| crate::vfs::read(p).ok());
         let mut px = vec![0u8; w * h];
         match bytes {
             Some(b) => {
@@ -78,10 +78,10 @@ impl Average {
 fn find(data: &GameData, name: &str) -> Option<std::path::PathBuf> {
     let dir = data.root.join("Icons");
     let exact = dir.join(name);
-    if exact.is_file() {
+    if crate::vfs::is_file(&exact) {
         return Some(exact);
     }
-    std::fs::read_dir(&dir)
+    crate::vfs::read_dir(&dir)
         .ok()?
         .flatten()
         .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))

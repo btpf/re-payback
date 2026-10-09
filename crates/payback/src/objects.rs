@@ -12,8 +12,11 @@
 //! low nibble of `mode` selects 1 flat colour (`param` through
 //! `General/64->256.dat`), 2 textured, 3 texel 0 transparent, 4
 //! translucent, 5 line, 6 lens flare (slot 0 only, drawn even when the
-//! slot is inactive, `param` = Alpha.256 table). Here the active slot is
-//! drawn double-sided; faces with no active slot are degenerate. Shine
+//! slot is inactive, `param` = Alpha.256 table). Here each active slot is
+//! a triangle facing its side (slot 1 with the reversed winding,
+//! `side_order`) and back faces are culled, so the GPU's facing test picks
+//! the slot as `FUN_010c101c`'s projected winding does; faces with no
+//! active slot are degenerate. Shine
 //! mode 0x14 (`CD.obj`) is averaged with the background (Alpha.256 table
 //! 4) in software and added in hardware.
 //!
@@ -176,6 +179,18 @@ const PAINTS: [(&str, &str); 8] = [
     ("shine.white", "cardef.white"),
 ];
 
+/// Number of paint colours (`random(8)` for traffic, `AddThing` @ 10058350).
+pub const PAINT_COUNT: usize = PAINTS.len();
+
+/// The model has faces the paint recolours (`Shine.All` / `Cardef`), so its
+/// [`PAINT_COUNT`] colours look different; the others (police, taxi, bus,
+/// ...) have a fixed livery.
+pub fn paintable(obj: &Obj) -> bool {
+    obj.faces.iter().flat_map(|f| f.slots.iter()).any(|s| {
+        s.active && (s.texture.eq_ignore_ascii_case("shine.all") || s.texture.eq_ignore_ascii_case("cardef"))
+    })
+}
+
 /// The object material: unlit atlas texture with environment-mapped faces
 /// (`shaders/objects.wgsl`).
 pub type ObjectMaterial = ExtendedMaterial<StandardMaterial, EnvMapped>;
@@ -183,7 +198,8 @@ pub type ObjectMaterial = ExtendedMaterial<StandardMaterial, EnvMapped>;
 /// Vertex-shader extension that maps "Shine" faces by their normal.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 pub struct EnvMapped {
-    /// x = 1 for the hardware (Warp3D) look.
+    /// x = 1 for the hardware (Warp3D) look; y = 1 for the game's library,
+    /// whose views hold gamma-encoded palette RGB ([`mark_gamma`]).
     #[uniform(100)]
     pub params: Vec4,
 }
@@ -195,6 +211,51 @@ impl MaterialExtension for EnvMapped {
 
     fn fragment_shader() -> ShaderRef {
         "embedded://payback/shaders/objects.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        key: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        gamma_def(descriptor, key.mesh_key);
+        Ok(())
+    }
+}
+
+/// A view whose target holds gamma-encoded palette RGB: the game views'
+/// Rgba16Float (HDR) targets (`crate::camera::postfx::GammaWorld`).
+pub fn gamma_view(key: bevy::pbr::MeshPipelineKey) -> bool {
+    key.target_format() == TextureFormat::Rgba16Float
+}
+
+/// `GAMMA_TARGET` for a view whose target holds gamma-encoded palette RGB
+/// (the HDR game views, `crate::camera::postfx::GammaWorld`); the shader
+/// also checks `params.y`, as the menu-model camera draws into the same
+/// HDR texture in linear light.
+pub fn gamma_def(descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor, key: bevy::pbr::MeshPipelineKey) {
+    if gamma_view(key)
+        && let Some(fragment) = descriptor.fragment.as_mut()
+    {
+        fragment.shader_defs.push("GAMMA_TARGET".into());
+    }
+}
+
+/// The game's object library draws in the game views: its materials write
+/// gamma-encoded palette RGB (`params.y`). The menu's own library
+/// (`crate::frontend::model`) is not a resource and stays linear.
+fn mark_gamma(library: Option<Res<ObjectLibrary>>, mut materials: ResMut<Assets<ObjectMaterial>>) {
+    let Some(library) = library else { return };
+    if !library.is_changed() || crate::camera::postfx::linear_blend() {
+        return;
+    }
+    for handle in [&library.material, &library.additive, &library.half, &library.keyed] {
+        if materials.get(handle).is_some_and(|m| m.extension.params.y != 1.0)
+            && let Some(mut m) = materials.get_mut(handle)
+        {
+            m.extension.params.y = 1.0;
+        }
     }
 }
 
@@ -282,6 +343,33 @@ struct Tris {
 }
 
 impl Tris {
+    /// Reorder the triangles back to front for the overhead camera, as
+    /// the painter's sort of flagged models does (CONFIRMED keys: moving
+    /// objects the sum of the three vertex depths, insertion-sorted;
+    /// scenery once by the deepest vertex). Depth is taken along the
+    /// vertical of the unturned model (render −y), so the order is the
+    /// top-down one; the original re-sorts objects when they pitch or roll
+    /// and sorts by true camera depth in the rotating view (not done).
+    /// Stable, as the insertion sort.
+    fn painter_sort(&mut self, scenery: bool) {
+        let n = self.positions.len() / 3;
+        if n < 2 {
+            return;
+        }
+        let key = |t: usize| -> f32 {
+            let y = [0, 1, 2].map(|k| self.positions[3 * t + k][1]);
+            if scenery { -y[0].min(y[1]).min(y[2]) } else { -(y[0] + y[1] + y[2]) }
+        };
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| key(b).total_cmp(&key(a)));
+        let pick = |v: &Vec<[f32; 3]>| order.iter().flat_map(|&t| [v[3 * t], v[3 * t + 1], v[3 * t + 2]]).collect();
+        let pick2 = |v: &Vec<[f32; 2]>| order.iter().flat_map(|&t| [v[3 * t], v[3 * t + 1], v[3 * t + 2]]).collect();
+        self.positions = pick(&self.positions);
+        self.normals = pick(&self.normals);
+        self.uvs = pick2(&self.uvs);
+        self.env = pick2(&self.env);
+    }
+
     fn degenerate(&mut self, p: [f32; 3]) {
         self.positions.extend([p; 3]);
         self.uvs.extend([[0.0; 2]; 3]);
@@ -363,7 +451,7 @@ fn build_atlas(data: &GameData, night: bool, hardware: bool) -> (Image, HashMap<
             entry.clone()
         };
         let read = |p: &std::path::Path| {
-            std::fs::read(p)
+            crate::vfs::read(p)
                 .map_err(|e| e.to_string())
                 .and_then(|b| IndexedImage::object_texture(&b).map_err(|e| e.to_string()))
         };
@@ -583,7 +671,7 @@ impl ObjectLibrary {
         let mac = data
             .mac_path(&rel)
             .filter(|_| prefer_mac(&key))
-            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|p| crate::vfs::read(p).ok())
             .and_then(parse);
         let index = amiga.clone().or_else(|| mac.clone()).map(|base| {
             // The simulation reads the model extents (radius, front and back
@@ -719,7 +807,18 @@ impl ObjectLibrary {
         obj: &Obj,
         place: impl Fn(&Vertex) -> [f32; 3],
     ) -> (Mesh, Vec<(Mesh, Handle<ObjectMaterial>)>) {
-        let parts = self.build_parts_with(obj, Look::default(), None, |v, _| place(v));
+        self.menu_parts_painted(obj, None, place)
+    }
+
+    /// [`Self::menu_parts`] with paint `paint` (index into [`PAINTS`]).
+    pub fn menu_parts_painted(
+        &self,
+        obj: &Obj,
+        paint: Option<usize>,
+        place: impl Fn(&Vertex) -> [f32; 3],
+    ) -> (Mesh, Vec<(Mesh, Handle<ObjectMaterial>)>) {
+        let look = Look { paint: paint.filter(|&p| p < PAINTS.len()), ..Look::default() };
+        let parts = self.build_parts_with(obj, look, None, |v, _| place(v));
         let overlays = [
             (parts.additive, &self.additive),
             (parts.half, &self.half),
@@ -730,6 +829,14 @@ impl ObjectLibrary {
         .filter_map(|(m, mat)| m.map(|m| (m, mat.clone())))
         .collect();
         (parts.main, overlays)
+    }
+
+    /// Atlas UV of palette colour `c` in the flat-colour slot (mode 1 and
+    /// mode 5 faces).
+    fn palette_uv(c: u32) -> [f32; 2] {
+        let ox = (PALETTE_SLOT % ATLAS_COLS * TEX_W + c % 32 * 8 + 4) as f32;
+        let oy = (PALETTE_SLOT / ATLAS_COLS * TEX_H + c / 32 * 16 + 8) as f32;
+        [ox / ATLAS_W as f32, oy / ATLAS_FULL_H as f32]
     }
 
     /// Atlas UV of texel (u, v in file units) in slot `t`, from the keyed
@@ -946,6 +1053,16 @@ impl ObjectLibrary {
         }
         if let Some((info, tex)) = headlights {
             headlight_polygon(&mut add, info, tex);
+        }
+        // `.Obj` flag 1 (model `+0x490c`, loader `FUN_010bf8bc`): the faces
+        // are drawn in painter's order, deepest first (`FUN_010c101c`,
+        // `FUN_010c4fec`, `FUN_010c7218`). With the depth test only the
+        // blended overlays depend on the order (the 50 % faces and, in
+        // hardware, the alpha-blended colour-keyed faces such as tree
+        // canopies, which do not write depth); flag 0 keeps file order.
+        if obj.flag == 1 {
+            halves.painter_sort(scenery);
+            keyed_tris.painter_sort(scenery);
         }
         let nonempty = |t: Tris, topology| (!t.positions.is_empty()).then(|| t.mesh(topology));
         Parts {
@@ -1222,6 +1339,7 @@ impl Plugin for SceneryPlugin {
         shadows::plugin(app);
         app.add_plugins(MaterialPlugin::<ObjectMaterial>::default())
             .init_resource::<SceneryIndex>()
+            .init_resource::<FlareOccluders>()
             .init_resource::<SceneryClock>()
             .add_message::<SetScenery>()
             .add_systems(FixedPostUpdate, apply_scenery_changes)
@@ -1234,11 +1352,14 @@ impl Plugin for SceneryPlugin {
             })
             .add_systems(
                 Update,
-                (follow_settings, animate_scenery, (vehicle_skins, vehicle_doors).chain(), sync_mode),
+                (follow_settings, animate_scenery, (vehicle_skins, vehicle_doors).chain(), sync_mode, mark_gamma),
             )
             .add_systems(
                 PostUpdate,
-                (sync_overlays, follow_owners).chain().before(TransformSystems::Propagate),
+                (sync_overlays, follow_owners)
+                    .chain()
+                    .after(crate::frame::SmoothSet)
+                    .before(TransformSystems::Propagate),
             )
             .add_systems(
                 FixedUpdate,
@@ -1474,7 +1595,7 @@ fn vehicle_skins(
         return;
     };
     // `--damaged`: every vehicle dented, `--damaged burnt` also burnt (checks).
-    let forced = std::env::args()
+    let forced = crate::args()
         .any(|a| a == "--damaged")
         .then(|| crate::arg("--damaged").unwrap_or_default());
     for (obj, vehicle, drive, mut mesh) in &mut q {
@@ -1527,7 +1648,7 @@ fn vehicle_doors(
 ) {
     let Some(mut library) = library else { return };
     // `--open-doors`: every door fully open (visual checks).
-    let forced = std::env::args().any(|a| a == "--open-doors");
+    let forced = crate::args().any(|a| a == "--open-doors");
     for (e, obj, vehicle, drive, mut panel) in &mut vehicles {
         let angle = if forced { 0x370 } else { drive.door };
         let door = (angle != 0)
@@ -1571,14 +1692,116 @@ fn vehicle_doors(
     }
 }
 
+/// Objects and scenery that can hide a lens flare this frame. The
+/// original drops a flare whose centre pixel, set to 0 by `AddFlare`
+/// (Mac @ 100a6fb0, OS4 `FUN_0103451c`), was overdrawn by the time
+/// `DrawFlares` (Mac @ 100a7340, OS4 `FUN_01034804`) runs, i.e. by anything
+/// painted over it later: in painter's order, what lies between the flare
+/// and the camera. Here: the city (`occluded`) and these models' triangles
+/// on the segment from the flare to the eye; the flare's own model is not
+/// tested (INFERRED: its other faces sit around the flare vertex).
+#[derive(Resource, Default)]
+pub struct FlareOccluders(Vec<Occluder>);
+
+struct Occluder {
+    owner: Entity,
+    /// World to model (mesh) space.
+    inv: bevy::math::Affine3A,
+    mesh: Handle<Mesh>,
+    /// Mesh-space bounds.
+    min: Vec3,
+    max: Vec3,
+}
+
+impl FlareOccluders {
+    /// Whether a model other than `owner` lies on the segment from the
+    /// flare at `from` to the camera at `eye` (render space).
+    pub fn hides(&self, meshes: &Assets<Mesh>, from: Vec3, eye: Vec3, owner: Option<Entity>) -> bool {
+        self.0.iter().any(|o| {
+            if Some(o.owner) == owner {
+                return false;
+            }
+            let a = o.inv.transform_point3(from);
+            let b = o.inv.transform_point3(eye);
+            if !segment_hits_box(a, b, o.min, o.max) {
+                return false;
+            }
+            let Some(mesh) = meshes.get(&o.mesh) else { return false };
+            let Some(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else {
+                return false;
+            };
+            let tri = |i: usize, j: usize, k: usize| {
+                let (Some(&p0), Some(&p1), Some(&p2)) = (p.get(i), p.get(j), p.get(k)) else {
+                    return false;
+                };
+                segment_hits_triangle(a, b, Vec3::from(p0), Vec3::from(p1), Vec3::from(p2))
+            };
+            match mesh.indices() {
+                Some(ix) => {
+                    let ix: Vec<usize> = ix.iter().collect();
+                    ix.chunks_exact(3).any(|t| tri(t[0], t[1], t[2]))
+                }
+                None => (0..p.len() / 3).any(|t| tri(3 * t, 3 * t + 1, 3 * t + 2)),
+            }
+        })
+    }
+}
+
+/// Slab test of the segment `a`-`b` against a box.
+fn segment_hits_box(a: Vec3, b: Vec3, min: Vec3, max: Vec3) -> bool {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for k in 0..3 {
+        if d[k].abs() < 1e-9 {
+            if a[k] < min[k] || a[k] > max[k] {
+                return false;
+            }
+            continue;
+        }
+        let (u, v) = ((min[k] - a[k]) / d[k], (max[k] - a[k]) / d[k]);
+        t0 = t0.max(u.min(v));
+        t1 = t1.min(u.max(v));
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the segment `a`-`b` crosses the triangle (either side), away
+/// from its end at `a` (Moller-Trumbore).
+fn segment_hits_triangle(a: Vec3, b: Vec3, p0: Vec3, p1: Vec3, p2: Vec3) -> bool {
+    let d = b - a;
+    let (e1, e2) = (p1 - p0, p2 - p0);
+    let h = d.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let f = 1.0 / det;
+    let s = a - p0;
+    let u = f * s.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let q = s.cross(e1);
+    let v = f * d.dot(q);
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    let t = f * e2.dot(q);
+    t > 1e-3 && t < 1.0
+}
+
 /// Lens-flare sources this frame: mode-6 faces of scenery and objects
 /// (traffic and crossing lights, alarm boxes, police lights, muzzle
 /// flashes, missiles), at the face's first vertex, size 300 (alarm boxes
 /// pulse 200..700). Burning objects have none. A flare is dropped when the
-/// city is between it and the camera (the original tests whether its
-/// centre pixel was overdrawn). The occlusion and screen tests are made per
-/// view when the flares are drawn (`crate::effects`): every split-screen
-/// view draws its own (`FUN_0105bd98` calls `FUN_01034804` after each view).
+/// city or another model is between it and the camera (the original tests
+/// whether its centre pixel was overdrawn; [`FlareOccluders`]). The
+/// occlusion and screen tests are made per view when the flares are drawn
+/// (`crate::effects`): every split-screen view draws its own
+/// (`FUN_0105bd98` calls `FUN_01034804` after each view).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn collect_flares(
     mode: Res<FxMode>,
@@ -1586,10 +1809,12 @@ fn collect_flares(
     clock: Res<SceneryClock>,
     meshes: Res<Assets<Mesh>>,
     cameras: Query<&GlobalTransform, Or<(With<GameCamera>, With<ExtraView>)>>,
-    scenery: Query<(&Scenery, &GlobalTransform, &Mesh3d)>,
-    objects: Query<(&SimObj, &GlobalTransform, &Mesh3d, Option<&Person>)>,
+    scenery: Query<(Entity, &Scenery, &GlobalTransform, &Mesh3d, Option<&bevy::camera::primitives::Aabb>)>,
+    objects: Query<(Entity, &SimObj, &GlobalTransform, &Mesh3d, Option<&Person>, Option<&bevy::camera::primitives::Aabb>)>,
     mut flares: ResMut<Flares>,
+    mut occluders: ResMut<FlareOccluders>,
 ) {
+    occluders.0.clear();
     let Some(library) = library else {
         return;
     };
@@ -1604,7 +1829,29 @@ fn collect_flares(
             (p.x - eye.x).abs() < r && (p.z - eye.z).abs() < r
         })
     };
-    let mut add = |model: usize, tf: &GlobalTransform, mesh: &Mesh3d, size: i32| {
+    let mut occluder = |owner: Entity, tf: &GlobalTransform, mesh: &Mesh3d, aabb: Option<&bevy::camera::primitives::Aabb>| {
+        if let Some(b) = aabb {
+            let (c, h) = (Vec3::from(b.center), Vec3::from(b.half_extents));
+            occluders.0.push(Occluder {
+                owner,
+                inv: tf.affine().inverse(),
+                mesh: mesh.0.clone(),
+                min: c - h,
+                max: c + h,
+            });
+        }
+    };
+    for (e, _, tf, mesh, aabb) in &scenery {
+        if near(tf.translation()) {
+            occluder(e, tf, mesh, aabb);
+        }
+    }
+    for (e, _, tf, mesh, _, aabb) in &objects {
+        if near(tf.translation()) {
+            occluder(e, tf, mesh, aabb);
+        }
+    }
+    let mut add = |owner: Entity, model: usize, tf: &GlobalTransform, mesh: &Mesh3d, size: i32| {
         let m = library.model(model);
         if m.flares.is_empty() {
             return;
@@ -1623,10 +1870,11 @@ fn collect_flares(
                 size,
                 table: f.table,
                 occlude: true,
+                owner: Some(owner),
             });
         }
     };
-    for (sc, tf, mesh) in &scenery {
+    for (e, sc, tf, mesh, _) in &scenery {
         if !near(tf.translation()) {
             continue;
         }
@@ -1635,9 +1883,9 @@ fn collect_flares(
         } else {
             FLARE_SIZE
         };
-        add(sc.model, tf, mesh, size);
+        add(e, sc.model, tf, mesh, size);
     }
-    for (obj, tf, mesh, person) in &objects {
+    for (e, obj, tf, mesh, person, _) in &objects {
         if obj.burn >= 1 {
             continue;
         }
@@ -1648,7 +1896,7 @@ fn collect_flares(
             }
             None => obj.model,
         };
-        add(model, tf, mesh, FLARE_SIZE);
+        add(e, model, tf, mesh, FLARE_SIZE);
     }
 }
 
@@ -1773,7 +2021,7 @@ pub fn spawn_scenery(
 /// for visual checks of skins and damage.
 fn spawn_damage_check(world: &mut World, mut done: Local<bool>) {
     let park = crate::arg("--park");
-    if *done || (park.is_none() && !std::env::args().any(|a| a == "--damaged")) {
+    if *done || (park.is_none() && !crate::args().any(|a| a == "--damaged")) {
         return;
     }
     let player = world
@@ -1804,5 +2052,27 @@ mod tests {
         let seq: Vec<usize> = (0..6).map(|p| traffic_light_model(1, p)).collect();
         assert_eq!(seq, [0, 0, 1, 2, 2, 3]);
         assert_eq!(traffic_light_model(4, 0), 2);
+    }
+
+    /// The flare occlusion tests: a triangle across the segment hides it,
+    /// one beside it or behind the flare does not.
+    #[test]
+    fn flare_segment_tests() {
+        let (a, b) = (Vec3::ZERO, Vec3::new(0.0, 10.0, 0.0));
+        let tri = |y: f32, dx: f32| {
+            segment_hits_triangle(
+                a,
+                b,
+                Vec3::new(-1.0 + dx, y, -1.0),
+                Vec3::new(1.0 + dx, y, -1.0),
+                Vec3::new(0.0 + dx, y, 1.0),
+            )
+        };
+        assert!(tri(5.0, 0.0));
+        assert!(!tri(5.0, 3.0));
+        assert!(!tri(-1.0, 0.0));
+        assert!(!tri(11.0, 0.0));
+        assert!(segment_hits_box(a, b, Vec3::new(-1.0, 4.0, -1.0), Vec3::new(1.0, 6.0, 1.0)));
+        assert!(!segment_hits_box(a, b, Vec3::new(2.0, 4.0, -1.0), Vec3::new(3.0, 6.0, 1.0)));
     }
 }

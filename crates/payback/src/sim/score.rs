@@ -82,7 +82,10 @@ fn score_kills(
         // Its label at the player (`AddLabelPercent`, hud::labels); the
         // Copkiller bonus has none.
         labels.add_score(p.pos, pay, mode.is_multiplayer());
-        if !k.police {
+        // The copkiller count and bonus are single player only (Mac
+        // `CheckHitObject` @ 100542d0: `multiplayer == 0 && ++count > 10`;
+        // the multiplayer flag short-circuits the count too).
+        if !k.police || mode.is_multiplayer() {
             continue;
         }
         cops.0 += 1;
@@ -95,3 +98,7 @@ fn score_kills(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/score.rs"]
+mod tests;

@@ -1,0 +1,89 @@
+<!doctype html>
+<!-- Loader for the web build of the Payback reimplementation (docs/web.md).
+     tools/build_web.sh copies it to web/dist/ next to payback.js,
+     payback_bg.wasm and data/ (the user's own packed game data).
+     Query options: ?map=3&level=1, ?intro, ... (as the command line);
+     ?autostart skips the click-to-start (audio needs a user gesture). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payback</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #payback { display: block; width: 100%; height: 100%; outline: none; }
+  #status {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px;
+    color: #ddd; font: 16px sans-serif; text-align: center; white-space: pre-line;
+  }
+  #bar { width: 320px; height: 8px; border: 1px solid #666; }
+  #fill { width: 0; height: 100%; background: #c33; }
+  #status button { font: 18px sans-serif; padding: 8px 24px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="payback" tabindex="0"></canvas>
+<div id="status"><div id="msg">Loading...</div><div id="bar"><div id="fill"></div></div></div>
+<script type="module">
+import init, { vfs_load, start } from "./payback.js";
+
+const msg = document.getElementById("msg");
+const fill = document.getElementById("fill");
+const status = document.getElementById("status");
+
+function fail(text) {
+  msg.textContent = text;
+  document.getElementById("bar").remove();
+  console.error(text);
+}
+
+// Fetch with a progress bar (content-length permitting).
+async function fetchBytes(url, label) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  const total = Number(res.headers.get("content-length")) || 0;
+  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  const out = new Uint8Array(total);
+  const reader = res.body.getReader();
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out.set(value, got);
+    got += value.length;
+    fill.style.width = `${(100 * got / total).toFixed(1)}%`;
+    msg.textContent = `${label} ${(got / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`;
+  }
+  return out;
+}
+
+try {
+  msg.textContent = "Loading the game...";
+  await init();
+  const manifest = await (await fetch("data/payback.json")).text();
+  const pak = await fetchBytes("data/payback.pak", "Loading the game data");
+  vfs_load(manifest, pak);
+  const go = () => {
+    status.remove();
+    document.getElementById("payback").focus();
+    start();
+  };
+  if (new URLSearchParams(location.search).has("autostart")) {
+    go();
+  } else {
+    msg.textContent = "Payback";
+    document.getElementById("bar").remove();
+    const b = document.createElement("button");
+    b.textContent = "Click to start";
+    b.onclick = go;
+    status.append(b);
+  }
+} catch (e) {
+  fail(`Could not start: ${e}\n\nThe game data is not part of the build: run tools/build_web.sh ` +
+       `with the extracted original data (docs/web.md).`);
+}
+</script>
+</body>
+</html>

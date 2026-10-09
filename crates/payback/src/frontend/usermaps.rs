@@ -10,8 +10,18 @@
 //! Directories searched, in order (a name found twice is kept once):
 //! `UserMaps/` in the game data, in the Mac data (its 31 bundled maps, 12
 //! with custom `.textures`), next to the executable, and in the working
-//! directory. Junk files (`.DS_Store`, `*.rsrc`) are skipped. Lists are sorted by name (the original keeps the
-//! directory order).
+//! directory. Junk files (`.DS_Store`, `*.rsrc`) are skipped.
+//!
+//! Order: the original lists one directory in the order the file system
+//! returns it. On the Mac (CONFIRMED) `MatchFirst` @ 100fba20 /
+//! `MatchNext` @ 100fbd70 enumerate the folder by index with
+//! `PBGetCatInfo` (`ioFDirIndex` 1, 2, ...; skipping folders, invisible
+//! files and aliases), which is the volume's catalog order: on HFS+ the
+//! file names compared case-insensitively (`FastUnicodeCompare`, folding to
+//! lower case), extension included. The Amiga's `MatchFirst`/`MatchNext`
+//! walk the FFS directory hash table, an order that depends on the disk
+//! blocks and so can't be reproduced. The lists here follow the Mac: file
+//! names (with `.map`) compared in lower case, across all the directories.
 //!
 //! High scores: read from `Saves/UserMaps/<name>.scores`, else next to the
 //! map; written next to the map when it is outside the game data,
@@ -60,19 +70,19 @@ impl UserMaps {
         let mut seen_dirs: Vec<PathBuf> = Vec::new();
         let mut maps: Vec<UserMap> = Vec::new();
         for (dir, in_data) in dirs {
-            let Ok(canon) = dir.canonicalize() else { continue };
+            let Ok(canon) = crate::vfs::canonicalize(&dir) else { continue };
             if seen_dirs.contains(&canon) {
                 continue;
             }
             seen_dirs.push(canon);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = crate::vfs::read_dir(&dir) else { continue };
             let mut found: Vec<String> = entries
                 .flatten()
-                .filter(|e| e.path().is_file())
+                .filter(|e| e.is_file())
                 .filter_map(|e| e.file_name().to_str().map(String::from))
                 .filter(|n| n.to_lowercase().ends_with(".map") && !n.eq_ignore_ascii_case("test.map"))
                 .collect();
-            found.sort_by_key(|n| n.to_lowercase());
+            found.sort_by_key(|n| catalog_key(n));
             for file in found {
                 let name = file[..file.len() - 4].to_string();
                 if name.is_empty() || maps.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
@@ -96,12 +106,18 @@ impl UserMaps {
                 });
             }
         }
-        maps.sort_by_key(|m| m.name.to_lowercase());
+        maps.sort_by_key(|m| catalog_key(&format!("{}.map", m.name)));
         if !maps.is_empty() {
             info!("user maps: {}", maps.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
         }
         UserMaps(maps)
     }
+}
+
+/// HFS+ catalog order of a file name (see the module notes): the whole
+/// name in lower case, so `a-b.map` comes before `a.map` (`-` < `.`).
+fn catalog_key(file: &str) -> String {
+    file.to_lowercase()
 }
 
 impl UserMap {
@@ -114,7 +130,7 @@ impl UserMap {
     }
 
     pub fn load_scores(&self, data: &GameData) -> HighScores {
-        std::fs::read(self.saved_scores())
+        super::progress::read_file(&self.saved_scores())
             .ok()
             .and_then(|b| HighScores::parse(&b))
             .or_else(|| data.read(self.path.with_extension("scores")).ok().and_then(|b| HighScores::parse(&b)))
@@ -134,10 +150,7 @@ impl UserMap {
 
     pub fn save_scores(&self, scores: &HighScores) {
         let path = self.score_file();
-        let res = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&path, scores.write()));
+        let res = super::progress::write_file(&path, &scores.write());
         if let Err(e) = res {
             warn!("{}: {e}", path.display());
         }
@@ -288,6 +301,15 @@ mod tests {
         assert_eq!(amiga.score_file(), saves.join("The Killing Zone.scores"));
         let own = map("Mine", "D:/Games/UserMaps/Mine.map", false);
         assert_eq!(own.score_file(), PathBuf::from("D:/Games/UserMaps/Mine.scores"));
+    }
+
+    /// HFS+ catalog order (Mac `MatchNext` @ 100fbd70): case-insensitive,
+    /// the extension included.
+    #[test]
+    fn catalog_order() {
+        let mut v = ["Woods.map", "a.map", "A-b.map", "TheBigTrack.map", "The Killing Zone.map", "a_b.map"];
+        v.sort_by_key(|n| catalog_key(n));
+        assert_eq!(v, ["A-b.map", "a.map", "a_b.map", "The Killing Zone.map", "TheBigTrack.map", "Woods.map"]);
     }
 
     #[test]

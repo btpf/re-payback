@@ -39,7 +39,7 @@ impl RenderMode {
 
     /// `--hardware` / `--software` on the command line.
     fn forced() -> Option<RenderMode> {
-        let args: Vec<String> = std::env::args().collect();
+        let args: Vec<String> = crate::args().collect();
         if args.iter().any(|a| a == "--hardware") {
             Some(RenderMode::Hardware)
         } else if args.iter().any(|a| a == "--software") {

@@ -50,7 +50,7 @@ fn saved_path(city: usize) -> PathBuf {
 /// The table for `city`: our save, else the game's file, else defaults
 /// (also when the checksum is wrong).
 pub fn load_scores(data: &GameData, city: usize) -> HighScores {
-    std::fs::read(saved_path(city))
+    crate::frontend::progress::read_file(&saved_path(city))
         .ok()
         .and_then(|b| HighScores::parse(&b))
         .or_else(|| data.read(format!("Maps/{city}.scores")).ok().and_then(|b| HighScores::parse(&b)))
@@ -59,10 +59,7 @@ pub fn load_scores(data: &GameData, city: usize) -> HighScores {
 
 pub fn save_scores(city: usize, scores: &HighScores) {
     let path = saved_path(city);
-    let res = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|_| std::fs::write(&path, scores.write()));
+    let res = crate::frontend::progress::write_file(&path, &scores.write());
     if let Err(e) = res {
         warn!("{}: {e}", path.display());
     }

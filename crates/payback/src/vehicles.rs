@@ -384,6 +384,25 @@ pub const TYPES: [VehicleType; 28] = [
     ),
 ];
 
+/// `policevan_red`, the light-bar frame a police van with its siren on
+/// shows for 5 ticks of every 10: the light bar swaps the model pointer
+/// (Mac `DoVehicleFire` @ 10070c20, `+0x940 >= 5`; 68k `FUN_000e2a50`), and
+/// this model record has its own handling: brake 10, grip 20, mass 2000
+/// (`InitStructures` @ 1005ffb0; `_blue` keeps the van's 15 / 25 / 2500).
+pub const POLICEVAN_RED: VehicleType = {
+    let mut t = TYPES[kind::POLICE_VAN];
+    t.brake = 10;
+    t.grip = 20;
+    t.mass = 2000;
+    t
+};
+
+/// The handling in force: the type's, or [`POLICEVAN_RED`]'s for a police
+/// van showing its red light-bar frame.
+pub fn handling(k: usize, red_frame: bool) -> &'static VehicleType {
+    if k == kind::POLICE_VAN && red_frame { &POLICEVAN_RED } else { &TYPES[k] }
+}
+
 /// Type ids with special handling.
 pub mod kind {
     pub const POLICE: usize = 9;
@@ -524,6 +543,21 @@ pub const PROPS: [(&str, i32); 4] = [
     ("weapons/bullet.obj", 10),
 ];
 
+/// A prop (special object `model − 1000`, index into [`PROPS`]; the Mac
+/// table `_DAT_1017c5f8` = `toc[-0x1b92]`): which one decides its contact
+/// and movement rules (`CheckForCollisions` @ 1006a150, `do_Weapon` @
+/// 1013e390).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prop(pub u8);
+
+/// [`Prop`] indices.
+pub mod prop {
+    pub const BARRIER: u8 = 0;
+    pub const CONE: u8 = 1;
+    pub const DUMMY: u8 = 2;
+    pub const BULLET: u8 = 3;
+}
+
 /// Spawn a static prop (special object `index`).
 pub fn spawn_prop_world(world: &mut World, index: i32, pos: IVec3, heading: i32) -> Option<Entity> {
     let (path, mass) = *PROPS.get(usize::try_from(index).ok()?)?;
@@ -552,6 +586,7 @@ pub fn spawn_prop_world(world: &mut World, index: i32, pos: IVec3, heading: i32)
         world
             .spawn((
                 obj,
+                Prop(index as u8),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 Transform::from_translation(object_to_render(pos.as_vec3()))

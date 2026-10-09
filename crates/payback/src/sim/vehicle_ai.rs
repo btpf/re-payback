@@ -97,11 +97,13 @@ impl Nav {
 /// refresh every 20 frames (`do_Other` @ 10146280). A fleeing car (0x14)
 /// re-picks its farthest node whenever the countdown is 0 but resets only
 /// its own (unread) countdown, so with no pursuer it re-picks every frame.
-/// The only target in the port is the player; the cache restarts when the
-/// player object changes (a new object starts at 0).
-#[derive(Resource, Default, Clone, Copy, Debug)]
+/// Every object carries one (a new object starts at 0), so whichever object
+/// is chased keeps its own cache (AI-2); the fleeing car's reset lands on
+/// its own. The port's chases (route police, flight) all target the
+/// player, as in the original (`+0x908` is the player for states 10/11;
+/// nothing sets state 8).
+#[derive(Component, Default, Clone, Copy, Debug)]
 pub struct TargetNode {
-    pub owner: Option<Entity>,
     pub node: Option<usize>,
     pub refresh: u8,
 }
@@ -450,7 +452,7 @@ pub fn vehicle_orders(
     library: Option<Res<ObjectLibrary>>,
     mut rng: ResMut<Rng>,
     mut triggers: ResMut<Triggers>,
-    tnode: Res<TargetNode>,
+    mut tnodes: Query<&mut TargetNode>,
     mut sounds: Query<&mut Sound>,
     player: Query<Entity, With<CameraTarget>>,
     mut set: ParamSet<(
@@ -486,6 +488,7 @@ pub fn vehicle_orders(
         snap.iter().find(|s| s.0 == e).map(|s| (s.1, s.2))
     };
     let player_pos = find(None).map(|p| p.0);
+    let player_refresh = player.and_then(|p| tnodes.get(p).ok()).map(|t| t.refresh);
     let order = crate::sim::table_order(set.p1().iter().map(|(e, o, ..)| (e, o)));
     let mut objs = set.p1();
     for e__ in order {
@@ -563,8 +566,13 @@ pub fn vehicle_orders(
                                 .clamp(IVec2::splat(-0x5dc), IVec2::splat(0x5dc)),
                         );
                     } else {
-                        if tnode.refresh == 0 || nav.goal.is_none() {
+                        if player_refresh == Some(0) || nav.goal.is_none() {
                             nav.goal = route.0.farthest(pp.x >> 3, pp.y >> 3);
+                            // Resets its own countdown (Mac `+0x8a2` of the
+                            // fleeing car, not the player's).
+                            if let Ok(mut own) = tnodes.get_mut(e) {
+                                own.refresh = 20;
+                            }
                         }
                         // On the farthest node the original drops into
                         // state 11 (straight chase); the port waits there.
@@ -682,6 +690,7 @@ fn tank_cannon(
         m.state = State::Parked;
         m.level = obj.level;
         m.owner = Some(e);
+        m.side = 1; // owner side 1 (`DoVehicleFire` @ 10070c20)
         commands.spawn((
             m,
             super::combat::Projectile {
@@ -723,21 +732,18 @@ fn tank_cannon(
     }
 }
 
-/// The target's node countdown drops by one per frame (Mac `ResetObject`
-/// @ 1006e490); a new player object starts at 0.
-fn tick_target_node(mut t: ResMut<TargetNode>, player: Query<Entity, With<CameraTarget>>) {
-    let p = player.iter().min();
-    if t.owner != p {
-        *t = TargetNode {
-            owner: p,
-            ..default()
-        };
+/// Every object's node countdown drops by one per frame (Mac
+/// `ResetObject` @ 1006e490, called for each object not in state 6 by
+/// `object_MainLoop` @ 1014a670).
+fn tick_target_node(mut q: Query<(&Obj, &mut TargetNode)>) {
+    for (o, mut t) in &mut q {
+        if o.state != State::Removed {
+            t.refresh = t.refresh.saturating_sub(1);
+        }
     }
-    t.refresh = t.refresh.saturating_sub(1);
 }
 
 fn load_route(mut commands: Commands, data: Res<GameData>, spec: Res<LevelSpec>) {
-    commands.insert_resource(TargetNode::default());
     let path = spec.path("route");
     let route = data
         .read(&path)
@@ -851,7 +857,7 @@ pub struct VehicleAiPlugin;
 
 impl Plugin for VehicleAiPlugin {
     fn build(&self, app: &mut App) {
-        if std::env::args().any(|a| a == "--ai-test") {
+        if crate::args().any(|a| a == "--ai-test") {
             app.insert_resource(AiTest {
                 car: None,
                 path: Vec::new(),
@@ -865,7 +871,6 @@ impl Plugin for VehicleAiPlugin {
                 FixedUpdate,
                 VehicleAiSet.after(TrafficSet).before(DrivingSet),
             )
-            .init_resource::<TargetNode>()
             .add_systems(
                 FixedUpdate,
                 tick_target_node

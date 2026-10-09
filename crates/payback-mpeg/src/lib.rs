@@ -5,6 +5,9 @@
 //! The stream is decoded from memory. Video frames convert to RGBA; audio
 //! comes out as interleaved stereo `f32` (mono streams are duplicated).
 
+#[cfg(target_arch = "wasm32")]
+mod wasm_libc;
+
 use std::ffi::{c_double, c_int, c_uint, c_void};
 use std::sync::Arc;
 

@@ -96,6 +96,13 @@ pub struct Drive {
     pub skid_sound: Option<Entity>,
     pub beep_sound: Option<Entity>,
     pub clonk: bool,
+    /// A police van showing the red light-bar frame (`policevan_red`, its
+    /// own handling: [`crate::vehicles::POLICEVAN_RED`]); set by
+    /// [`light_bar`].
+    pub red_frame: bool,
+    /// This tick's move (start position, wall hit, last clear position),
+    /// left by the move phase for the controls phase ([`drive`]).
+    pub step: Option<(IVec3, collide::Hit, IVec3)>,
     /// The looped horn (`+0x918`, Mac `DoVehicleFire` @ 10070c20); see
     /// [`super::vehicle_ai::horn`].
     pub horn: Option<Entity>,
@@ -108,6 +115,10 @@ pub struct Drive {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DrivingSet;
 
+/// The vehicles' move ([`drive`]`::<true>`), before their AI.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DrivingMoveSet;
+
 pub struct DrivingPlugin;
 
 impl Plugin for DrivingPlugin {
@@ -116,10 +127,14 @@ impl Plugin for DrivingPlugin {
             FixedUpdate,
             (
                 player_vehicle_stick,
+                light_bar,
+                super::rc_car::rc_controls,
                 (drive_test_setup, drive_test_stick)
                     .chain()
                     .run_if(|| crate::arg("--drive-test").is_some()),
-                drive,
+                drive::<false>,
+                super::rc_car::rc_launch,
+                super::props::move_props,
                 horns,
                 vehicle_sounds,
             )
@@ -128,7 +143,21 @@ impl Plugin for DrivingPlugin {
                 .after(super::people::PeopleSet)
                 .before(super::combat::CombatSet),
         )
-        .add_systems(Update, sync_vehicles);
+        // The move half (AI-1): after the people's update and the traffic
+        // spawner, before the vehicle AI (`TrafficSet` / `VehicleAiSet`
+        // order themselves after it).
+        .add_systems(
+            FixedUpdate,
+            drive::<true>
+                .in_set(DrivingMoveSet)
+                .after(super::people::PeopleSet)
+                .before(DrivingSet),
+        )
+        .add_systems(Update, (sync_vehicles, super::props::sync_props))
+        .init_resource::<super::rc_car::RcCars>()
+        .add_systems(OnExit(crate::level::AppState::Playing), |mut commands: Commands| {
+            commands.insert_resource(super::rc_car::RcCars::default());
+        });
     }
 }
 
@@ -211,6 +240,7 @@ fn drive_test_setup(world: &mut World, mut done: Local<bool>) {
     if let Some(mut o) = world.get_mut::<Obj>(car) {
         o.state = State::Player;
         o.player = Some(pl.unwrap_or(0));
+        o.side = 0;
     }
     world.entity_mut(car).insert((CameraTarget, Arsenal::default()));
     world.entity_mut(pe).despawn();
@@ -325,8 +355,14 @@ impl Fx<'_, '_, '_> {
     }
 }
 
+/// One vehicle update in two phases (AI-1): `drive::<true>` is
+/// `MoveObject_Vehicle` @ 1006e890 (gravity, move, walls, bounce) for every
+/// vehicle; the vehicle AI then fills the sticks; `drive::<false>` is the
+/// vehicle part of `do_Other` @ 10146280 (controls, ground, steering) and
+/// the scenery push (`AddCollideObj` @ 10055c70). The original runs both
+/// halves per object in table order (`object_MainLoop` @ 1014a670).
 #[allow(clippy::too_many_arguments)]
-fn drive(
+fn drive<const MOVE: bool>(
     mut commands: Commands,
     data: Res<GameData>,
     city: Option<ResMut<City>>,
@@ -353,6 +389,7 @@ fn drive(
 ) {
     let (Some(mut city), Some(library)) = (city, library) else { return };
     let mut glass = Vec::new();
+    let mut smashed = 0;
     // Snowmen knocked down this tick (the original clears the cell at
     // once, so later circles and vehicles no longer meet it).
     let mut snowmen: Vec<(usize, usize, usize)> = Vec::new();
@@ -362,7 +399,7 @@ fn drive(
         if obj.state == State::Removed {
             continue;
         }
-        let t = &TYPES[veh.kind];
+        let t = crate::vehicles::handling(veh.kind, d.red_frame);
         let extents = |model: usize| {
             let info = &library.model(model).info;
             (info.radius.max(1), info.max_y, info.min_y)
@@ -389,6 +426,11 @@ fn drive(
                 d.bob = [0, 0, -25, -11];
             }
         }
+        // The controls phase picks up what this tick's move left (AI-1);
+        // a car spawned since the move phase moves now.
+        let (start, hit, clear_pos) = match d.step.take() {
+            Some(step) if !MOVE => step,
+            _ => {
         let start = obj.pos;
 
         // ---- `MoveObject_Vehicle` @ 1006e890 (one sub-step, the last) ----
@@ -412,6 +454,10 @@ fn drive(
         };
         let bp = collide::box_points(&trig, obj.pos, obj.roll, obj.pitch, obj.heading, hw, front, rear);
         let hit = collide::vehicle_walls(&city, &bp, obj.pos, clear, &mut glass);
+        // Glass goes the moment it breaks (the sound, trigger and render
+        // edit follow after the loop).
+        collide::remove_glass_now(&mut city, &glass[smashed..]);
+        smashed = glass.len();
         let clear_now = !hit.x && !hit.y;
         let clear_pos = if clear_now { obj.pos } else { clear };
         if clear_now {
@@ -498,6 +544,15 @@ fn drive(
         if hit.y {
             obj.vel.y = bounce(hit.side.y, obj.vel.y);
             obj.pos.y += obj.vel.y + if hit.side.y < 1 { -0x20 } else { 0x20 };
+        }
+        (start, hit, clear_pos)
+            }
+        };
+        if MOVE {
+            // The AI runs between the two phases (`object_MainLoop` @
+            // 1014a670: `MoveObject_Vehicle`, then `do_Other`).
+            d.step = Some((start, hit, clear_pos));
+            continue;
         }
 
         // ---- `do_Other` @ 10146280, vehicle part ----
@@ -769,7 +824,7 @@ fn drive(
 }
 
 /// Scenery id of the snowman (`scenery/snowman.obj`, pickup code 0xfe).
-const SNOWMAN: u8 = 26;
+pub(crate) const SNOWMAN: u8 = 26;
 
 /// Signed angle in −0xb40..0xb40.
 fn angle_signed(a: i32) -> i32 {
@@ -1339,6 +1394,20 @@ fn horns(
             commands.entity(s).try_despawn();
         }
         d.honked = false;
+    }
+}
+
+/// The police van's handling follows its light bar (Mac `DoVehicleFire`
+/// @ 10070c20 swaps the model pointer to `policevan_red` for 5 ticks of
+/// every 10 while the siren is on, 68k `FUN_000e2a50`): the red frame of
+/// [`super::pursuit::Siren`] selects [`crate::vehicles::POLICEVAN_RED`]
+/// (brake 10, grip 20, mass 2000) for the driving and the contacts.
+fn light_bar(mut q: Query<(&Vehicle, &mut Drive, Option<&super::pursuit::Siren>)>) {
+    for (veh, mut d, siren) in &mut q {
+        let red = veh.kind == vk::POLICE_VAN && siren.is_some_and(|s| !s.blue());
+        if d.red_frame != red {
+            d.red_frame = red;
+        }
     }
 }
 

@@ -31,6 +31,18 @@ use payback_formats::{CubeTextureList, CustomTextures, IndexedImage, Palette, pa
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Where the data is found by default: the extracted CD (and Mac CD) next
+/// to the working directory, or in the web build the pack's folders
+/// (`vfs`, docs/web.md).
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_DATA: &str = "extracted/game";
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_MAC_DATA: &str = "extracted/mac/Payback";
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_DATA: &str = "data/game";
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_MAC_DATA: &str = "data/mac";
+
 #[derive(Resource, Clone)]
 pub struct GameData {
     pub root: PathBuf,
@@ -48,7 +60,7 @@ pub struct GameData {
 
 impl GameData {
     pub fn locate() -> Result<PathBuf, String> {
-        let from_args = std::env::args()
+        let from_args = crate::args()
             .skip_while(|a| a != "--data")
             .nth(1)
             .map(PathBuf::from);
@@ -56,9 +68,9 @@ impl GameData {
             .map(PathBuf::from)
             .into_iter()
             .chain(from_args)
-            .chain([PathBuf::from("extracted/game")]);
+            .chain([PathBuf::from(DEFAULT_DATA)]);
         for dir in candidates {
-            if dir.join("Payback.exe").is_file() {
+            if crate::vfs::is_file(dir.join("Payback.exe")) {
                 return Ok(dir);
             }
         }
@@ -72,7 +84,7 @@ impl GameData {
     /// The Mac data folder (`Payback` in `PaybackMac.toast`, extracted by
     /// `tools/extract_mac.py`), if there is one.
     pub fn locate_mac() -> Option<PathBuf> {
-        let from_args = std::env::args()
+        let from_args = crate::args()
             .skip_while(|a| a != "--mac-data")
             .nth(1)
             .map(PathBuf::from);
@@ -80,12 +92,12 @@ impl GameData {
             .map(PathBuf::from)
             .into_iter()
             .chain(from_args)
-            .chain([PathBuf::from("extracted/mac/Payback")])
-            .find(|d| d.join("Payback (OS X)").is_file() || d.join("CubeTextures").is_dir())
+            .chain([PathBuf::from(DEFAULT_MAC_DATA)])
+            .find(|d| crate::vfs::is_file(d.join("Payback (OS X)")) || crate::vfs::is_dir(d.join("CubeTextures")))
     }
 
     pub fn load(root: &Path) -> Result<GameData, String> {
-        let exe = std::fs::read(root.join("Payback.exe"))
+        let exe = crate::vfs::read(root.join("Payback.exe"))
             .map_err(|e| format!("{}: {e}", root.join("Payback.exe").display()))?;
         let palette = palette::find_in_executable(&exe).map_err(|e| e.to_string())?;
         let mut data = GameData {
@@ -109,10 +121,10 @@ impl GameData {
     /// they are.
     pub fn read(&self, rel: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
         let rel = rel.as_ref();
-        match std::fs::read(self.root.join(rel)) {
+        match crate::vfs::read(self.root.join(rel)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 match find_in(&self.root, rel).or_else(|| self.mac_path(rel)) {
-                    Some(p) => std::fs::read(p),
+                    Some(p) => crate::vfs::read(p),
                     None => Err(e),
                 }
             }
@@ -131,7 +143,7 @@ impl GameData {
     pub fn read_variant(&self, rel: impl AsRef<Path>, prefer_mac: bool) -> std::io::Result<Vec<u8>> {
         let rel = rel.as_ref();
         match self.mac_path(rel).filter(|_| prefer_mac) {
-            Some(p) => std::fs::read(p),
+            Some(p) => crate::vfs::read(p),
             None => self.read(rel),
         }
     }
@@ -142,7 +154,7 @@ impl GameData {
         self.read(format!("CubeTextures/.{name}")).or_else(|e| {
             let txt = format!("CubeTextures/{name}.txt");
             match find_in(&self.root, Path::new(&txt)).or_else(|| self.mac_path(&txt)) {
-                Some(p) => std::fs::read(p),
+                Some(p) => crate::vfs::read(p),
                 None => Err(e),
             }
         })
@@ -184,10 +196,10 @@ impl GameData {
         let mut out: Vec<(String, PathBuf)> = Vec::new();
         for root in roots {
             let Some(d) = find_dir(&root, Path::new(dir)) else { continue };
-            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            let Ok(entries) = crate::vfs::read_dir(&d) else { continue };
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if is_junk(&name) || !e.path().is_file() {
+                if is_junk(&name) || !e.is_file() {
                     continue;
                 }
                 if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
@@ -209,19 +221,19 @@ pub fn is_junk(name: &str) -> bool {
 /// when the exact path is missing.
 fn find_in(root: &Path, rel: &Path) -> Option<PathBuf> {
     let p = root.join(rel);
-    if p.is_file() {
+    if crate::vfs::is_file(&p) {
         return Some(p);
     }
-    resolve_nocase(root, rel).filter(|p| p.is_file())
+    resolve_nocase(root, rel).filter(|p| crate::vfs::is_file(p))
 }
 
 /// Like [`find_in`], for a directory.
 fn find_dir(root: &Path, rel: &Path) -> Option<PathBuf> {
     let p = root.join(rel);
-    if p.is_dir() {
+    if crate::vfs::is_dir(&p) {
         return Some(p);
     }
-    resolve_nocase(root, rel).filter(|p| p.is_dir())
+    resolve_nocase(root, rel).filter(|p| crate::vfs::is_dir(p))
 }
 
 fn resolve_nocase(root: &Path, rel: &Path) -> Option<PathBuf> {
@@ -231,7 +243,7 @@ fn resolve_nocase(root: &Path, rel: &Path) -> Option<PathBuf> {
         // case, as the Amiga and HFS file systems do (`Foo.MAP` with
         // `foo.thumb`).
         let (dir, name) = (rel.parent()?, rel.file_name()?.to_string_lossy());
-        return std::fs::read_dir(dir)
+        return crate::vfs::read_dir(dir)
             .ok()?
             .flatten()
             .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&name))
@@ -241,10 +253,10 @@ fn resolve_nocase(root: &Path, rel: &Path) -> Option<PathBuf> {
     for part in rel.components() {
         let part = part.as_os_str().to_string_lossy();
         let exact = cur.join(&*part);
-        cur = if exact.exists() {
+        cur = if crate::vfs::exists(&exact) {
             exact
         } else {
-            std::fs::read_dir(&cur)
+            crate::vfs::read_dir(&cur)
                 .ok()?
                 .flatten()
                 .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&part))?

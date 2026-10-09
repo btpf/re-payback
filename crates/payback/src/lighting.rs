@@ -443,13 +443,19 @@ pub fn remap_table(data: &GameData) -> Vec<u16> {
 // Material
 
 /// Dynamic lights sent to the shader per frame: those whose square box
-/// reaches a view's drawn squares, nearest a view first (the original adds
-/// up to 1000; 510 lights fit a 16 KB uniform block, the portable limit).
+/// reaches a view's drawn squares, nearest a view first. The original adds
+/// up to 1000 (`FUN_0106ba08`, Mac `AddLight`); they fit a 32 KB uniform
+/// block, within the 64 KB native limit. The web build (WebGL2, 16 KB
+/// uniform blocks) keeps 510.
+#[cfg(not(target_arch = "wasm32"))]
+pub const MAX_LIGHTS: usize = 1000;
+#[cfg(target_arch = "wasm32")]
 pub const MAX_LIGHTS: usize = 510;
 
 #[derive(ShaderType, Clone, Debug)]
 pub struct LightBlock {
-    /// x = number of lights, y = 1 for the hardware (Warp3D) look.
+    /// x = number of lights, y = 1 for the hardware (Warp3D) look, z = 1
+    /// in the rotating view (per-triangle Gouraud, `shaders/city.wgsl`).
     pub params: Vec4,
     /// Per light: render position (x, y, z) and square radius; then R, G, B
     /// intensity.
@@ -535,9 +541,19 @@ impl Material for CityMaterial {
             Mesh::ATTRIBUTE_UV_1.at_shader_location(11),
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
-        // Both sides are in the mesh already.
-        descriptor.primitive.cull_mode = None;
+        // Back faces are culled (`crate::city` builds the front winding).
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Back);
+        let lights = [
+            bevy::shader::ShaderDefVal::UInt("MAX_LIGHTS".into(), MAX_LIGHTS as u32),
+            bevy::shader::ShaderDefVal::UInt("LIGHT_SLOTS".into(), 2 * MAX_LIGHTS as u32),
+        ];
+        descriptor.vertex.shader_defs.extend(lights.clone());
         if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.extend(lights);
+            // Game views: gamma-encoded output (`crate::camera::postfx::GammaWorld`).
+            if crate::objects::gamma_view(key.mesh_key) {
+                fragment.shader_defs.push("GAMMA_TARGET".into());
+            }
             match key.bind_group_data {
                 Pass::Masked => fragment.shader_defs.push("CITY_MASKED".into()),
                 Pass::Alpha => fragment.shader_defs.push("CITY_ALPHA".into()),
@@ -660,10 +676,11 @@ fn sync_mode(
             m.lights.params.y = flag;
         }
     }
-    // Daytime atlases are the same for both renderers; a night map loaded
-    // in software is darkened, so a change of renderer rebuilds them.
+    // Daytime atlases are the same for both renderers; at night the level
+    // loader builds them for the renderer in use (darkened in software), so
+    // only a later change of renderer rebuilds them (65-76 ms).
     let was_hardware = done.is_some_and(|d| d.0);
-    if city.map.night && (hardware || (!fresh && was_hardware)) {
+    if city.map.night && !fresh && was_hardware != hardware {
         let atlases = crate::city::build_cube_atlases(&data, !hardware);
         for (pass, handle) in &render.materials {
             let Some(atlas) = materials.get(handle).map(|m| m.atlas.clone()) else { continue };
@@ -953,7 +970,12 @@ fn upload_lights(
     mut last: Local<usize>,
 ) {
     let Some(render) = render else { return };
-    if lights.0.is_empty() && *last == 0 {
+    let rotating_flag = if rotating.0 { 1.0 } else { 0.0 };
+    let stale = render
+        .materials
+        .values()
+        .any(|h| materials.get(h).is_some_and(|m| m.lights.params.z != rotating_flag));
+    if lights.0.is_empty() && *last == 0 && !stale {
         return;
     }
     // The views' eyes (the rotating view and the replay TV camera draw from
@@ -987,6 +1009,7 @@ fn upload_lights(
     let mut block = LightBlock::default();
     block.params.x = sorted.len() as f32;
     block.params.y = hardware_flag();
+    block.params.z = rotating_flag;
     for (i, l) in sorted.iter().enumerate() {
         let p = to_render(l.pos);
         block.data[2 * i] = p.extend(l.radius(13) as f32);

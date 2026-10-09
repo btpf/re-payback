@@ -6,7 +6,9 @@ Neither Amiga build has it (no code in 68k or OS4; the Amiga `Global.*.phrases` 
 bodies; `jumptables.tsv` row 1012a0e8 maps slot 0..7 to the event handlers, 1012a124 the
 answered phone's `Random(7)+1` to the job setups).
 CONFIRMED unless marked. Port: `crates/payback/src/mission/levels/random.rs`, switched by
-the Rampage setting (`RandomMissions`, recorded in replays; decision 8 in mac_version.md).
+the Rampage setting (`RandomMissions`, recorded in replays; decision 8 in mac_version.md),
+and only run when the phrases exist (phrase 1400 not empty): with Amiga-only data every
+brief would be empty, so the mode stays off whatever the setting says.
 
 ## Entry
 
@@ -64,8 +66,10 @@ the plain name (2330–2355).
   (reflect), and cubes 1–2 are off. It is taken if more than 4000 tries were made, if no
   route node exists, or if the nearest route node (`FindNearestNode` @ 100f11d0) has line of
   sight to it (`LineOfSight_alt`). After 5000 tries the last square is taken anyway. The
-  result is always cube 0. The port uses cube 0's height for the node end of the sight line
-  (its route loader drops the node cube; INFERRED to make no practical difference).
+  result is always cube 0. The node end of the sight line is at the height of the node's own
+  cube (`GetNodeCubeNum` @ 100f1450 = route record byte 12, also the "unused" 0xFF marker;
+  `GetCubeHeight` @ 100ae7d0). Map 1 has 5 nodes on cube 1, maps 0 and 2 none. CONFIRMED;
+  the port does the same.
 * `GetRandomVehicleNum` @ 10057e50: Random(26), 25 → 27 (Vapour GT); never the RC car (22)
   or boat (23). `GetHighestLevelCompleted` @ 1009b580 (story levels done in order, 0–6) then
   bars or thins out the tank (11), helicopter (17), Pug Racer (18), RC truck (21), rocket car

@@ -55,7 +55,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PAYBACK_MAC_DATA");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let imgs = source_images(&manifest);
+    // The web build has no window icon (the page has none either), and
+    // keeps game art out of the .wasm.
+    let web = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
+    let imgs = if web { None } else { source_images(&manifest) };
     // Window icon for the game: width, height (u32 LE) then RGBA; empty
     // when there is no icon.
     let window = out.join("window_icon.rgba");

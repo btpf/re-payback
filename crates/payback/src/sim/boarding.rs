@@ -68,7 +68,7 @@ impl Plugin for BoardingPlugin {
         .add_systems(
             FixedUpdate,
             board_test
-                .run_if(|| std::env::args().any(|a| a == "--board-test"))
+                .run_if(|| crate::args().any(|a| a == "--board-test"))
                 .after(crate::replay::ReplayInput)
                 .before(super::people::PeopleThink),
         );
@@ -439,6 +439,7 @@ pub(crate) fn eject(
             o.wanted = wanted;
             o.health = health;
             o.player = Some(player);
+            o.side = 0; // `GetOutVehicle` @ 10065660: +0x824 = 0
             o.prev_pos = prev;
         }
         if let Some(mut p) = world.get_mut::<Person>(pe) {
@@ -653,6 +654,9 @@ fn walk_to_door(
         *session.foot_health_mut(p.player) = p.health;
         v.state = State::Player;
         v.player = Some(p.player.unwrap_or(0));
+        // The car becomes the player's side and stays so after he gets
+        // out (`+0x824 = 0`, Mac `GetInOutVehicles` @ 10066140).
+        v.side = 0;
         if let Some(t) = &texts {
             banner.show_for(v.player, t.global(TYPES[veh.kind].name_phrase));
         }
@@ -693,3 +697,7 @@ fn close_doors(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/boarding.rs"]
+mod tests;

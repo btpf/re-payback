@@ -65,7 +65,7 @@ The in-memory cube layout (`+0` rotation, `+1` scenery, `+2` h1, `+4` special,
 | `0x10` | "straight on" is also an option (editor F6); shipped only with one direction bit | `FUN_010cb7e4` |
 | `0x20` | pedestrians walk here (editor F1) | ped spawn `FUN_01047af4`; wander turn 68k `FUN_000e3a58` ~122313; start points |
 | `0x40` | roadblock allowed (editor B) | OS4 `FUN_01047134` / 68k `FUN_000cfe0c` |
-| `0x80` | **unknown**: no reader in either build; only 18 cube-1 Horiz ramps in map 0 (x ≈ 37, y 10–15) | — |
+| `0x80` | **unused**: no reader in either build, and the Mac map editor neither sets nor reads it (its keys toggle only 0x01–0x40; load, save, copy and paste keep the byte whole). Only 18 cube-1 Horiz ramps in map 0 (x ≈ 37, y 10–15) carry it, from an older editor (CONFIRMED, `MapEditor (OS X)`, `docs/re/open_questions.md`) | — |
 
 World geometry: a square is 256 units wide (observed; 0x800 in object units);
 ground cubes are 256 high; buildings stack to ~1024. North is −y.
@@ -104,7 +104,9 @@ count`, then per slot `u32 present`; if 1: `char name[40]`, `u32 type`
 used when Gouraud is on, read in `FUN_010766c8`; the editor's "Select image
 (gouraud)"), then 4096 bytes (64×64). Slot i = texture index 2000 + i. At night
 only names starting with `$` are exempt from the remap. The in-memory field
-`+0x30` is never read (open). The editor guide also mentions `.objects`; the
+`+0x30` is never read: in the map editor it is a "used by the loaded map" stamp
+(`GetCubeTexture` @ 1007dc40 writes a generation flag `LoadMap` flips), not stored in
+the file (CONFIRMED, `MapEditor (OS X)` `SaveUserTextures` @ 1007d950). The editor guide also mentions `.objects`; the
 game never loads it. Parser: `payback_formats::texture::CustomTextures`; 12 of the Mac
 release's user maps use it (a 4-byte file is an empty set; the largest,
 `Amirace`, has the full 112 slots).

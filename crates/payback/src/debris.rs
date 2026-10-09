@@ -14,9 +14,12 @@
 //! touches the game's sequence: here [`VisualRng`], and a render-only
 //! resource.
 //!
-//! Not reproduced: the removal of parts outside the view rectangle (as for
-//! the effects, the lists are not per view here) and `DrawPart`'s near
-//! cull (depth ≤ 6000).
+//! A part outside the view rectangle is removed like one below the street
+//! (the same test in `UpdateEffects`: `z > 0x57e4 || x < x0 || y < y0 ||
+//! x > x1 || y > y1`, with its landing puffs; split screen
+//! `UpdateEffectsMulti1` @ 100a8580: outside every view), and `DrawPart`
+//! skips a part nearer than depth 6000 (`z + camH·16 − 0x100`) in the
+//! top-down view.
 
 use crate::effects::{Blend, Effects, Tex};
 use crate::objects::ObjectLibrary;
@@ -139,17 +142,21 @@ impl Parts {
         self.lists.iter().all(Vec::is_empty)
     }
 
-    /// One tick of the part lists (`UpdateEffects`, ticks = 1).
-    fn tick(&mut self, effects: &mut Effects, rand: &mut impl FnMut(i32) -> i32) {
+    /// One tick of the part lists (`UpdateEffects`, ticks = 1); `rects`:
+    /// every view's rectangle `(x0, x1, y0, y1)` (none: no culling).
+    fn tick(&mut self, effects: &mut Effects, rand: &mut impl FnMut(i32) -> i32, rects: &[(i32, i32, i32, i32)]) {
+        let inside = |p: IVec3| {
+            rects.is_empty() || rects.iter().any(|&(x0, x1, y0, y1)| x0 <= p.x && p.x <= x1 && y0 <= p.y && p.y <= y1)
+        };
         for (l, list) in self.lists.iter_mut().enumerate() {
             let layer = l as u8;
             let mut i = 0;
             while i < list.len() {
-                // Below the street: removed (replaced by the last part,
-                // which is tested again), leaving a blood splat (people)
-                // or three smoke puffs.
+                // Below the street or outside the view: removed (replaced
+                // by the last part, which is tested again), leaving a blood
+                // splat (people) or three smoke puffs.
                 let p = &list[i];
-                if p.pos.z > GROUND_Z {
+                if p.pos.z > GROUND_Z || !inside(p.pos) {
                     landing(p, layer, effects, rand);
                     list.swap_remove(i);
                     continue;
@@ -255,10 +262,17 @@ impl Plugin for DebrisPlugin {
     }
 }
 
-fn tick_parts(mut parts: ResMut<Parts>, mut effects: ResMut<Effects>, rng: Option<ResMut<VisualRng>>) {
+fn tick_parts(
+    mut parts: ResMut<Parts>,
+    mut effects: ResMut<Effects>,
+    rng: Option<ResMut<VisualRng>>,
+    eyes: Res<crate::camera::ViewEyes>,
+    rotating: Res<crate::camera::RotatingView>,
+) {
     let Some(mut rng) = rng else { return };
     if !parts.is_empty() {
-        parts.tick(&mut effects, &mut |n| rng.rand(n));
+        let rects = crate::effects::view_rects(&eyes, rotating.0);
+        parts.tick(&mut effects, &mut |n| rng.rand(n), &rects);
     }
 }
 
@@ -351,17 +365,28 @@ fn spawn_meshes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut ma
 /// `DrawPart`: each part's face around its centroid (people a third the
 /// size), turned by roll (X–Z), pitch (Y–Z) and heading (X–Y) as in the
 /// original's integer steps, at the part's position.
+#[allow(clippy::too_many_arguments)]
 fn build_meshes(
     parts: Res<Parts>,
     library: Option<Res<ObjectLibrary>>,
     trig: Res<Trig>,
+    eyes: Res<crate::camera::ViewEyes>,
+    rotating: Res<crate::camera::RotatingView>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<(&DebrisMesh, &Mesh3d, &mut Visibility)>,
 ) {
     let mut tris: Vec<[f32; 3]> = Vec::new();
     let mut lines: Vec<[f32; 3]> = Vec::new();
+    // `DrawPart`: top-down, a part at depth `z + camH·16 − 0x100` ≤ 6000 is
+    // not drawn (the mesh is shared: hidden only when near every view).
+    let near = |z: i32| {
+        !rotating.0 && !eyes.cams.is_empty() && eyes.cams.iter().all(|c| z + c.h * 16 - 0x100 <= 6000)
+    };
     if let Some(library) = &library {
         for p in parts.lists.iter().flatten() {
+            if near(p.pos.z) {
+                continue;
+            }
             let obj = &library.model(p.model).obj;
             let Some(face) = obj.faces.get(p.face) else { continue };
             let c = centroid(obj, p.face);

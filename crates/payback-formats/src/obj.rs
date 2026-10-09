@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! 1001                 magic / version
-//! <flag>               0 or 1 (meaning not yet known)
+//! <flag>               1 = painter's sort of the faces (model +0x490c;
+//!                      OS4 FUN_010bf8bc), 0 = file order
 //! <nverts>
 //! x y z w              per vertex; z is vertical (negative = up) for scenery.
 //!                      w is the limb index for people (driven by Human.motion),

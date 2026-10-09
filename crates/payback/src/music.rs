@@ -5,13 +5,18 @@
 //! @ 10103fc0). Game-side logic follows the Mac (analysis/mac/audio_platform.md
 //! §2, docs/re/frontend_audio.md §4.6).
 //!
-//! **Files.** Put the tracks in a `Music` folder in the working directory
-//! (next to `Saves`), the data root or the Mac data folder, one file per CD
-//! track, numbered by CD track: a name starting with the number
+//! **Files.** Put the tracks in a `Music` folder in the working directory,
+//! the saves folder (`frontend::progress::saves_dir`, e.g.
+//! `%APPDATA%\Payback\Music`), the data root or the Mac data folder, one
+//! file per CD track, numbered by CD track: a name starting with the number
 //! (`13.ogg`, `13 - Payback.mp3`) or with the number last
 //! (`Track13.flac`, `Payback (Track 13).wav`). Any format the decoder
 //! reads: WAV, Ogg Vorbis, MP3, FLAC. With no files the music is Disabled
-//! and everything stays silent.
+//! and everything stays silent; the CD Audio Setup screen then says where
+//! the files go ([`NO_MUSIC_HINT`]) and the log lists the folders searched.
+//! The disc images (`Payback.iso`, ISO 9660, and `PaybackMac.toast`, HFS)
+//! hold only the data track, so the tracks cannot be extracted from them:
+//! rip them from the CD (docs/research.md, "CD music").
 //!
 //! **Modes** (`Settings.cd_mode`, `DAT_0114c30c` / Mac `DAT_10188fb0`):
 //! 0 Off, 1 Radio (the Mac default), 2 Continuous, 3 Disabled (forced
@@ -38,6 +43,14 @@
 //!   requests its radio track (`do_Other__Fv` @ 10146280, `do_Person__Fv`
 //!   @ 1013fbd0), so it loops; on foot that is -1 (stop; INFERRED: the
 //!   person types' field is -1, the default of `+0x4938`).
+//! - Radio in split screen (one CD for everyone): `GetInOutVehicles(p)`
+//!   has no player test, so any player getting in switches the CD to their
+//!   vehicle's station and any player getting out stops it; the per-frame
+//!   request is made only for player 1's object (`objects[*DAT_1017c60c]`,
+//!   the first entry of the per-player object table), so another player's
+//!   station keeps playing only while player 1 drives, until the track
+//!   ends (then player 1's loops), and stops at once while player 1 is on
+//!   foot. CONFIRMED (Mac l.24524, 24644-24801, 115952, 117982).
 //! - Volume is tied to the FX slider ([`FxVolume::music`]); the "under
 //!   cover" duck is not heard on the Mac (`CD_SetVolume` @ 100fb100 is an
 //!   empty stub), so there is none.
@@ -113,9 +126,18 @@ pub struct MusicLibrary {
     loaded: BTreeMap<u32, Option<Handle<AudioSource>>>,
 }
 
+/// Shown by the CD Audio Setup screen while no track is found (no
+/// phrase; the original's setup just dims the mode when `CD_Init` fails).
+pub const NO_MUSIC_HINT: [&str; 4] = [
+    "No CD music found. Rip the game",
+    "CD's audio tracks into a Music",
+    "folder next to the game or the",
+    "saves, named by track: 13.ogg ...",
+];
+
 /// The track folders, in search order.
 fn folders(data: Option<&GameData>) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("Music")];
+    let mut dirs = vec![PathBuf::from("Music"), crate::frontend::progress::saves_dir().join("Music")];
     if let Some(data) = data {
         dirs.push(data.root.join("Music"));
         if let Some(mac) = &data.mac {
@@ -148,8 +170,8 @@ impl MusicLibrary {
     fn scan(data: Option<&GameData>) -> MusicLibrary {
         let mut tracks = BTreeMap::new();
         for dir in folders(data) {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+            let Ok(entries) = crate::vfs::read_dir(&dir) else { continue };
+            let mut files: Vec<PathBuf> = entries.flatten().filter(|e| e.is_file()).map(|e| e.path()).collect();
             files.sort();
             for f in files {
                 if let Some(n) = track_number(&f) {
@@ -159,6 +181,11 @@ impl MusicLibrary {
         }
         if !tracks.is_empty() {
             info!("music: {} tracks ({:?})", tracks.len(), tracks.keys().collect::<Vec<_>>());
+        } else {
+            info!(
+                "music: no CD tracks found; rip the game CD's audio tracks (e.g. 13.ogg, Track13.flac) into one of {:?}",
+                folders(data)
+            );
         }
         AVAILABLE.store(!tracks.is_empty(), Ordering::Relaxed);
         MusicLibrary { tracks, loaded: BTreeMap::new() }
@@ -171,7 +198,7 @@ impl MusicLibrary {
             return h.clone();
         }
         let path = self.tracks.get(&n)?;
-        let handle = match std::fs::read(path) {
+        let handle = match crate::vfs::read(path) {
             Ok(bytes) => {
                 let bytes: Arc<[u8]> = bytes.into();
                 let ok = rodio::Decoder::builder()
@@ -204,8 +231,8 @@ pub struct Cd {
     playing: Option<Entity>,
     /// The track played last; Continuous carries on after it.
     last: u32,
-    /// Radio: the vehicle player 1 is in.
-    radio_in: Option<Entity>,
+    /// Radio: the vehicle each player is in, by player number.
+    radio_in: Vec<Option<Entity>>,
     /// A track was started this frame (its entity is not spawned yet).
     fresh: bool,
 }
@@ -295,7 +322,7 @@ fn stop_on_exit(mut commands: Commands, mut cd: ResMut<Cd>, alive: Query<(), Wit
     if let Some(e) = cd.playing.take().filter(|&e| alive.contains(e)) {
         commands.entity(e).despawn();
     }
-    cd.radio_in = None;
+    cd.radio_in.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -332,7 +359,7 @@ fn run_music(
         // Switching to Off stops the CD (`DoCDAudioSetup`); every other
         // request is skipped in mode 0.
         p.stop();
-        p.cd.radio_in = None;
+        p.cd.radio_in.clear();
         return;
     }
     match *cue {
@@ -346,21 +373,35 @@ fn run_music(
                 p.check(0);
                 return;
             }
-            // Radio: player 1's object.
-            let me = players
-                .iter()
-                .find(|(_, o, _)| o.player == Some(0))
-                .or_else(|| players.iter().next());
-            let vehicle = me.and_then(|(e, _, v)| v.map(|v| (e, v.kind)));
-            let now = vehicle.map(|v| v.0);
-            if now != p.cd.radio_in {
-                p.cd.radio_in = now;
-                p.stop();
-                if let Some(n) = vehicle.and_then(|v| TYPES[v.1].radio).filter(|&n| n > 0) {
-                    p.play(n as u32);
+            // Radio: every player's getting in or out (in player order),
+            // then player 1's object's request.
+            let n = players.iter().filter_map(|(_, o, _)| o.player).max().map_or(1, |m| m as usize + 1);
+            p.cd.radio_in.resize(n.max(1), None);
+            let mut me = None;
+            for i in 0..n.max(1) {
+                let obj = players
+                    .iter()
+                    .find(|(_, o, _)| o.player == Some(i as u8))
+                    .or_else(|| (i == 0).then(|| players.iter().next()).flatten());
+                let vehicle = obj.and_then(|(e, _, v)| v.map(|v| (e, v.kind)));
+                if i == 0 {
+                    me = obj.map(|_| vehicle);
+                }
+                // Another player's object gone (dead): nothing changes;
+                // player 1's: as getting out (the music stops).
+                if obj.is_none() && i > 0 {
+                    continue;
+                }
+                let now = vehicle.map(|v| v.0);
+                if now != p.cd.radio_in[i] {
+                    p.cd.radio_in[i] = now;
+                    p.stop();
+                    if let Some(n) = vehicle.and_then(|v| TYPES[v.1].radio).filter(|&n| n > 0) {
+                        p.play(n as u32);
+                    }
                 }
             }
-            if me.is_some() {
+            if let Some(vehicle) = me {
                 let track = vehicle.and_then(|v| TYPES[v.1].radio).map_or(-1, i32::from);
                 p.check(track);
             }

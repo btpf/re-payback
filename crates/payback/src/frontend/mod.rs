@@ -100,7 +100,7 @@ struct Frontend {
 
 /// The two canvases and their nodes, alive while a menu is shown.
 #[derive(Resource)]
-struct Layers {
+pub(crate) struct Layers {
     back: Handle<Image>,
     front: Handle<Image>,
     back_px: Vec<u8>,
@@ -187,6 +187,13 @@ impl Plugin for FrontendPlugin {
             .init_resource::<model::CurrentModel>()
             .init_resource::<model::ModelCache>()
             .init_resource::<usermaps::UserMaps>()
+            .init_resource::<bindings::PadSlots>()
+            .init_resource::<bindings::PadAxes>()
+            .add_systems(
+                PreUpdate,
+                (bindings::assign_pads, bindings::track_pad_axes, bindings::learn_key_labels)
+                    .after(bevy::input::InputSystems),
+            )
             .add_plugins(display::DisplayPlugin)
             .add_systems(Startup, setup)
             .add_systems(PostStartup, default_ui_camera)
@@ -292,7 +299,7 @@ fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
             let r = crate::replay::load_file(&crate::replay::saves_dir().join(&name)).ok()?;
             Box::new(replays::ReplayInfo::new(r, Some(name)))
         }
-        "credits" => Box::new(misc::Credits::new(2200, 2, true, 0x2e, 100)),
+        "credits" => Box::new(misc::Credits::new(2200, 2, true, 0x2e, 100).with_about()),
         "language" => Box::new(misc::LanguageChooser::new(cx)),
         "controls" => Box::new(misc::ControlSetup::new(cx)),
         "controls-redefine" => Box::new(misc::ControlSetup::redefining(cx)),
@@ -504,6 +511,7 @@ fn gather_input(
     keys: &ButtonInput<KeyCode>,
     typed: &mut MessageReader<KeyboardInput>,
     pads: &Query<(Entity, &Gamepad)>,
+    pad_axes: &bindings::PadAxes,
     stick: &mut Vec<(Entity, IVec2)>,
     input: &mut Input,
 ) {
@@ -511,6 +519,7 @@ fn gather_input(
     let mut seen = Vec::new();
     for (e, pad) in pads {
         input.pad.extend(pad.get_just_pressed().copied());
+        input.pad_axes.extend(pad_axes.just_pressed(e));
         input.left |= pad.just_pressed(GamepadButton::DPadLeft);
         input.right |= pad.just_pressed(GamepadButton::DPadRight);
         input.up |= pad.just_pressed(GamepadButton::DPadUp);
@@ -601,6 +610,7 @@ struct Env<'w, 's> {
     level_load: Option<Res<'w, LevelLoad>>,
     startup: Option<Res<'w, crate::startup::StartupLoad>>,
     pads: Query<'w, 's, (Entity, &'static Gamepad)>,
+    pad_axes: Res<'w, bindings::PadAxes>,
     user_maps: Res<'w, usermaps::UserMaps>,
     display: Res<'w, display::Display>,
     render_mode: Option<Res<'w, crate::render_mode::RenderMode>>,
@@ -669,7 +679,7 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
             None => menus::PauseMenu::new(),
         };
         fe.stack.push(Box::new(menu));
-        if debug_pause && std::env::args().any(|a| a == "--pause-graphics") {
+        if debug_pause && crate::args().any(|a| a == "--pause-graphics") {
             fe.stack.push(Box::new(display::GraphicsSetup::debug(&env.settings)));
         }
         fe.pending = Input::default();
@@ -683,7 +693,7 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     // menu.
     let debug_cheats = playing
         && !fe.debug_cheats
-        && (std::env::args().any(|a| a == "--cheat-menu") || crate::arg("--cheat-vehicle").is_some())
+        && (crate::args().any(|a| a == "--cheat-menu") || crate::arg("--cheat-vehicle").is_some())
         && env.time.elapsed_secs() > 3.0;
     if playing
         && fe.stack.is_empty()
@@ -695,8 +705,9 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         fe.debug_cheats = true;
         env.virtual_time.pause();
         let god = env.cheats.god_pending();
+        let wanted = env.cheats.wanted_pending();
         let item = crate::arg("--menu-item").and_then(|v| v.parse().ok()).filter(|_| debug_cheats);
-        fe.stack.push(Box::new(cheats::CheatMenu::at(god, item.unwrap_or(0))));
+        fe.stack.push(Box::new(cheats::CheatMenu::at(god, wanted, item.unwrap_or(0))));
         if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
             fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));
         }
@@ -745,7 +756,7 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     }
 
     let mut pending = std::mem::take(&mut fe.pending);
-    gather_input(&env.keys, &mut env.typed, &env.pads, &mut fe.stick, &mut pending);
+    gather_input(&env.keys, &mut env.typed, &env.pads, &env.pad_axes, &mut fe.stick, &mut pending);
 
     // Ticks at 30 Hz of real time (virtual time is paused in the pause
     // menu).

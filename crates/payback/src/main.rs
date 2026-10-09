@@ -13,7 +13,7 @@
 //! `--multiplayer` starts a split-screen match on `--map` (key bindings in
 //! `multiplayer.rs`).
 //!
-//! Controls: arrows/WASD move the player. F2 toggles the free camera
+//! Controls: arrows move the player (keys in the control setup). F6 toggles the free camera
 //! (WASD pan, Q/E rotate, R/F tilt, wheel or Z/X zoom).
 
 mod arrow;
@@ -25,6 +25,7 @@ mod city;
 mod data;
 mod debris;
 mod effects;
+mod frame;
 mod frontend;
 mod hud;
 mod intro;
@@ -43,8 +44,11 @@ mod replay;
 mod sim;
 mod startup;
 mod vehicles;
+mod vfs;
 mod water;
 mod weather;
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod window_icon;
 mod world;
 
@@ -55,10 +59,34 @@ use bevy::{
 use data::GameData;
 
 pub fn arg(name: &str) -> Option<String> {
-    std::env::args().skip_while(|a| a != name).nth(1)
+    args().skip_while(|a| a != name).nth(1)
 }
 
+/// The command line; in the web build the page's query string instead
+/// (`?map=3&level=1&intro` = `--map 3 --level 1 --intro`, `web.rs`).
+pub fn args() -> impl Iterator<Item = String> {
+    static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| {
+        #[cfg(target_arch = "wasm32")]
+        return web::query_args();
+        #[cfg(not(target_arch = "wasm32"))]
+        std::env::args().collect()
+    })
+    .clone()
+    .into_iter()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> AppExit {
+    run_game()
+}
+
+/// Web build: nothing runs until the page has loaded the game data and
+/// calls `web::start` (`web/index.html`).
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+fn run_game() -> AppExit {
     let loaded = GameData::locate().and_then(|root| GameData::load(&root));
     let data = match loaded {
         Ok(d) => d,
@@ -71,7 +99,13 @@ fn main() -> AppExit {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             // Saved resolution and window mode (`--resolution`, `--window-mode`).
-            primary_window: Some(frontend::display::startup_window("Payback")),
+            primary_window: Some({
+                #[allow(unused_mut)]
+                let mut w = frontend::display::startup_window("Payback");
+                #[cfg(target_arch = "wasm32")]
+                web::adapt_window(&mut w);
+                w
+            }),
             ..default()
         }))
         .insert_resource(data)
@@ -97,7 +131,7 @@ fn main() -> AppExit {
             hud::HudPlugin,
             frontend::FrontendPlugin,
             mission::MissionPlugin,
-            (intro::IntroPlugin, startup::StartupPlugin),
+            (intro::IntroPlugin, startup::StartupPlugin, frame::FramePlugin),
             (parked::ParkedPlugin, window_icon::WindowIconPlugin, render_mode::RenderModePlugin),
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
             (autoplay::AutoplayPlugin, perf::PerfPlugin, arrow::ArrowPlugin, cheats::CheatsPlugin),

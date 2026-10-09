@@ -198,6 +198,28 @@ impl<'w> Script<'w> {
         if let Some(order) = order {
             crate::sim::ai::give_order(self.world, actor, order);
         }
+        // 0x17, 0x44 and 0x43 (not 0x32) also write `+0x824 = -1` (owner
+        // side, `Obj::side`) on every matched actor (Mac `SetTrigger_Long`
+        // @ 10106e50, cases 10107bf0, 10107ce0, 10107ff8; 0x32 is case
+        // 10107dd0, which does not). Done here, not in `give_order`, which
+        // can't tell 0x17 from 0x32. On a vehicle it also means an AI
+        // driver: taking it is a hijack even once it is parked
+        // (`GetInOutVehicles` @ 10066140 tests `+0x824 != 0`; the port's
+        // [`AiDriver`](crate::sim::boarding::AiDriver)).
+        let npc = match t.kind {
+            kind::ACTOR_GOTO => ty != kind::ACTOR_GOTO_DIRECT,
+            kind::ACTOR_GOTO_15 | kind::ACTOR_FLEES => true,
+            _ => false,
+        };
+        let player = self.world.get::<Obj>(actor).is_none_or(|o| o.state == State::Player);
+        if npc && !player {
+            if let Some(mut o) = self.world.get_mut::<Obj>(actor) {
+                o.side = -1;
+            }
+            if self.world.get::<crate::vehicles::Vehicle>(actor).is_some() {
+                self.world.entity_mut(actor).insert(crate::sim::boarding::AiDriver);
+            }
+        }
     }
 
     /// `AddMissionTrigger`: tracked so the mission can be cancelled at once.
@@ -606,6 +628,10 @@ impl<'w> Script<'w> {
         if let Some(mut o) = self.world.get_mut::<Obj>(e) {
             o.script_id = id;
             o.level = floor.clamp(0, 2) as usize;
+            // Owner side 0 (`AddObject` @ 10105780 / `AddObjectSpecial`
+            // @ 10105b00: `+0x824 = 0`): no crime, ram or blast score on
+            // it until a goto / route-flee order (`ai::give_order`).
+            o.side = 0;
         }
         // Counted in the ambient spawner's budget (`+0x934`, Mac
         // `AddObject` @ 10105780 -> `IncExtraObjs`).

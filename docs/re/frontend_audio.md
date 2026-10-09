@@ -284,9 +284,14 @@ The money display *is* the score (player +0x384).
     that `LoadConfig` @ 10052be0 copies from +0x2a4 at 0; Amiga: `DAT_0114c7dc` is BSS, set
     only from config field 18 and the menu). `--rotating-view [0|1]` / `--no-rotating-view`
     force it for a run. (C)
-* Replay playback (`DAT_0114c6ce`, I) replaces it with `FUN_010176e0`: clock "H:MM:SS.cc"
-  at (xmax−78, 43) and a progress bar on rows 37–41 (black frame, 0xB4 red, 0x78 green
-  elapsed). (C)
+* Replay playback (`DAT_0114c6ce`, I) replaces it with `FUN_010176e0` (Mac
+  `DisplayPlayback__Fiii` @ 100909c0, args: level clock, replay position,
+  `GetTotalFramesMovie`): clock "H:MM:SS.cc" (`"%d:"` hours = clock / 108000, then
+  `%02d:` minutes, `%02d.` seconds, `%02d` hundredths of the 30 Hz clock) in font 1 at
+  (xmax−78, 43) and a progress bar on rows 37–41 (black frame xmax−78..xmax−8, 0xB4 red
+  inside, 0x78 green up to xmax−77 + 68·pos/total, a black line after it); hi-res
+  doubles everything (text at (xmax−156, 86), bar 136 px on rows 74–82). (C) Port:
+  `hud::draw_playback`.
 
 ### 2.5 Checkpoint marker `FUN_0101cf80`
 
@@ -683,7 +688,7 @@ a wanted-level sound.
   Engine/Siren · pug 935/CarHorn/–/11 · pug GTI 935/6 · pug racer 935/5 · diblo 904/5 ·
   vapour 904/4 · vapour racer 904/5 · hotrod 904/2 · police(_red/_blue) 911Turbo/Siren ·
   scooby 911Turbo/10 · evo 911Turbo/9 · bus Bus/CarHorn/Bleep/– · van Bus/15 · limo Bus/2 ·
-  pickup Bus/14 · truck Bus/Bleep/12 (I) · bombtruck Bus/Bleep/16 · icecreamvan
+  pickup Bus/14 · truck Bus/Bleep/12 (C, Mac `InitStructures` @ 1005ffb0) · bombtruck Bus/Bleep/16 · icecreamvan
   Bus/IceCream · tank TankEngine (horn key fires BigGunFire 15M @ 9000) · helicopter
   HelicopterBlades · remotecontrolledcar RCEngine/16 · boat BoatEngine/8 · rocketcar
   Flamethrower/12.
@@ -695,8 +700,11 @@ a wanted-level sound.
   Thud2 @ 8000 (+ Screams 255 @ 15000+rand(2000) if the player is in the bus).
 * **Footsteps**: id = the cube texture's first `.CubeTextureList` column (4 stone,
   34 grass, 35 metal, 36 sand, 50 snow, 51 slush, 52 ice, 65 water; default 4) — i.e. that
-  column *is* a sound id; square flags&0x7F == 4 → water @ 15000. One-shot 3,000,000 @
-  19000, z+200.
+  column *is* a sound id; cube `+9 & 0x7F == 4`, i.e. a Reflect top face (Mac `LoadMap`
+  @ 100b3a60 stores the top face type there, flip bit 0x80) → water @ 15000. Otherwise the
+  top texture's sound for any cube with a record, whatever its face type or slope; a 2-byte
+  (off) cube has no texture and gives 4 (Mac `do_Person` @ 1013fbd0, `GetSampleNum`
+  @ 100ad3c0; CONFIRMED). One-shot 3,000,000 @ 19000, z+200.
 * **Weapons/combat**: Pistol 53 4M @ 14000; ShotgunFire 21 4M @ 14000; Minigun 19 4M @
   16000; FireMissile 17 5M @ 17000; Flamethrower 41 loop @ 12500; Punch_Hit 59 4M @
   22050; out of ammo Click 42 3M @ 16000; GrenadeBounce 18 4M @ 5000/8000; Ricochet 29
@@ -730,8 +738,18 @@ on the Game Complete screen.
 
 ThumpingMusic is unused; all music is Red Book CD audio. CD release: external
 `General/CD_Audio_Handler`, launched `run >nil: CD_Audio_Handler <dev> <unit>`, message
-ports `pbmain2`/`pbcdaudio` (CD_Init/CD_Play/CD_SetVolume/CD_Stop; message format not
-decoded). Update 7/OS4: in-process "Payback CDDA Thread" (`FUN_010089dc`, entry
+ports `pbmain2`/`pbcdaudio`. Message format (CONFIRMED, CD `Payback.exe` 0x7a860–0x7acbe
+and the 35304-byte handler, disassembled): 0x3e bytes, `+0x12` length 0x3e, `+0x14` u16
+command, `+0x16` ten longs of arguments (the script-message layout); the handler frees each
+message, nobody waits. It replies 0x3ee with arg 1/0 (drive opened or not) at start.
+Commands: 0x3e8 quit (`CD_Quit` 0x7ab0a), 0x3e9 n play n (`CD_Play` 0x7ab6c; SCSI 0x48,
+0xA5, 0x45), 0x3ea stop (`CD_Stop` 0x7abca), 0x3eb n ensure (`CD_Ensure` 0x7ac18, ≤ 1/s per
+track: idle → n = 0 random first track `first + rand·(last−first) >> 15`, n > 0 play n;
+playing → n < 0 stop, past the TOC length n = 0 next track with wrap, n > 0 restart n),
+0x3ec volume (`CD_SetVolume` 0x7ac8c, never sent; the handler has no case). The same set
+as the OS4 thread below, and the same track numbers (menus 13, radio = the vehicle's track,
+continuous mode `CD_Ensure(0)`). What is on each track needs a rip of the mixed-mode CD:
+`Payback.iso` and `PaybackMac.toast` are data tracks only. Update 7/OS4: in-process "Payback CDDA Thread" (`FUN_010089dc`, entry
 `0x010087a0`), commands in `DAT_0114c2b4` + Signal(0x1000): 0x2000 init/quit, 0x3000 stop
 (`FUN_01008c84`), 0x4000+n play n (`FUN_01008bb0`), 0x5000+n ensure n playing
 (`FUN_01008cec`, ≤ 1/s; restarts the track past its TOC length; n = 0 → random first
@@ -961,10 +979,9 @@ at the HUD canvas scale (`hud/loading.rs`): native size with the hi-res HUD.
 
 ## 7. Open questions
 
-* Original-CD `CD_Audio_Handler` message format and the CD audio track list
-  (`extracted/iso` holds no audio tracks).
-* §4.4: the water test "square flags & 0x7F == 4" is probably the top face type (cube +9 = 4
-  Reflect), as in the traffic spawner (`FUN_000cf5cc`); not verified.
+* The CD audio track contents (`extracted/iso` holds no audio tracks); the
+  `CD_Audio_Handler` protocol is decoded (§4.6).
+* ~~§4.4 water test~~ Resolved: cube `+9` is the top face type (Mac `LoadMap` @ 100b3a60).
 
 Resolved (C):
 * ~~Scripts playing Heartbeat / ThumpingMusic / CarStart~~ None do (§4.4).

@@ -39,7 +39,7 @@ pub struct StartupLoad {
     pub progress: Progress,
     intro: IntroStep,
     delay: std::time::Duration,
-    wait_until: Option<std::time::Instant>,
+    wait_until: Option<bevy::platform::time::Instant>,
 }
 
 enum IntroStep {
@@ -80,8 +80,8 @@ fn direct_start() -> bool {
 fn intro_wanted() -> bool {
     let skip = ["--map", "--screenshot", "--no-intro"]
         .iter()
-        .any(|a| std::env::args().any(|x| x == *a));
-    !skip || std::env::args().any(|x| x == "--intro")
+        .any(|a| crate::args().any(|x| x == *a));
+    !skip || crate::args().any(|x| x == "--intro")
 }
 
 fn begin(world: &mut World) {
@@ -136,7 +136,7 @@ fn advance(world: &mut World) {
         return;
     };
     load.frames += 1;
-    let now = std::time::Instant::now();
+    let now = bevy::platform::time::Instant::now();
     if load.frames < 3 || load.wait_until.is_some_and(|t| now < t) {
         world.insert_resource(load);
         return;

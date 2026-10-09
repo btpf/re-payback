@@ -662,18 +662,35 @@ shows only its low byte), which is not a real difference. Real differences:
    carries the `SetProjectileId` id (CONFIRMED, `0xa6c62` in `0xe3a58`, `0xefece`).
 2. ~~M5 counting~~ Resolved: no over-count. Boarding (`0xa6ae2`) sets the ped to state 6, removed
    by `0xdc5ac` → `0xcf290`, which never calls `0xa653a`; type 9 is not fired. CONFIRMED.
-3. M3: the `SetCube` edits remove the cubes (CONFIRMED); the map has slope-4 cubes with
-   genlocked faces there, so a fence gap / back entrance is likely, but an in-game look is
-   still needed.
-4. M1: the visual meaning of the `SetFaceTop(...,0x1dd)` ring around the demolished block
-   (texture 0x1dd is also the ground texture of (107,81) and (56,114)).
+3. ~~M3 fence~~ Resolved: (55..57,115) cube 1 are the yard's front fence (genlocked south
+   face `Fence2`, texture 125); (56,114) cube 1 is already a 2-byte (empty) cube under the
+   wall's cube 2, i.e. the house's doorway (seen in the port: a dark door in the middle of
+   the front wall behind a chain-link fence). M3 removes the fence piece in front of the
+   door, opening a way in (CONFIRMED, data and a port screenshot).
+4. ~~M1 ring~~ Resolved from the data: 0x1dd is `Snow.chunky`, plain snow. The ring squares
+   are the block's painted shadow (map 1 cube 0 tops: (78..82,114) `Snow.Dark`, (83,114),
+   (83,112..113) `SnowShad3`, (83,111) `SnowShad1`, (83,110) already `Snow`), so the edit
+   removes the shadow of the demolished block (CONFIRMED, data).
 5. ~~Speaker ids~~ Resolved: `Dialog_Begin(icon)` only selects the HUD icon (0 Phone, 1 Lips,
    2 Mobile, 3 Pager, 4 Info); the voice is always SqueakyVoice. CONFIRMED (`0xb40ec` → `0x21e00`).
-6. RC bonus: whether the "Kill frenzy" HUD clock conflicts with a mission's own type-5 timer
-   (M2 75 s, M6 90 s) when both run. `Trigger_GetTimerSeconds` uses the first type-5 trigger.
+6. ~~RC bonus clock~~ Resolved from the code: the HUD shows the first type-5 trigger in table
+   order (Mac `GetTimerVal` @ 100f6b10 scans from index 0; 68k `0xa6978` the same). Triggers
+   are appended (`ProcessToDoList` @ 100f4880) and a removed one is replaced by the last
+   (`RemoveTrigger` @ 100f4560). So when the bonus starts during M2 (75 s) or M6 (90 s), its
+   60 s clock (ev 100022, the last of the three triggers added) is behind the mission's timer
+   and the mission clock shows. The first removal of any trigger at a lower index afterwards
+   (a zone rectangle 100000-100012 firing as the player crosses its edge, a mission trigger
+   firing or being killed) moves the bonus clock into that slot, in front of the mission
+   timer, and from then on the bonus clock shows until it goes. Only one clock is ever
+   drawn. CONFIRMED (code); the port does the same (`mission/eval.rs`,
+   `mission/triggers.rs`, MS-2).
 7. The helper `default:` branches (M2/M3/M9) rebuild the mission on any unknown event.
    Harmless in practice, but a reimplementation should handle setup only for ev = −1.
 8. Ped models 6/8/9/11: 6 PedMale1 (white + blue), 8 PedMale2 (red + white), 9 PedMale3 (all
    blue), 11 PedMale5_shotgun (dark blue + white, holds a shotgun). All are recolours of the
    male body; there is no female model, so the "wife" is a male recolour (CONFIRMED, load order
-   `0xd7874`). Which body part each colour is on is not checked.
+   `0xd7874`). Body parts (limb groups of people.md §2.2, from the `.Obj` files): PedMale1
+   white shoulders/arms, blue hips/legs; PedMale2 red top, white trousers; PedMale3 dark blue
+   top, blue trousers; PedMale5_shotgun dark blue top, white trousers, a static shotgun
+   (limb 0, `Assorted1`/`Tree` faces). Head and hands are the shared `AmigaFront`/`Face`
+   skin (CONFIRMED, data).

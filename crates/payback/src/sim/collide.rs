@@ -177,6 +177,12 @@ fn crossing(
     if c.slope == Slope::Off {
         return false;
     }
+    // A cube smashed earlier this tick is gone at once (`GetCollideInfo`
+    // @ 100af0e0 clears `cube + 8` on the hit): none of its faces block
+    // any more, for this test or a later one.
+    if glass.as_ref().is_some_and(|list| list.contains(&Glass { sx, sy, level })) {
+        return false;
+    }
     match face_bits(c.faces[face].kind) {
         0 | 5 => false,
         3 => match glass {
@@ -625,6 +631,18 @@ pub fn line_of_sight(city: &City, a: IVec3, b: IVec3) -> bool {
         &mut None,
     );
     s == IVec2::ZERO
+}
+
+/// Take smashed glass cubes out of the map at once (`cube + 8 = 0`, the
+/// slope byte, as `GetCollideInfo` @ 100af0e0 does on the hit), so the
+/// ground, people and later objects of the same tick no longer meet them.
+/// [`smash_glass`] still sends the map edit (render), the sound and the
+/// trigger.
+pub fn remove_glass_now(city: &mut City, glass: &[Glass]) {
+    for g in glass {
+        city.map.squares[g.sx * MAP_SIZE + g.sy].cubes[g.level].slope = Slope::Off;
+        city.refresh_square(g.sx, g.sy);
+    }
 }
 
 /// Remove smashed glass cubes: the cube goes (`cube + 8 = 0`), sound 0x31

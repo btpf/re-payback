@@ -173,7 +173,7 @@ impl Plugin for MissionPlugin {
 /// the Random missions in Rampage.
 fn start_level(world: &mut World) {
     let spec = world.resource::<crate::level::LevelSpec>().clone();
-    if std::env::args().any(|a| a == "--no-script") {
+    if crate::args().any(|a| a == "--no-script") {
         return;
     }
     // Multiplayer runs the city with no level script (and no level phrases
@@ -182,7 +182,13 @@ fn start_level(world: &mut World) {
     match *world.resource::<crate::level::GameMode>() {
         crate::level::GameMode::Story => {}
         crate::level::GameMode::Rampage { police } => {
-            if world.get_resource::<RandomMissions>().is_none_or(|r| r.0) {
+            // Only with the Mac phrases (1400-1470, 1800-1842): with
+            // Amiga-only data the briefs would be empty, so the mode is off
+            // whatever the setting says.
+            let mac_phrases = world
+                .get_resource::<crate::hud::Texts>()
+                .is_some_and(|t| !t.global(levels::random::ANSWER_THE_PHONE).is_empty());
+            if mac_phrases && world.get_resource::<RandomMissions>().is_none_or(|r| r.0) {
                 start_random(world, &spec, police);
             }
             return;

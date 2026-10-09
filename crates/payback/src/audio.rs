@@ -291,6 +291,7 @@ impl Plugin for AudioPlugin {
             .add_systems(Startup, start_mixer)
             .add_systems(FixedPostUpdate, slot_clock)
             .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain())
+            .add_systems(Update, fire_sounds.run_if(in_state(AppState::Playing)))
             .add_systems(OnExit(AppState::Playing), stop_game_sounds)
             // A level or replay never starts with a stale voice.
             .add_systems(OnEnter(AppState::Playing), stop_game_sounds.before(crate::level::load_level));
@@ -437,7 +438,7 @@ impl Iterator for MixerDecoder {
             self.buf.clear();
             self.buf.resize(BLOCK * 2, 0.0);
             self.at = 0;
-            let asked = std::time::Instant::now();
+            let asked = bevy::platform::time::Instant::now();
             let lock = self.mixer.0.lock();
             crate::perf::audio_block(BLOCK, MIX_RATE, asked.elapsed());
             if let Ok(mut voices) = lock {
@@ -717,6 +718,74 @@ fn end_sounds(mut commands: Commands, mixer: Res<Mixer>, alive: Query<(), With<S
 /// level entities), and voices held by the pause menu would resume when the
 /// virtual clock is unpaused on leaving, so they are despawned and their
 /// voices dropped here, not left to `end_sounds`.
+/// Looping sounds of the fires, by burning object and by fire record.
+#[derive(Default)]
+struct FireSounds {
+    objects: HashMap<Entity, Entity>,
+    fires: HashMap<IVec3, Entity>,
+}
+
+/// The looping 13 Flames of fires (audio only; nothing here feeds back
+/// into the simulation):
+///
+/// * a burning object (burn timer ≥ 2; Mac per-object update ~l.25342,
+///   OS4 `FUN_010542b8`) starts it at 500 000 @ 19000 Hz and modifies it
+///   the same tick to `radius·5000` @ 19000 Hz (`radius·10000` @ 20000 Hz
+///   while the timer is ≥ 16; radius = model `+0x8120`), at the object;
+///   deleted when the burn ends;
+/// * a type 15 fire record (`AddEffect`, Mac ~l.57091) loops it at
+///   1 500 000 @ 19000 Hz at the record until the record expires.
+fn fire_sounds(
+    mut commands: Commands,
+    mut state: Local<FireSounds>,
+    effects: Option<Res<crate::effects::Effects>>,
+    library: Option<Res<crate::objects::ObjectLibrary>>,
+    objects: Query<(Entity, &crate::sim::Obj)>,
+    mut sounds: Query<&mut Sound>,
+) {
+    let state = &mut *state;
+    let mut keep = |map_sound: Option<Entity>, want: Sound, sounds: &mut Query<&mut Sound>| -> Entity {
+        if let Some(s) = map_sound
+            && let Ok(mut cur) = sounds.get_mut(s)
+        {
+            if (cur.volume, cur.hz, cur.pos) != (want.volume, want.hz, want.pos) {
+                cur.volume = want.volume;
+                cur.hz = want.hz;
+                cur.pos = want.pos;
+            }
+            return s;
+        }
+        commands.spawn(want).id()
+    };
+    let mut objs = HashMap::default();
+    for (e, o) in &objects {
+        if o.burn < 2 || o.state == crate::sim::State::Removed {
+            continue;
+        }
+        let r = library.as_ref().map_or(192, |l| l.model(o.model).shape.radius);
+        let (vol, hz) = if o.burn < 16 { (r * 5000, 19000.0) } else { (r * 10000, 20000.0) };
+        let want = Sound::looping(id::FLAMES, vol as f32, hz, SoundPos::At(o.posf()));
+        objs.insert(e, keep(state.objects.get(&e).copied(), want, &mut sounds));
+    }
+    let mut fires = HashMap::default();
+    for (_, pos, _) in effects.iter().flat_map(|fx| fx.light_sources()).filter(|f| f.0 == 0xf) {
+        let key = pos.as_ivec3();
+        if fires.contains_key(&key) {
+            continue;
+        }
+        let want = Sound::looping(id::FLAMES, 1_500_000.0, 19000.0, SoundPos::At(pos));
+        fires.insert(key, keep(state.fires.get(&key).copied(), want, &mut sounds));
+    }
+    for s in state.objects.values().filter(|s| !objs.values().any(|n| n == *s)) {
+        commands.entity(*s).try_despawn();
+    }
+    for s in state.fires.values().filter(|s| !fires.values().any(|n| n == *s)) {
+        commands.entity(*s).try_despawn();
+    }
+    state.objects = objs;
+    state.fires = fires;
+}
+
 pub fn stop_game_sounds(mut commands: Commands, mixer: Res<Mixer>, sounds: Query<(Entity, &Sound)>) {
     for (e, s) in &sounds {
         if !s.menu {

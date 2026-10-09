@@ -4158,9 +4158,12 @@ dependencies = [
  "bevy",
  "embed-resource",
  "ico",
+ "js-sys",
  "payback-formats",
  "payback-mpeg",
  "rodio",
+ "wasm-bindgen",
+ "web-sys",
  "winit",
 ]
 

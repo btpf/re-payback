@@ -45,7 +45,9 @@ loader picks the wrong language by default (`PowerPC:BE:64:VLE`), so force
 docker run -d --rm -v "D:/Payback Reverse Engineered:/work/impl" payback-re sh -c   "mkdir -p /tmp/proj && analyzeHeadless /tmp/proj p_macx    -import '/work/impl/extracted/mac/Payback/Payback (OS X)'    -processor PowerPC:BE:32:default -scriptPath /work/impl/tools/ghidra    -postScript MacJumpTables.java tsv=/work/impl/analysis/ghidra_macx/jumptables.tsv    -postScript ExportAll.java /work/impl/analysis/ghidra_macx    > /work/impl/analysis/ghidra_macx.log 2>&1"
 ```
 
-For the OS 9 build, use `Payback (OS 9)`, `p_mac9` and `ghidra_mac9`. Each
+For the OS 9 build, use `Payback (OS 9)`, `p_mac9` and `ghidra_mac9`; for the map
+editor, `MapEditor (OS X)`, `p_mapedx` and `ghidra_mapedx` (names kept too: routing,
+`.textures`, thumbnail and minimap writers, `LoadMap`/`SaveMap`; about a minute). Each
 build takes about 5 minutes to analyse and 5 minutes to export. To iterate on a
 script without analysing again, import once into a Docker volume
 (`-v payback_ghidra_proj:/proj`, `analyzeHeadless /proj p_macx -import ...`), then

@@ -183,6 +183,8 @@ struct MeshBuilder {
 impl MeshBuilder {
     /// Quad with corners in winding order and per-corner texture coordinates
     /// in texels of the 64x64 tile (u = column, v = row, edges at 0 and 64).
+    /// `ccw`: the corners run counter-clockwise seen from the face's front
+    /// (outside), the side that is drawn.
     fn quad(
         &mut self,
         corners: [Vec3; 4],
@@ -190,6 +192,7 @@ impl MeshBuilder {
         texture: u16,
         scrolls: bool,
         light: [[f32; 3]; 4],
+        ccw: bool,
     ) {
         let tile = atlas_tile(texture);
         let tile = Vec2::new((tile % ATLAS_TILES * TILE) as f32, (tile / ATLAS_TILES * TILE) as f32);
@@ -212,12 +215,16 @@ impl MeshBuilder {
             let flag = if scrolls { SCROLL_FLAG } else { 0.0 };
             self.uvs_b.push([tile.x + flag, tile.y]);
         }
-        // Draw both sides so winding differences between face kinds can't
-        // drop geometry (the original culls back faces).
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        self.indices
-            .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        // One side: back faces are culled, as in the original (walls:
+        // the screen-space cross-product test of the hardware and rotating
+        // paths, `drawCubeSide_North` @ 100d9a50 etc., and the explicit
+        // camera-side test of the top-down path, OS4 `FUN_0107b910`; tops
+        // only ever face up). Two triangles split along corner 1 - corner
+        // 3, the original's diagonal for tops and walls (`drawCubeTop_None`
+        // @ 100c8160 and the side functions): the rotating view's
+        // per-triangle Gouraud follows it (`shaders/city.wgsl`).
+        let tris = if ccw { [0, 1, 3, 1, 2, 3] } else { [0, 3, 1, 1, 3, 2] };
+        self.indices.extend(tris.map(|k| base + k));
     }
 
     fn build(self) -> Mesh {
@@ -334,6 +341,8 @@ pub fn build_chunk_meshes(
                             tex(top.texture),
                             scrolls,
                             pick([NW, NE, SE, SW]),
+                            // NW, NE, SE, SW is clockwise seen from above.
+                            false,
                         );
                     }
 
@@ -394,7 +403,10 @@ pub fn build_chunk_meshes(
                                 ],
                                 &face,
                             );
-                            builders[pass as usize].quad(quad, uv, tex(face.texture), false, pick(k));
+                            // Top-left, top-right, bottom-right, bottom-left
+                            // seen from outside for N and E; mirrored for S, W.
+                            let ccw = fi == map::NORTH || fi == map::EAST;
+                            builders[pass as usize].quad(quad, uv, tex(face.texture), false, pick(k), ccw);
                         }
                     }
                 }

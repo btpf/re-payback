@@ -152,7 +152,7 @@ impl Plugin for ReplayPlugin {
 
 /// Read a replay file.
 pub fn load_file(path: &std::path::Path) -> Result<Replay, String> {
-    let b = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let b = crate::vfs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Replay::parse(&b).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -217,9 +217,11 @@ pub fn saves_dir() -> PathBuf {
 /// A fresh seed for a new game: from `--seed`, else the clock.
 fn new_seed() -> u16 {
     crate::arg("--seed").and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos() as u16 ^ d.as_secs() as u16)
+        #[cfg(target_arch = "wasm32")]
+        let now = std::time::Duration::from_secs_f64(js_sys::Date::now() / 1000.0);
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        now.subsec_nanos() as u16 ^ now.as_secs() as u16
     })
 }
 
@@ -424,7 +426,7 @@ fn stop_on_escape(keys: Res<ButtonInput<KeyCode>>, mut st: ResMut<ReplayState>) 
 /// (walk, turn, shoot, try a vehicle, switch weapon), for the determinism
 /// check.
 fn scripted_input(st: Res<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
-    if st.mode != Mode::Record || !std::env::args().any(|a| a == "--script-input") {
+    if st.mode != Mode::Record || !crate::args().any(|a| a == "--script-input") {
         return;
     }
     let players = st.replay.as_ref().map_or(1, |r| r.header.players.clamp(1, 4) as u32);
@@ -530,7 +532,7 @@ fn debug_hash(
             // `--again`: leave the level and play the recording back in
             // this session (checks nothing leaks from one level to the
             // next).
-            if st.mode == Mode::Record && std::env::args().any(|a| a == "--again") {
+            if st.mode == Mode::Record && crate::args().any(|a| a == "--again") {
                 info!("replay: playing back in the same session");
                 commands.insert_resource(PlayRequest(Some(r)));
                 commands.insert_resource(Again);

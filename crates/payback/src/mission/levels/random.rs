@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use payback_formats::map::{FaceType, MAP_SIZE, Slope};
 
 /// "ANSWER THE PHONE" and the welcome line (`%s` = map name).
-const ANSWER_THE_PHONE: u32 = 1400;
+pub const ANSWER_THE_PHONE: u32 = 1400;
 const WELCOME: u32 = 1401;
 /// Success lines 1404-1406 (`%d` = thousands), failure lines 1407-1409.
 const PAID: u32 = 1404;
@@ -176,17 +176,17 @@ fn safe_pos(s: &mut Script) -> IVec2 {
             let node = s
                 .world
                 .get_resource::<RouteGraph>()
-                .and_then(|r| r.nearest(at).map(|n| r.pos(n)));
-            let Some(node) = node else {
+                .and_then(|r| r.nearest(at).map(|n| (r.pos(n), r.0.nodes[n].cube)));
+            let Some((node, cube)) = node else {
                 return IVec2::new(x, y);
             };
-            // INFERRED: the node's own cube (`GetNodeCubeNum`) isn't kept
-            // by our route loader; the ground cube's height is used.
+            // The node end at the height of the node's own cube
+            // (`GetNodeCubeNum` @ 100f1450; map 1 has nodes on cube 1).
             let (nx, ny) = (
                 ((node.x >> 11) as usize).min(MAP_SIZE - 1),
                 ((node.y >> 11) as usize).min(MAP_SIZE - 1),
             );
-            let node_z = open_ground_z(s.world, nx, ny);
+            let node_z = cube_z(s.world, nx, ny, cube as usize);
             let seen = s.world.get_resource::<City>().is_some_and(|city| {
                 crate::sim::collide::line_of_sight(city, node.extend(node_z), at)
             });
@@ -214,8 +214,14 @@ fn open_ground(world: &World, x: usize, y: usize) -> Option<i32> {
 }
 
 fn open_ground_z(world: &World, x: usize, y: usize) -> i32 {
+    cube_z(world, x, y, 0)
+}
+
+/// The top of cube `cube` (0..2) at the centre of square (x, y)
+/// (`GetCubeHeight` @ 100ae7d0).
+fn cube_z(world: &World, x: usize, y: usize, cube: usize) -> i32 {
     world.get_resource::<City>().map_or(0x4dc0, |c| {
-        z_of_h(c.square_cubes(x, y)[0].top_at(0.5, 0.5)) as i32
+        z_of_h(c.square_cubes(x, y)[cube.min(2)].top_at(0.5, 0.5)) as i32
     })
 }
 

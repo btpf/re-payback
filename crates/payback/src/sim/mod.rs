@@ -15,7 +15,9 @@ mod det_check;
 pub mod driving;
 pub mod people;
 pub mod police;
+pub mod props;
 pub mod pursuit;
+pub mod rc_car;
 pub mod score;
 pub mod traffic;
 pub mod vehicle_ai;
@@ -80,8 +82,9 @@ pub fn heading_of(dx: i32, dy: i32) -> i32 {
 /// The game's random number generator: `General/RandomNumbers` holds 65536
 /// big-endian i16 values 0..511; `rand(n) = T[++i & 0xffff] * n >> 9`
 /// (OS4 `FUN_0103ac94`). Regenerated pseudo-randomly if the file is missing,
-/// as the original does.
-#[derive(Resource)]
+/// as the original does. `Clone` for debug drivers that need their own
+/// stream (`autoplay`); the game itself has exactly one.
+#[derive(Resource, Clone)]
 pub struct Rng {
     table: Vec<i32>,
     idx: usize,
@@ -273,7 +276,8 @@ pub struct Stick {
     bevy::camera::primitives::Aabb,
     bevy::pbr::PreviousGlobalTransform,
     crate::objects::OverlayChildren,
-    crate::objects::DoorPanel
+    crate::objects::DoorPanel,
+    vehicle_ai::TargetNode
 )]
 pub struct Obj {
     /// Index in the object table ([`ObjTable`]), the order the simulation
@@ -310,6 +314,14 @@ pub struct Obj {
     pub script_id: i32,
     /// Who created/fired this object (projectiles, thrown drivers).
     pub owner: Option<Entity>,
+    /// Owner side (Mac `+0x824`, 68k `+0x342`): −1 for every new object
+    /// (`NewObj`), 0 for players, the vehicles they get into, script
+    /// actors (`AddObject` @ 10105780) and 1 for most player-side shots
+    /// (`do_Person` @ 1013fbd0). The script goto / route-flee orders set −1
+    /// again. Crime, ram, punch and blast score only count from an object
+    /// with `side >= 0` on one with `side == -1` (`CheckForCollisions` @
+    /// 1006a150, `Shockwave` @ 10054ac0, `CheckHitObject` @ 100542d0).
+    pub side: i32,
     /// God mode (port addition, `crate::cheats`): the player's object
     /// takes no damage. Set at the start of every tick for the objects
     /// with a `player`, while the cheat is on.
@@ -344,6 +356,7 @@ impl Obj {
             filter: -1,
             script_id: -1,
             owner: None,
+            side: -1,
             god: false,
         }
     }
@@ -404,6 +417,31 @@ pub fn table_order<'a>(objs: impl IntoIterator<Item = (Entity, &'a Obj)>) -> Vec
     v.into_iter().map(|p| p.1).collect()
 }
 
+/// The simulation tick. The original (`amiga_levelloop` @ 10100f50) reads
+/// the input, spawns (`AddVehicles`, `DoCollideStuff`), runs the weather,
+/// the contacts (`CheckForCollisions` @ 1006a150), then every object in
+/// table order (`MainLoop` @ 1014a920 → `object_MainLoop` @ 1014a670: move,
+/// then its AI/controls/firing in `do_Person` / `do_Other` / `do_Weapon`,
+/// then its occupancy and scenery push), then the triggers. The port keeps
+/// that order per phase (AI-1):
+///
+/// 1. `ReplayInput` (input, cheats, the replay hash), the autoplay bot;
+/// 2. `traffic::SpawnSet` (light phase, ambient spawner), the weather;
+/// 3. `contact::ContactSet` (contacts, vehicle damage);
+/// 4. people: move (`people::PeopleThink` starts with `move_people`), AI
+///    and controls, boarding, steer (`people::PeopleSet`);
+/// 5. vehicles: move (`driving::DrivingMoveSet`), traffic and script AI
+///    and pursuit (`TrafficSet`, `VehicleAiSet`), controls and scenery
+///    (`driving::DrivingSet`);
+/// 6. combat (firing, projectiles, explosions, deaths, pickups), score,
+///    crimes, then the triggers (`mission::eval::run_triggers`).
+///
+/// What remains different: the original interleaves step 4/5/6 per object
+/// in table order (an object sees the ones before it updated and the ones
+/// after it not yet; the occupancy grid is rebuilt per object), where the
+/// port runs each step over every object; people and vehicles are
+/// separate passes; firing and projectile moves are a pass after all
+/// movement rather than inside each object's update.
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {

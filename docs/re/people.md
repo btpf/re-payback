@@ -322,7 +322,11 @@ footstep check (when the frame being left is 0 or 6, i.e. a foot plants; also wa
     cube = square(x,y)[level]
     if top face type == 4 (water): sound 0x41 (splash, range 15000; other steps 19000)
     else sound = surface sound of top texture (FUN_00091dde); if sound is 0x32/0x33 (snow):
-         footprint effect type 8 at (x ± cos h/2, y ∓ sin h/2) (left/right by frame)
+         footprint effect type 8 at (x ± cos h/2, y ∓ sin h/2) (frame 6: +cos, −sin; else the other
+         foot), texture Dust2 (Mac `*DAT_1017c4ac`), size 0x82, the person's level, flag 0x10000; no
+         random draws [C: Mac l.116470-116485, 68k ~122789]
+    the texture sound is used for any cube, whatever its face type or slope (texture 0 = Pavement
+    gives 4, stone) [C: Mac l.116461]. Port: `sim/people.rs` `footstep`.
 ```
 
 At top speed 96 the blend gains 144 per tick, which is 0.5625 frames per tick. A full 12-frame cycle takes 21.3
@@ -420,8 +424,13 @@ The port follows the Mac.
 
 **Order (C).** Each frame the object is first moved with its current velocity (`MoveObject_General` @ 1006e4f0 /
 68k `FUN_000e0e46`, §4.3), then `do_Person` reads the AI and controls and computes the velocity for the next frame.
-The port's `move_people` does the same (move, collide, water, then turn/speed/velocity). Remaining difference (I):
-the port's AI (`ped_ai`) runs before the move, so it sees the position and wall hit of the previous move.
+The port does the same in phases (AI-1): `move_people` (move, collide, water) for every person, then the
+AI and controls (`PeopleThink`: player input, panic, `ped_ai`, script orders, cops), boarding, then
+`steer_people` (stun, turn, speed, velocity). So each person's AI sees its own position and wall hit of this
+tick's move, as in the original. Remaining difference (I): the original interleaves these per object in table
+order, so an object's AI sees the objects before it already moved and thought and those after it not yet; in
+the port every person has moved before any thinks, and every person is done before any vehicle moves
+(scheduling, `sim/mod.rs` doc).
 
 | Quantity | Per tick | Per second at 25 Hz (68k) | At 30 Hz (OS4) |
 |---|---|---|---|

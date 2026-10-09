@@ -147,6 +147,20 @@ impl Painter<'_> {
         }
     }
 
+    /// An RGB colour through the lighten table (as [`Blend::Lighten`]):
+    /// `s + (1 − max s)·d` over what lies below.
+    pub fn put_lighten_rgb(&mut self, x: i32, y: i32, rgb: [u8; 3]) {
+        let m = rgb[0].max(rgb[1]).max(rgb[2]);
+        if m == 0 || x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h() {
+            return;
+        }
+        let i = (y as usize * self.w + x as usize) * 4;
+        for k in 0..3 {
+            self.px[i + k] = (rgb[k] as u32 * 255 / m as u32) as u8;
+        }
+        self.px[i + 3] = m;
+    }
+
     /// Opaque RGB pixel (no palette, no transparency).
     pub fn put_rgb(&mut self, x: i32, y: i32, rgb: [u8; 3]) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h() {

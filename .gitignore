@@ -18,3 +18,6 @@
 /mac_differences.html
 /remaining_gaps.html
 /coverage.html
+
+# Web build output (tools/build_web.sh); data/ holds the packed original data.
+/web/dist/

@@ -17,22 +17,30 @@ use crate::hud::{BigTitle, Texts};
 use crate::mission::{Triggers, kind};
 use crate::objects::ObjectLibrary;
 use crate::sim::driving::Drive;
-use crate::vehicles::{Vehicle, kind as vk};
+use crate::vehicles::{Prop, Vehicle, kind as vk, prop};
 use bevy::prelude::*;
 
 pub struct ContactPlugin;
 
 impl Plugin for ContactPlugin {
     fn build(&self, app: &mut App) {
+        // Contacts run first in the tick, before any object moves or
+        // thinks (`amiga_levelloop` @ 10100f50 calls `CheckForCollisions`
+        // @ 1006a150 before `MainLoop` @ 1014a920; AI-1).
         app.add_systems(
             FixedUpdate,
             (contacts, vehicle_damage)
                 .chain()
-                .after(super::driving::DrivingSet)
-                .before(super::combat::CombatSet),
+                .in_set(ContactSet)
+                .after(crate::replay::ReplayInput)
+                .before(super::people::PeopleThink),
         );
     }
 }
+
+/// The contact pass, at the start of the tick.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContactSet;
 
 /// Collision circles (centre offsets along the heading) of an object.
 fn circles(trig: &Trig, o: &Obj, is_vehicle: bool, radius: i32, front: i32, rear: i32) -> Vec<IVec3> {
@@ -63,6 +71,19 @@ struct Body {
     filter: i32,
     /// The vehicle this person was thrown out of (Irony bonus).
     owner: Option<Entity>,
+    /// Owner side (`+0x824`, [`Obj::side`]): ram score and crime go from
+    /// a side >= 0 object to a side −1 one.
+    side: i32,
+    /// Which prop (barrier, cone, dummy, bullet), if one.
+    prop: Option<u8>,
+    /// Already has the touch flag.
+    touched: bool,
+}
+
+impl Body {
+    fn is_prop(&self, k: u8) -> bool {
+        self.prop == Some(k)
+    }
 }
 
 /// One touching pair of the current object `i` and an earlier `j`: the
@@ -101,7 +122,10 @@ struct Touch {
 /// only from a vehicle (never person-person) faster than 50 (100 for the
 /// player): it stops, says Ow above 10 damage and bleeds (a type-8 splat ±
 /// 100, size `16·min(dmg, 50) + 50 + r(50)` for j, `100 + r(150)` for i,
-/// and 3 type-9 droplets).
+/// and 3 type-9 droplets). A victim (not a prop) on the NPC side (owner
+/// side −1) hit by a player-side object (side >= 0) pays the player the
+/// ram score `mult · min(6000, v² >> 9)` and is reported (`Hurt`, the
+/// original's `CheckHitObject(victim, 0)`) even at zero damage.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn contacts(
     mut commands: Commands,
@@ -115,27 +139,43 @@ fn contacts(
     session: Res<PlayerSession>,
     mut labels: ResMut<crate::hud::labels::Labels>,
     mode: Res<crate::level::GameMode>,
+    mut crimes: Option<ResMut<super::police::Crimes>>,
     mut q: Query<
-        (Entity, &mut Obj, Option<&Vehicle>, Has<Person>, Has<CameraTarget>, Option<&mut Drive>),
+        (
+            Entity,
+            &mut Obj,
+            Option<&Vehicle>,
+            Has<Person>,
+            Has<CameraTarget>,
+            Option<&mut Drive>,
+            Option<&Prop>,
+            Has<super::boarding::Touched>,
+        ),
         Without<Projectile>,
     >,
 ) {
     let Some(library) = library else { return };
     let mut irony = Vec::new();
+    // Ram score: (paying player's object if the rammer is one, else the
+    // single player), amount.
+    let mut rams: Vec<(Option<Entity>, i32)> = Vec::new();
     // Pairs in object-table order (each object against the earlier ones).
     // The RC car (`+0x8160`) and state-6 objects take no part.
     let order = crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, &*o)));
     let bodies: Vec<Body> = q
         .iter_many(&order)
         .filter(|(_, o, v, ..)| o.state != State::Removed && v.is_none_or(|v| v.kind != vk::RC_CAR))
-        .map(|(e, o, vehicle, person, player, _)| {
+        .map(|(e, o, vehicle, person, player, drive, prop, touched)| {
             let info = &library.model(o.model).info;
+            // A police van on its red light-bar frame is `policevan_red`
+            // (mass 2000; `driving::light_bar`).
+            let red = drive.is_some_and(|d| d.red_frame);
             Body {
                 e,
                 radius: if person { 192 } else { info.radius },
                 front: info.max_y,
                 rear: info.min_y,
-                mass: info.mass.max(1),
+                mass: if red { crate::vehicles::POLICEVAN_RED.mass } else { info.mass.max(1) },
                 vehicle: vehicle.is_some(),
                 person,
                 bus: vehicle.is_some_and(|v| v.kind == vk::BUS),
@@ -143,6 +183,9 @@ fn contacts(
                 player_no: if player { Some(o.player.unwrap_or(0)) } else { None },
                 filter: o.filter,
                 owner: o.owner,
+                side: o.side,
+                prop: prop.map(|p| p.0),
+                touched,
             }
         })
         .collect();
@@ -155,7 +198,7 @@ fn contacts(
         let mut touches: Vec<Touch> = Vec::new();
         for j in 0..i {
             let b = &bodies[j];
-            let Ok([(_, mut oa, _, _, _, mut da), (_, mut ob, _, _, _, mut db)]) = q.get_many_mut([a.e, b.e])
+            let Ok([(_, mut oa, _, _, _, mut da, ..), (_, mut ob, _, _, _, mut db, ..)]) = q.get_many_mut([a.e, b.e])
             else {
                 continue;
             };
@@ -208,10 +251,12 @@ fn contacts(
             if n == 0 {
                 continue;
             }
-            // Touch flag (OS4 +0x4a4, Mac +0x98c) for the walk-to-door
-            // re-plan (`boarding.rs`); only players walk to cars.
+            // Touch flag (OS4 +0x4a4, Mac +0x98c): set on both objects
+            // whenever one is a vehicle (Mac `CheckForCollisions` @
+            // 1006a150, `+0x98c = 1`). Only walkers read it (the walk-to-door
+            // re-plan, `boarding.rs`), so only they get it, players or not.
             for (x, y) in [(a, b), (b, a)] {
-                if x.person && x.player && y.vehicle {
+                if x.person && y.vehicle && !x.touched {
                     commands.entity(x.e).insert(super::boarding::Touched);
                 }
             }
@@ -224,14 +269,19 @@ fn contacts(
                     *left += dv;
                 }
             };
-            if !(b.vehicle && a.person) {
-                let dv = p * m / b.mass;
+            // The dummy takes no push and its partner takes all of it,
+            // unscaled; the bullet prop exchanges none (only the barrier,
+            // cone and dummy of the class-2 objects are pushed; Mac
+            // `CheckForCollisions` @ 1006a150).
+            let pushed = !a.is_prop(prop::BULLET) && !b.is_prop(prop::BULLET);
+            if pushed && !b.is_prop(prop::DUMMY) && !(b.vehicle && a.person) {
+                let dv = if a.is_prop(prop::DUMMY) { p } else { p * m / b.mass };
                 ob.vel += dv;
                 ob.pos += dv;
                 shift(&mut db, dv);
             }
-            if !(a.vehicle && b.person) {
-                let dv = -p * m / a.mass;
+            if pushed && !a.is_prop(prop::DUMMY) && !(a.vehicle && b.person) {
+                let dv = if b.is_prop(prop::DUMMY) { -p } else { -p * m / a.mass };
                 oa.vel += dv;
                 oa.pos += dv;
                 shift(&mut da, dv);
@@ -257,10 +307,17 @@ fn contacts(
         }
         for t in touches {
             let b = &bodies[t.j];
-            let Ok([(_, mut oa, _, _, _, da), (_, mut ob, _, _, _, db)]) = q.get_many_mut([a.e, b.e]) else { continue };
+            let Ok([(_, mut oa, _, _, _, da, ..), (_, mut ob, _, _, _, db, ..)]) = q.get_many_mut([a.e, b.e]) else { continue };
             // Two vehicles: Thud below 11 damage, else Thud2 (dented; a
             // bus driven by a player screams, j's then i's), for j, then i.
             if a.vehicle && b.vehicle {
+                // Shunt counter `+0x944` of both cars, every touching tick
+                // (Mac `CheckForCollisions` @ 1006a150); the player's car
+                // carries the player's record (copied in and out with the
+                // player), here [`super::police::Crimes`].
+                if let Some(c) = crimes.as_deref_mut() {
+                    c.shunt += a.player as i32 + b.player as i32;
+                }
                 let vol = (t.push.x.abs() + t.push.y.abs()) as f32 * 100_000.0;
                 let mut drives = [db, da];
                 let hits = [(ob.posf(), t.dmg_j), (oa.posf(), t.dmg_i)];
@@ -321,10 +378,71 @@ fn contacts(
                     }
                     blood(&mut effects, &mut rng, o, dmg, earlier);
                 }
-                if dmg > 0 {
-                    hurt.write(Hurt { victim: victim.e, by_player: other.player, by_weapon: false, attacker: other.player_no });
+                // Ram score and the hit report (Mac `CheckForCollisions` @
+                // 1006a150, after each victim's damage): from a player-side
+                // object (owner side >= 0) on an NPC (−1), `mult ·
+                // min(6000, v² >> 9)` with v the larger of |px|, |py| ·
+                // min(m)/m_victim, and `CheckHitObject(victim, 0)` whatever
+                // the damage (CB-3, CB-4). Props (class 2) take no part.
+                let check = other.side != -1 && victim.side == -1 && victim.prop.is_none();
+                if check {
+                    let m = a.mass.min(b.mass) as i64;
+                    let v = (t.push.x as i64 * m / victim.mass as i64)
+                        .abs()
+                        .max((t.push.y as i64 * m / victim.mass as i64).abs());
+                    let pay = ((v * v) >> 9).min(6000) as i32 * session.multiplier;
+                    rams.push((other.player.then_some(other.e), pay));
+                }
+                if check || dmg > 0 {
+                    // Crime only from the check; between players (both
+                    // side 0) the kill credit in multiplayer.
+                    let by_player = check || (other.player && victim.player);
+                    hurt.write(Hurt { victim: victim.e, by_player, by_weapon: false, attacker: other.player_no });
                 }
             }
+            // A barrier or cone hit by anything is knocked over (roll
+            // 0x5a0, on its side) with HitScenery (30, 2e6 @ 8500, at the
+            // current object i) and an extra quarter of the push on its
+            // velocity, away from the other; the dummy only makes the sound
+            // (the second test reads i again, sic). Mac `CheckForCollisions`
+            // @ 1006a150, the class-2 tails for i then j.
+            let topple = |o: &mut Obj, dv: IVec3| {
+                o.vel += dv;
+                o.roll = 0x5a0;
+            };
+            let thump = |commands: &mut Commands, pos: Vec3| {
+                commands.spawn(Sound::once(id::HIT_SCENERY, 2e6, 8500.0, SoundPos::At(pos)));
+            };
+            let quarter = t.push / 4;
+            if a.prop.is_some() {
+                if a.is_prop(prop::BARRIER) || a.is_prop(prop::CONE) {
+                    topple(&mut oa, -quarter);
+                    thump(&mut commands, oa.posf());
+                }
+                if a.is_prop(prop::DUMMY) {
+                    thump(&mut commands, oa.posf());
+                }
+            }
+            if b.prop.is_some() {
+                if b.is_prop(prop::BARRIER) || b.is_prop(prop::CONE) {
+                    topple(&mut ob, quarter);
+                    thump(&mut commands, oa.posf());
+                }
+                if a.is_prop(prop::DUMMY) {
+                    thump(&mut commands, oa.posf());
+                }
+            }
+        }
+    }
+    // The score goes to the player's object (`+0x864` of
+    // `objects[DAT_1017c60c]`); an empty player-side car pays the single
+    // player. No label.
+    for (payee, pay) in rams {
+        // Bodies are in table order: the first player is the lowest slot.
+        let single = (!mode.is_multiplayer()).then(|| bodies.iter().find(|b| b.player).map(|b| b.e));
+        let payee = payee.or(single.flatten());
+        if let Some(Ok((_, mut o, ..))) = payee.map(|e| q.get_mut(e)) {
+            o.score += pay;
         }
     }
     for (e, player) in irony {
@@ -394,11 +512,12 @@ fn vehicle_damage(
     mut session: ResMut<PlayerSession>,
     mut explode: MessageWriter<Explode>,
     mut killed: MessageWriter<super::score::Killed>,
-    mut q: Query<(Entity, &mut Obj, &Vehicle, Has<CameraTarget>)>,
+    mut rc_cars: ResMut<super::rc_car::RcCars>,
+    mut q: Query<(Entity, &mut Obj, &Vehicle, Has<CameraTarget>, Option<&super::rc_car::RcCar>)>,
 ) {
     let Some(library) = library else { return };
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
-        let Ok((e, mut o, _veh, is_player)) = q.get_mut(e__) else { continue };
+        let Ok((e, mut o, _veh, is_player, rc)) = q.get_mut(e__) else { continue };
         let info = &library.model(o.model).info;
         let (mass, radius) = (info.mass as i64, info.radius as f32);
         let layer = o.level as u8 + 1;
@@ -423,9 +542,17 @@ fn vehicle_damage(
                 power: mass / 2 * 20000,
                 layer: o.level,
                 source: Some(e),
-                by_player: false,
-                player: None,
+                // `Detonate(i, 0)` -> `Shockwave(.., i)`: a player-side
+                // wreck's blast (owner side >= 0) pays and counts (CB-5).
+                by_player: o.side >= 0,
+                // An RC car's blast is its player's (`+0x998`).
+                player: rc.map(|r| r.player).or(o.player),
             });
+            // An RC car frees its player's slot and holds the camera
+            // (`DoCollideStuff` @ 10067b50).
+            if let Some(r) = rc {
+                rc_cars.ended(e, r.player);
+            }
             triggers.report_actor(kind::ACTOR_KILLED, e);
             o.state = if is_player { State::Dead } else { State::Removed };
             if !is_player {
@@ -457,9 +584,12 @@ fn vehicle_damage(
                 o.burn = 100;
                 o.speed = 0;
                 o.vel += IVec3::new(rng.rand(100) - 50, rng.rand(100) - 50, -(200 + rng.rand(300)));
-                if !is_player {
-                    o.state = State::Dead;
-                }
+                // `Explode` @ 10055570 sets state 5: a driving player
+                // loses the controls and can't get out of the burning car
+                // (`GetInOutVehicles` @ 10066140 wants state 2); he dies
+                // when it burns out ("Nuked!", below). Other vehicles go
+                // straight to the wreck state (the original's 5 then 7).
+                o.state = if is_player { State::Parked } else { State::Dead };
                 let n = ((mass >> 10) + 2) as i32;
                 for _ in 0..(n / 2).clamp(2, 6) {
                     let p = o.posf() + Vec3::new((rng.rand(1600) - 800) as f32, (rng.rand(1600) - 800) as f32, 0.0);
@@ -468,7 +598,16 @@ fn vehicle_damage(
                 }
                 let mut at = o.pos;
                 at.z -= 500;
-                explode.write(Explode { pos: at, power: mass * 25000, layer: o.level, source: Some(e), by_player: false, player: None });
+                explode.write(Explode {
+                    pos: at,
+                    power: mass * 25000,
+                    layer: o.level,
+                    source: Some(e),
+                    // `Explode` -> `Shockwave(.., i)`: pays and counts when
+                    // the car is on the player's side (CB-5).
+                    by_player: o.side >= 0,
+                    player: o.player,
+                });
                 triggers.report_actor(kind::ACTOR_KILLED, e);
             }
             continue;
@@ -489,3 +628,7 @@ fn vehicle_damage(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/contact.rs"]
+mod tests;

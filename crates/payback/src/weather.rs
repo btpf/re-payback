@@ -64,7 +64,10 @@ impl Plugin for WeatherPlugin {
             // people systems so the sequence never depends on schedule order.
             .add_systems(
                 FixedUpdate,
-                tick.before(crate::sim::people::PeopleThink).run_if(in_state(AppState::Playing)),
+                tick.before(crate::sim::people::PeopleThink)
+                    .after(crate::sim::traffic::SpawnSet)
+                    .before(crate::sim::contact::ContactSet)
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(Update, rain_volume.run_if(in_state(AppState::Playing)));
     }
@@ -134,7 +137,7 @@ fn tick(
     // even tick setting the palette flash to 100..249 (the Mac sets it,
     // `amiga_levelloop` @ 10100f50; OS4 added, so strikes built up). Drawn
     // from the game's generator, as in both builds.
-    let chance = if std::env::args().any(|a| a == "--lightning") {
+    let chance = if crate::args().any(|a| a == "--lightning") {
         40
     } else {
         1

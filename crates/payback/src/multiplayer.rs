@@ -143,7 +143,7 @@ impl Plugin for MultiplayerPlugin {
                 FixedUpdate,
                 hijack_test
                     .run_if(is_multiplayer)
-                    .run_if(|| std::env::args().any(|a| a == "--hijack-test"))
+                    .run_if(|| crate::args().any(|a| a == "--hijack-test"))
                     .before(crate::sim::people::PeopleThink),
             )
             .add_systems(
@@ -198,9 +198,17 @@ fn read_devices(
     settings: Option<Res<crate::frontend::progress::Settings>>,
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<(Entity, &Gamepad)>,
+    (slots, axes): (Res<crate::frontend::bindings::PadSlots>, Res<crate::frontend::bindings::PadAxes>),
     players: Query<(&Obj, &Arsenal), With<CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
+    smooth: Res<crate::frame::Smooth>,
+    mut latch: Local<(u64, [[bool; 6]; 4])>,
 ) {
+    // Presses shorter than a tick are kept until a tick has seen them (as
+    // `people::read_keyboard`).
+    if latch.0 != smooth.ticks() {
+        *latch = (smooth.ticks(), [[false; 6]; 4]);
+    }
     use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
     let defaults;
     let controls = match &settings {
@@ -210,8 +218,6 @@ fn read_devices(
             &defaults
         }
     };
-    let mut pads: Vec<(Entity, &Gamepad)> = pads.iter().collect();
-    pads.sort_by_key(|p| p.0);
     for p in 0..mode.players() {
         let input = &mut inputs.0[p];
         let mut step = 0;
@@ -249,13 +255,15 @@ fn read_devices(
                 }
             }
             Device::Joystick(n) => {
-                let Some((_, g)) = pads.get(n as usize) else {
+                // Joystick n is gamepad number n (`bindings::PadSlots`).
+                let Some((e, g)) = slots.get(n as usize).and_then(|e| pads.get(e).ok()) else {
                     *input = Default::default();
                     continue;
                 };
                 // The picked device's table (Mac `UpdateInputStatus` @ 100f8490).
                 let t = &controls.pads[n as usize % 4];
-                let held = |a: usize| pad_held(g, t[a]);
+                let pad = axes.state(e, g);
+                let held = |a: usize| pad_held(&pad, t[a]);
                 let s = g.left_stick() + g.dpad();
                 input.left = s.x < -0.5 || held(b::LEFT);
                 input.right = s.x > 0.5 || held(b::RIGHT);
@@ -263,13 +271,20 @@ fn read_devices(
                 input.reverse = s.y < -0.5 || held(b::REVERSE);
                 input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
                 input.brake = held(b::BRAKE);
-                input.use_pressed |= pad_just(g, t[b::IN_OUT]);
-                if pad_just(g, t[b::PREV_WEAPON]) {
+                input.use_pressed |= pad_just(&pad, t[b::IN_OUT]);
+                if pad_just(&pad, t[b::PREV_WEAPON]) {
                     step = -1;
                 }
-                if pad_just(g, t[b::NEXT_WEAPON]) {
+                if pad_just(&pad, t[b::NEXT_WEAPON]) {
                     step = 1;
                 }
+            }
+        }
+        if let Some(held_since) = latch.1.get_mut(p) {
+            let now = [&mut input.left, &mut input.right, &mut input.accel, &mut input.reverse, &mut input.fire, &mut input.brake];
+            for (h, v) in held_since.iter_mut().zip(now) {
+                *h |= *v;
+                *v = *h;
             }
         }
         if step != 0 {

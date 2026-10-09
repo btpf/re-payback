@@ -13,10 +13,27 @@ pub const LAYER: usize = 7;
 /// Original camera-space units per render unit.
 const UNITS: f32 = 1000.0;
 
-/// Camera-space units per model unit. INFERRED (sized by eye against the
-/// menu text): the in-game scale (one model unit = 16 world units
-/// horizontally, 8 vertically, rendering.md §0) with the vertical factor.
-const MODEL_UNIT: f32 = 8.0;
+/// Camera-space units per model (file) unit: the loader stores vertices
+/// ×16 (`FUN_010bf8bc`), and `FUN_010c101c(obj, 0, 0, 0, 0x65)` adds the
+/// rotated in-memory vertex (8.8 trig, ×256) to the object position ×256
+/// and divides by the depth ×16 with the screen constants (`xs`, `ys` =
+/// 16 at 320×256: focal length 256, the menu camera's), skipping the ×2
+/// the in-game modes apply to both. So one in-memory unit is one camera
+/// unit, and a file unit 16. CONFIRMED.
+pub(crate) const MODEL_UNIT: f32 = 16.0;
+
+/// People models (`+0x4909 == 1`, here `people/`): the screen axes are
+/// divided by 3 and the depth taken `>> 10` instead of `>> 8` (people.md
+/// §2.3), after the rotation in the original, before it here. The
+/// original also adds 0x5dc to Y on frames whose pitch angle is exactly 0
+/// (one frame per turn of the pause menu's person); not reproduced.
+fn model_scale(path: &str) -> Vec3 {
+    if path.starts_with("people/") {
+        Vec3::new(MODEL_UNIT / 3.0, MODEL_UNIT / 3.0, MODEL_UNIT / 4.0)
+    } else {
+        Vec3::splat(MODEL_UNIT)
+    }
+}
 
 /// The models to show this frame (set by the menu loop): the option
 /// object and an optional one behind it.
@@ -27,7 +44,7 @@ pub struct CurrentModel(pub Option<ModelView>, pub Option<ModelView>);
 #[derive(Resource, Default)]
 pub struct ModelCache {
     lib: Option<ObjectLibrary>,
-    meshes: HashMap<&'static str, Option<MenuMesh>>,
+    meshes: HashMap<(&'static str, Option<u8>), Option<MenuMesh>>,
     /// The props were built from the Mac `Options/*` set
     /// (`Settings::variants.menu_props`).
     mac_props: bool,
@@ -92,23 +109,30 @@ pub fn preload_models(world: &mut World) {
         cache.follow(world.get_resource::<crate::frontend::progress::Settings>());
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         for path in MENU_MODELS {
-            cache.mesh(&data, &mut meshes, path);
+            cache.mesh(&data, &mut meshes, path, None);
         }
     });
 }
 
 impl ModelCache {
-    /// The meshes of `path` (built on first use): the model and its
-    /// blended parts with their materials ([`ObjectLibrary::menu_parts`]).
-    fn mesh(&mut self, data: &GameData, meshes: &mut Assets<Mesh>, path: &'static str) -> Option<MenuMesh> {
+    /// The meshes of `path` in paint `paint` (built on first use): the
+    /// model and its blended parts with their materials
+    /// ([`ObjectLibrary::menu_parts_painted`]).
+    fn mesh(
+        &mut self,
+        data: &GameData,
+        meshes: &mut Assets<Mesh>,
+        path: &'static str,
+        paint: Option<u8>,
+    ) -> Option<MenuMesh> {
         let lib = self.lib.as_mut()?;
         self.meshes
-            .entry(path)
+            .entry((path, paint))
             .or_insert_with(|| {
                 let i = lib.load(data, meshes, path)?;
-                let (main, overlays) = lib.menu_parts(&lib.model(i).obj, |v| {
-                    let k = MODEL_UNIT;
-                    to_render(v.x as f32 * k, v.y as f32 * k, v.z as f32 * k).to_array()
+                let k = model_scale(path);
+                let (main, overlays) = lib.menu_parts_painted(&lib.model(i).obj, paint.map(usize::from), |v| {
+                    to_render(v.x as f32 * k.x, v.y as f32 * k.y, v.z as f32 * k.z).to_array()
                 });
                 Some(MenuMesh {
                     main: meshes.add(main),
@@ -197,7 +221,7 @@ pub fn sync_model(
         if cache.lib.is_none() {
             cache.lib = Some(ObjectLibrary::new(&data, &mut images, &mut materials, false));
         }
-        let Some(mesh) = cache.mesh(&data, &mut meshes, view.path) else { continue };
+        let Some(mesh) = cache.mesh(&data, &mut meshes, view.path, view.paint) else { continue };
         let material = cache.lib.as_ref().map(|l| l.material.clone()).unwrap_or_default();
         let transform = Transform::from_translation(to_render(
             view.pos[0] as f32,

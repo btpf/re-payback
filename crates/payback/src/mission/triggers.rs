@@ -200,13 +200,18 @@ impl Triggers {
                     }
                 }
                 Pending::Kill(ev) => {
-                    self.list.retain(|t| {
-                        let keep = t.event != ev;
-                        if !keep {
-                            stopped.extend(t.sound);
+                    // `ProcessToDoList` @ 100f4880: `RemoveTrigger` @
+                    // 100f4560 moves the last trigger into the freed index
+                    // (68k `Trigger_Remove` `0xa45c6`), and the index is
+                    // tested again.
+                    let mut i = 0;
+                    while i < self.list.len() {
+                        if self.list[i].event == ev {
+                            stopped.extend(self.list.swap_remove(i).sound);
+                        } else {
+                            i += 1;
                         }
-                        keep
-                    });
+                    }
                 }
             }
         }
@@ -245,5 +250,18 @@ mod tests {
         t.apply_pending();
         assert_eq!(t.list.len(), 1);
         assert_eq!(t.list[0].event, 6);
+    }
+
+    #[test]
+    fn kill_moves_the_last_trigger_in() {
+        let mut t = Triggers::default();
+        for ev in [1, 2, 3, 4] {
+            t.queue_add(Trigger::new(ev, kind::TIMER, [1, 0, 0, 0, 0]));
+        }
+        t.apply_pending();
+        t.queue_kill(1);
+        t.apply_pending();
+        let order: Vec<i32> = t.list.iter().map(|t| t.event).collect();
+        assert_eq!(order, [4, 2, 3]);
     }
 }

@@ -5,8 +5,18 @@
 //! index, and every blend, Gouraud shade and night remap goes through a
 //! table whose entries are the palette colour nearest the arithmetic result
 //! (`Alpha.256`, `Gouraud.256`; metric `25|ΔR| + 36|ΔG| + 16|ΔB|`, first best
-//! wins). Here the views render in true colour; one pass at the end of each
-//! game view (after the HUD, before the window blit) then
+//! wins).
+//!
+//! Blending in palette space: the game views render into a linear float
+//! target (Rgba16Float, [`setup_cameras`]) holding the gamma-encoded
+//! palette RGB the original adds, subtracts and averages: every world
+//! shader writes those bytes (`GAMMA_TARGET`), so the 3D passes' blend
+//! states compute the `Alpha.256` arithmetic on them. After the 3D passes
+//! a resolve pass ([`resolve_pass`], `shaders/resolve.wgsl`) snaps the
+//! world to the palette (software) or cuts it to the hardware renderer's
+//! dithered 16-bit 5-5-5 screen, and decodes it to linear light for the
+//! HUD. One pass at the end of each game view (after the HUD, before the
+//! window blit) then
 //!
 //! 1. snaps every pixel to the nearest palette colour through a 256³ lookup
 //!    table computed exactly with that metric ([`nearest_lut`]);
@@ -19,19 +29,25 @@
 //!    `DAT_0114c7b0`, is `T4[prev][cur]` per pixel). Switching it on blanks
 //!    the buffers (Mac `ToggleMotionBlur` @ 10053210 → `BlankChunky`; the
 //!    OS4 `FUN_01042308` left a stale frame), so the first blended frame
-//!    is averaged with black;
+//!    is averaged with black. The blend loop runs `(W·H >> 5) − 1` times
+//!    32 pixels (both builds, analysis/mac/rendering.md §4), so the last 32
+//!    pixels of the display buffer are never written while blur is on:
+//!    here the view's last 32 pixels (bottom row, right end) show palette
+//!    colour 0 (INFERRED: the display buffer's untouched content);
 //! 3. adds the palette flash (`DAT_0114c748`, `FUN_0103ad6c`: every palette
 //!    entry becomes `min(255, rgb + flash)`), after the snap as the original
 //!    changes the palette, not the pixels.
 //!
-//! The hardware render mode (`crate::render_mode`, rendering.md §11) is
-//! true colour: only the flash (a full-screen additive quad there) is
-//! applied.
+//! The hardware render mode (`crate::render_mode`, rendering.md §11) has
+//! no palette: only the flash (a full-screen additive quad there) is
+//! applied here.
 //!
-//! What stays approximate: blends with the framebuffer (effects, Alpha
-//! tops, additive object faces) happen in linear light on the true-colour
-//! target, and only the end result is snapped, where the original snaps
-//! after every blend and adds palette RGB values (gamma-encoded).
+//! What stays approximate: the original snaps to the palette (and clamps
+//! each channel to 0..255) after every blend; here the world is snapped
+//! once before the HUD and the float target clamps only then. The HUD
+//! draws in linear light (its subtract panels too, `crate::hud`).
+//! `--linear-blend` restores the old pipeline (sRGB target, linear-light
+//! blends) for comparison.
 
 use super::{ExtraView, GameCamera};
 use crate::data::GameData;
@@ -245,7 +261,7 @@ pub struct PaletteTextures {
 pub struct MotionBlur(pub bool);
 
 fn forced_blur() -> Option<bool> {
-    std::env::args()
+    crate::args()
         .any(|a| a == "--motion-blur")
         .then(|| crate::arg("--motion-blur").is_none_or(|v| v != "0"))
 }
@@ -258,6 +274,10 @@ pub struct PostFx {
     pub blur: bool,
     /// Snap to the palette (`--no-palette-snap` turns it off, for checks).
     pub snap: bool,
+    /// Game ticks run (wrapping): the blur's previous frame is the last
+    /// one drawn before the latest tick, so the trail is one tick long at
+    /// any display rate, as in the original (one frame per tick).
+    pub tick: u32,
 }
 
 pub struct PostFxPlugin;
@@ -265,27 +285,293 @@ pub struct PostFxPlugin;
 impl Plugin for PostFxPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/postfx.wgsl");
+        embedded_asset!(app, "shaders/resolve.wgsl");
         app.insert_resource(MotionBlur(forced_blur().unwrap_or(false)))
             .add_plugins((
                 ExtractComponentPlugin::<PostFx>::default(),
+                ExtractComponentPlugin::<GammaWorld>::default(),
                 ExtractResourcePlugin::<PaletteTextures>::default(),
             ))
             .add_systems(PreUpdate, blur_settings)
-            .add_systems(PostUpdate, update_views);
+            .add_systems(PostUpdate, (setup_cameras, update_views, update_gamma_views));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         render_app
             .init_resource::<FrameParity>()
-            .add_systems(RenderStartup, init_pipeline)
+            .add_systems(RenderStartup, (init_pipeline, init_resolve_pipeline))
             .add_systems(Render, flip_parity.in_set(RenderSystems::Prepare))
             .add_systems(
                 Core3d,
-                postfx_pass
-                    .after(bevy::ui_render::ui_pass)
-                    .before(bevy::core_pipeline::upscaling::upscaling),
+                (
+                    resolve_pass.in_set(bevy::core_pipeline::Core3dSystems::EarlyPostProcess),
+                    postfx_pass
+                        .after(bevy::ui_render::ui_pass)
+                        .before(bevy::core_pipeline::upscaling::upscaling),
+                ),
             );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Palette-space blending (rendering.md §3 "Palette output")
+
+/// `--linear-blend`: the old pipeline (blends in linear light on an sRGB
+/// target, snapped once at the end), for comparison.
+pub fn linear_blend() -> bool {
+    crate::args().any(|a| a == "--linear-blend")
+}
+
+/// Every 3D camera got its target set up ([`setup_cameras`]).
+#[derive(Component)]
+struct TargetSetUp;
+
+/// A game view whose world is drawn in gamma-encoded palette RGB and
+/// resolved before the HUD ([`resolve_pass`], `shaders/resolve.wgsl`).
+/// `mode`: 0 decode only, 1 snap to the palette (software), 2 the 16-bit
+/// hardware screen.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, ExtractComponent)]
+pub struct GammaWorld {
+    pub mode: u32,
+}
+
+/// The views' targets: the world shaders write the gamma-encoded palette
+/// bytes the original blends (`shaders/*.wgsl` under the `GAMMA_TARGET`
+/// def, chosen by the view's HDR key), so the 3D passes need a linear
+/// float target: every 3D camera gets `Hdr` (Rgba16Float), no tone
+/// mapping and no deband dither — the menu-model camera too, as it draws
+/// into the same window texture (main textures are shared per format);
+/// its object materials stay linear (`objects::EnvMapped` `params.y`).
+/// The game views clear to the clear colour's gamma bytes, as their
+/// resolve pass decodes everything.
+#[allow(clippy::type_complexity)]
+fn setup_cameras(
+    mut commands: Commands,
+    clear: Res<ClearColor>,
+    mut cameras: Query<
+        (Entity, &mut Camera, Has<GameCamera>, Has<ExtraView>),
+        (With<Camera3d>, Without<TargetSetUp>),
+    >,
+) {
+    if cameras.is_empty() || linear_blend() {
+        return;
+    }
+    for (e, mut camera, game, extra) in &mut cameras {
+        let mut ec = commands.entity(e);
+        ec.insert((
+            TargetSetUp,
+            bevy::camera::Hdr,
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            bevy::core_pipeline::tonemapping::DebandDither::Disabled,
+        ));
+        if game || extra {
+            ec.insert(GammaWorld::default());
+            if matches!(camera.clear_color, ClearColorConfig::Default) {
+                let s = clear.0.to_srgba();
+                camera.clear_color =
+                    ClearColorConfig::Custom(Color::linear_rgba(s.red, s.green, s.blue, s.alpha));
+            }
+        }
+    }
+}
+
+/// The resolve mode of the game views: snap while a level is played in
+/// software, the 16-bit screen in hardware.
+fn update_gamma_views(
+    state: Res<State<AppState>>,
+    mode: Res<crate::render_mode::RenderMode>,
+    mut views: Query<&mut GammaWorld>,
+) {
+    let playing = *state.get() == AppState::Playing;
+    let want = if mode.hardware() {
+        2
+    } else if playing && !crate::args().any(|a| a == "--no-palette-snap") {
+        1
+    } else {
+        0
+    };
+    for mut v in &mut views {
+        v.set_if_neq(GammaWorld { mode: want });
+    }
+}
+
+#[derive(Resource)]
+struct ResolvePipeline {
+    layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+    vertex: VertexState,
+}
+
+fn init_resolve_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    fullscreen_shader: Res<FullscreenShader>,
+) {
+    let float = TextureSampleType::Float { filterable: false };
+    let layout = BindGroupLayoutDescriptor::new(
+        "resolve_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_2d(float),
+                texture_3d(float),
+                texture_2d(float),
+                uniform_buffer_sized(false, NonZeroU64::new(16)),
+            ),
+        ),
+    );
+    commands.insert_resource(ResolvePipeline {
+        layout,
+        shader: asset_server.load("embedded://payback/shaders/resolve.wgsl"),
+        vertex: fullscreen_shader.to_vertex_state(),
+    });
+}
+
+#[derive(Default)]
+struct ResolveState {
+    /// Window-sized copy of the frame (each view touches its viewport).
+    copy: Option<(UVec2, TextureFormat, Texture, TextureView)>,
+    pipelines: HashMap<TextureFormat, CachedRenderPipelineId>,
+}
+
+/// After the 3D passes of a game view, before the HUD: snap / quantise and
+/// decode the gamma-encoded world to linear light (`shaders/resolve.wgsl`).
+fn resolve_pass(
+    view: ViewQuery<(&ViewTarget, &ExtractedCamera, &GammaWorld)>,
+    pipeline: Option<Res<ResolvePipeline>>,
+    pipeline_cache: Res<PipelineCache>,
+    tables: Option<Res<PaletteTextures>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    mut state: Local<ResolveState>,
+    mut ctx: RenderContext,
+) {
+    let (target, camera, gamma) = view.into_inner();
+    let (Some(pipeline), Some(tables)) = (pipeline, tables) else {
+        return;
+    };
+    let (Some(lut), Some(palette)) = (gpu_images.get(&tables.lut), gpu_images.get(&tables.palette)) else {
+        return;
+    };
+    let Some(size) = camera.physical_target_size else {
+        return;
+    };
+    let format = target.main_texture_format();
+    let id = *state.pipelines.entry(format).or_insert_with(|| {
+        pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some("resolve_pipeline".into()),
+            layout: vec![pipeline.layout.clone()],
+            vertex: pipeline.vertex.clone(),
+            fragment: Some(FragmentState {
+                shader: pipeline.shader.clone(),
+                targets: vec![Some(ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+                ..default()
+            }),
+            ..default()
+        })
+    });
+    let Some(render_pipeline) = pipeline_cache.get_render_pipeline(id) else {
+        return;
+    };
+    let device = ctx.render_device().clone();
+    if state.copy.as_ref().is_none_or(|c| c.0 != size || c.1 != format) {
+        let t = device.create_texture(&TextureDescriptor {
+            label: Some("resolve_copy"),
+            size: Extent3d {
+                width: size.x,
+                height: size.y,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let v = t.create_view(&TextureViewDescriptor::default());
+        state.copy = Some((size, format, t, v));
+    }
+    let (_, _, copy, copy_view) = state.copy.as_ref().unwrap();
+    let (origin, extent) = camera.viewport.as_ref().map_or((UVec2::ZERO, size), |v| {
+        (v.physical_position, v.physical_size)
+    });
+    let extent = extent.min(size.saturating_sub(origin));
+    if extent.x == 0 || extent.y == 0 {
+        return;
+    }
+    let mut params = [0u8; 16];
+    params[0..4].copy_from_slice(&(gamma.mode as f32).to_le_bytes());
+    let uniform = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("resolve_params"),
+        contents: &params,
+        usage: BufferUsages::UNIFORM,
+    });
+    let bind_group = device.create_bind_group(
+        "resolve_bind_group",
+        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
+        &BindGroupEntries::sequential((
+            copy_view,
+            &lut.texture_view,
+            &palette.texture_view,
+            uniform.as_entire_binding(),
+        )),
+    );
+    let encoder = ctx.command_encoder();
+    let region = Origin3d {
+        x: origin.x,
+        y: origin.y,
+        z: 0,
+    };
+    encoder.copy_texture_to_texture(
+        TexelCopyTextureInfo {
+            texture: target.main_texture(),
+            mip_level: 0,
+            origin: region,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyTextureInfo {
+            texture: copy,
+            mip_level: 0,
+            origin: region,
+            aspect: TextureAspect::All,
+        },
+        Extent3d {
+            width: extent.x,
+            height: extent.y,
+            depth_or_array_layers: 1,
+        },
+    );
+    let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        label: Some("resolve_pass"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: target.main_texture_view(),
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_viewport(
+        origin.x as f32,
+        origin.y as f32,
+        extent.x as f32,
+        extent.y as f32,
+        0.0,
+        1.0,
+    );
+    pass.set_pipeline(render_pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 fn blur_settings(
@@ -300,7 +586,7 @@ fn blur_settings(
 
 /// Run by the start-up loader (`startup.rs`).
 pub(crate) fn build_tables(mut commands: Commands, data: Res<GameData>, mut images: ResMut<Assets<Image>>) {
-    let start = std::time::Instant::now();
+    let start = bevy::platform::time::Instant::now();
     let lut = cached_lut(&data.palette);
     debug!("palette LUT in {:?}", start.elapsed());
     let image = |w: u32, h: u32, d: u32, bytes: Vec<u8>, format: TextureFormat| {
@@ -345,6 +631,7 @@ fn update_views(
     state: Res<State<AppState>>,
     blur: Res<MotionBlur>,
     flash: Res<crate::effects::ScreenFlash>,
+    smooth: Res<crate::frame::Smooth>,
     mode: Res<crate::render_mode::RenderMode>,
     views: Query<(Entity, Option<&PostFx>), Or<(With<GameCamera>, With<ExtraView>)>>,
 ) {
@@ -352,15 +639,19 @@ fn update_views(
     // Warp3D draws true colour (no palette) and has no motion blur; its
     // flash is an additive full-screen quad of `flash / 255`, the same sum.
     let hardware = mode.hardware();
-    let snap = !hardware && !std::env::args().any(|a| a == "--no-palette-snap");
+    let snap = !hardware && !crate::args().any(|a| a == "--no-palette-snap");
     let want = PostFx {
         flash: flash.0.clamp(0, 255) as f32 / 255.0,
         blur: blur.0 && !hardware,
         snap,
+        // Only the blur reads it; constant without, so the component is
+        // not re-inserted every tick.
+        tick: if blur.0 && !hardware { smooth.ticks() as u32 } else { 0 },
     };
     for (e, current) in &views {
         match (playing, current) {
-            (true, Some(c)) if c.flash == want.flash && c.blur == want.blur && c.snap == want.snap => {}
+            (true, Some(c))
+                if c.flash == want.flash && c.blur == want.blur && c.snap == want.snap && c.tick == want.tick => {}
             (true, _) => {
                 commands.entity(e).insert(want);
             }
@@ -372,12 +663,21 @@ fn update_views(
     }
 }
 
-/// Which of the two index buffers holds the previous frame.
+/// Which of the two index buffers holds the previous frame, and the game
+/// tick it was drawn in.
 #[derive(Resource, Default)]
-struct FrameParity(bool);
+struct FrameParity(bool, Option<u32>);
 
-fn flip_parity(mut p: ResMut<FrameParity>) {
-    p.0 = !p.0;
+/// Swap the buffers when a game tick has run since the last swap
+/// (`MotionBlur` @ 100a6d50 blends consecutive frames, one per tick):
+/// frames drawn between two ticks all blend with the last frame of the
+/// tick before and overwrite the same buffer.
+fn flip_parity(mut p: ResMut<FrameParity>, views: Query<&PostFx>) {
+    let tick = views.iter().find(|fx| fx.blur).map(|fx| fx.tick);
+    if tick.is_none() || tick != p.1 {
+        p.0 = !p.0;
+    }
+    p.1 = tick;
 }
 
 #[derive(Resource)]
@@ -403,7 +703,7 @@ fn init_pipeline(
                 texture_3d(float),
                 texture_2d(float),
                 texture_2d(float),
-                uniform_buffer_sized(false, NonZeroU64::new(16)),
+                uniform_buffer_sized(false, NonZeroU64::new(32)),
             ),
         ),
     );
@@ -546,10 +846,15 @@ fn postfx_pass(
         (&work.index[1], &work.index[0])
     };
 
-    let mut params = [0u8; 16];
+    let mut params = [0u8; 32];
     params[0..4].copy_from_slice(&fx.flash.to_le_bytes());
     params[4..8].copy_from_slice(&(fx.blur as u32 as f32).to_le_bytes());
     params[8..12].copy_from_slice(&(fx.snap as u32 as f32).to_le_bytes());
+    // The view's bottom-right corner (window pixels): the blend skips the
+    // view's last 32 pixels (`postfx.wgsl`).
+    let end = origin + extent;
+    params[16..20].copy_from_slice(&(end.x as f32).to_le_bytes());
+    params[20..24].copy_from_slice(&(end.y as f32).to_le_bytes());
     let uniform = device.create_buffer_with_data(&BufferInitDescriptor {
         label: Some("postfx_params"),
         contents: &params,

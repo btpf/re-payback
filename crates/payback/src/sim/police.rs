@@ -95,7 +95,7 @@ impl Plugin for PolicePlugin {
             .add_systems(
                 FixedUpdate,
                 arrest_test
-                    .run_if(|| std::env::args().any(|a| a == "--arrest-test"))
+                    .run_if(|| crate::args().any(|a| a == "--arrest-test"))
                     .before(super::people::PeopleThink),
             )
             // Cops steer after the ambient ped AI has reset their sticks.
@@ -135,6 +135,10 @@ fn crimes(
         hurt.clear();
         return;
     };
+    // Flags set earlier this tick (the `CrimeCounted` inserts are
+    // deferred): one blast can hit an object twice in a tick with another
+    // contact or blast.
+    let mut fresh: Vec<(Entity, bool, bool)> = Vec::new();
     for h in hurt.read() {
         if !h.by_player {
             continue;
@@ -143,9 +147,17 @@ fn crimes(
         let Ok((v, is_person, veh, counted)) = victims.get(h.victim) else {
             continue;
         };
-        let counted = counted
-            .map(|c| (c.injured, c.killed))
+        let counted = fresh
+            .iter()
+            .rev()
+            .find(|f| f.0 == h.victim)
+            .map(|f| (f.1, f.2))
+            .or(counted.map(|c| (c.injured, c.killed)))
             .unwrap_or((false, false));
+        let mut mark = |injured: bool, killed: bool, commands: &mut Commands| {
+            fresh.push((h.victim, injured, killed));
+            commands.entity(h.victim).insert(CrimeCounted { injured, killed });
+        };
         let police = library.model(v.model).info.police;
         let dead = v.health <= 0;
         let w = p.wanted;
@@ -162,19 +174,13 @@ fn crimes(
                 } else {
                     p.wanted = raise(w, [3, 3, 3, 4, 5, 6, 6]);
                 }
-                commands.entity(h.victim).insert(CrimeCounted {
-                    injured: true,
-                    killed: true,
-                });
+                mark(true, true, &mut commands);
             } else if !dead && !counted.0 {
                 record.gbh += 1;
                 if w < 5 {
                     p.wanted = (w + 1).min(4);
                 }
-                commands.entity(h.victim).insert(CrimeCounted {
-                    injured: true,
-                    killed: counted.1,
-                });
+                mark(true, counted.1, &mut commands);
             }
         } else if veh.is_some() {
             if !h.by_weapon && p.speed == 0 {
@@ -192,16 +198,16 @@ fn crimes(
                 if driven {
                     record.murder += 1;
                 }
-                commands.entity(h.victim).insert(CrimeCounted {
-                    injured: true,
-                    killed: true,
-                });
-            } else if !dead {
+                mark(true, true, &mut commands);
+            } else if !dead && !counted.0 {
+                // Once per vehicle, as for people (`CheckHitObject` @
+                // 100542d0: `+0x964`); zero-damage hits now get here too.
                 if h.by_weapon {
                     record.criminal_damage += 1;
                 } else {
                     record.shunt += 1;
                 }
+                mark(true, counted.1, &mut commands);
                 p.wanted = if police {
                     w.max(3)
                 } else if w < 3 {
@@ -535,3 +541,7 @@ pub fn reset_police(mut commands: Commands) {
     commands.insert_resource(WantedTimer::default());
     commands.insert_resource(Crimes::default());
 }
+
+#[cfg(test)]
+#[path = "tests/police.rs"]
+mod tests;

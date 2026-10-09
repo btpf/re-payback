@@ -134,6 +134,8 @@ S `FUN_010a9e64`, W `FUN_010afcc4`)
   above a lower slope edge. Where a slope edge is *higher* than h1 (h2 > h1 at that
   edge — 82/546 Vert cubes in map 0) there is a gap between the wall top and the
   slope edge in the original.
+* Port (`city.rs`): every quad is one-sided (tops face up, walls out) and back faces
+  are culled, as the original.
 * Port recommendation (visually equivalent with a z-buffer): build side quads as
   trapezoids whose top edge follows `min(cornerHeight, h1)`, *or* draw the full h1
   rectangle and clip it against the slope plane. Do not extend walls up to h2 > h1.
@@ -234,17 +236,26 @@ Mac's shipped one is stale, built from the CD palette).
 
 ### Palette output and motion blur (port: `crates/payback/src/postfx.rs`)
 
-Every pixel of the original is a palette index. The port renders true colour and runs
-one final pass per game view (after the HUD, before the window blit): each pixel is
-snapped to the nearest palette colour with the metric above (a 256³ table computed
-exactly by a separable weighted-L1 distance transform, ties to the lower index, 0 →
-8), then the palette flash is added (§4). Gouraud results (`Gouraud.256` = nearest of
-`pal[c] + light − 128`) and the shine overlay (table 9) therefore come out exactly as
-the tables, up to blending order. Still approximate: blends with the framebuffer
-(effects, Alpha tops, additive faces) run in linear light on the sRGB target and are
-snapped once at the end, where the original snaps after each blend and adds the
-gamma-encoded palette RGB (additive effects look weaker than the original's).
-`--no-palette-snap` turns the snap off for comparison.
+Every pixel of the original is a palette index, and every blend works on the
+gamma-encoded palette bytes (`Alpha.256`, `Gouraud.256`). The port's game views render
+into a linear float target (Rgba16Float) that holds those bytes: every world shader
+writes gamma-encoded palette RGB (`GAMMA_TARGET`, chosen by the view's target format),
+so additive effects add palette values, subtractive effects and shadows subtract them
+(table 1, table 2's −16), table 3 is `s + d·(1 − max(s))`, the Alpha tops, the 50 %
+objects and the arrows average them (table 4), the shine overlay is `d + s − 32` (table
+9), as in the original. After the 3D passes a resolve pass (`postfx.rs` `resolve_pass`,
+`shaders/resolve.wgsl`) snaps every pixel to the nearest palette colour with the metric
+above (a 256³ table computed exactly by a separable weighted-L1 distance transform,
+ties to the lower index, 0 → 8) and decodes it to linear light for the HUD; the final
+pass after the HUD snaps again (the HUD's colours), applies the motion blur and adds
+the palette flash (§4). Remaining differences (port approximations): the original snaps
+after every blend and clamps each channel to 0…255 per blend, the port snaps once
+before the HUD and clamps at the end (a float target keeps sums above 255 until then);
+the HUD's subtract panels still blend in linear light (`hud/mod.rs`). The menu-model
+camera shares the window texture and keeps its object materials linear
+(`EnvMapped` `params.y = 0`). `--no-palette-snap` turns both snaps off and
+`--linear-blend` restores the old pipeline (linear-light blending on an sRGB target),
+for comparison.
 
 **Motion blur** (CONFIRMED; option "Motion blur", live flag `DAT_0114c6c8`, toggled by
 `FUN_01042308`, saved as config field 2 `DAT_0114c72c`; software renderer only — the
@@ -255,7 +266,10 @@ every pixel writes `T[a·256 + b]` with the table pointer `DAT_0114c440 + 0x4000
 `DAT_0114c7b0` (`lhz`/`rlwimi`/`lbzx`, 32 pixels per iteration, `(W·H >> 5) − 1`
 iterations); then `DAT_0114c6bc` flips and the next frame renders into the other
 buffer. So the visible frame is `T4[previous][current]`, the nearest palette colour to
-the average of the last two rendered frames (no feedback). Switching blur on: the Mac
+the average of the last two rendered frames (no feedback). The loop count
+`(W·H >> 5) − 1` leaves the last 32 pixels of the display buffer unwritten in both
+builds (CONFIRMED); the port shows palette colour 0 there while blur is on (INFERRED:
+the buffer's untouched content). Switching blur on: the Mac
 `ToggleMotionBlur__Fv` @ 10053210 blanks both render buffers (`BlankChunky`), so the
 first blended frame averages with black (CONFIRMED); OS4 `FUN_01042308` does not, and
 shows a stale frame from the last time blur was on. The port does the same in the
@@ -265,7 +279,12 @@ the blur runs.
 
 Cube Alpha tops: `FUN_01036044(tex, x0,y0,x1,y1, 0x40000)` temporarily adds 0x40000
 to the current table pointer `DAT_0114c440` and draws with `FUN_0112bfdc`
-(`out = T4[dst][texel]`; texel 0 is **not** skipped). Shipped uses: `Ice2.chunky`
+(`out = T4[dst][texel]`; texel 0 is **not** skipped; no Gouraud light). The rectangle's
+x1 / y1 are computed from cx − 1 / cy − 1 (Mac `Draw2DEffect` @ 100a8210, both builds),
+so the last column and row of each top are left unblended (CONFIRMED); the rotating
+view draws them as lit affine triangles instead (`DrawAffineTriangleAlphaGouraud`
+@ 100c64f0). Port (`shaders/city.wgsl`): top-down, unlit and the last pixel at s = 1 /
+t = 1 discarded. Shipped uses: `Ice2.chunky`
 over ice (map 1, on a zero-height cube 1 above the Reflect ice), `RoofWindow.chunky`.
 
 ### Reflect / water (software renderer)
@@ -435,7 +454,9 @@ first test after the per-cube setup): the square loop runs x, y = 1…126 (grid 
 `local_74 = −0xa3c + 0x1400·(x−1)`, `+0x14` per y); the first cell read is
 `local_74 + 0x1446 + z` = cell `(2x − 1, 2y − 1, z0 + 1)` for the corner at half-grid
 `(2x, 2y)`, the next `(2x − 2, 2y − 2, z0 + 2)` (offset −0xa09 per step), unrolled
-while z ≤ 9; `z0 = clamp((base + h) >> 7, 0, 9)`.
+while z ≤ 9; `z0 = clamp((base + h) >> 7, 0, 9)`. Every unrolled copy walks this same
+diagonal: the Mac `DoLightSourcing` has no inline copies, all 14 tests call
+`CheckVoxels` @ 100b3960, one loop over `(x − k, y − k, z + k)` (CONFIRMED).
 
 **Paired rays** (CONFIRMED, Mac `DoLightSourcing__FP3Map` @ 1015b840 calling
 `CheckVoxels__Fiii` @ 100b3960, which returns 0 = shadow if any cell `(px−k, py−k,
@@ -455,13 +476,24 @@ Port (`crates/payback/src/lighting.rs`, `shaders/city.wgsl`): static light per c
 corner computed at load or on toggle (items 1–5; the lamp intensities come from a
 local generator), dynamic lights (item 6) collected per frame: those whose square box
 reaches the squares a view draws (every split-screen view), nearest a view first, at
-most 510 (the original's limit is 1000; 510 fit a 16 KB uniform block). Every city
-vertex carries its quad's four corners and static lights; the vertex shader adds the
-dynamic lights at each corner, clamps to 255, and the fragment shader interpolates the
-four corners bilinearly (the software rasteriser interpolates along the edges and the
-spans; splitting the quad into two triangles left a diagonal seam), quantises
-`& 0xF8` and adds the light to the texel in gamma-encoded RGB; the palette snap of
-`Gouraud.256` is the view's final pass ("Palette output", §3). The pause-menu option
+most 1000 as the original (a 32 KB uniform block; the WebGL2 web build keeps 510, its
+16 KB limit). Every city vertex carries its quad's four corners and static lights; the
+vertex shader adds the dynamic lights at each corner, clamps to 255, and the fragment
+shader interpolates the four corners bilinearly, quantises `& 0xF8` and adds the light
+to the texel in gamma-encoded RGB; the palette snap of `Gouraud.256` is the view's
+resolve pass ("Palette output", §3). Interpolation (CONFIRMED): the top-down fillers
+(Mac `drawGroundFlat2GouraudColour` @ 100b5180, `drawGroundVertGouraudColour`
+@ 100b6260 — also used for the walls — and the Horiz variants) step rows with the
+perspective-correct row parameter, interpolate the light down both edges by it and
+linearly across each row; a row is at constant depth, so this is the bilinear blend at
+the texel's (s, t), as the port does. The rotating view draws every quad as two
+triangles split along corner 1 – corner 3 (tops (NE, NW, SW) + (SE, NE, SW) through
+`DrawAffineTriangleGouraud` @ 100c36a0; walls the same diagonal through
+`DrawPerspectiveTriangleGouraud` @ 100bdbf0) with the light linear in screen space per
+triangle; the port splits its quads along that diagonal and interpolates the light
+`@interpolate(linear)` there (INFERRED for the walls' perspective filler). The rotating
+view's affine texture mapping of tops is not reproduced (the port maps textures
+perspective-correct). The pause-menu option
 (`Settings::gouraud`, default on) drives it; `--gouraud 0|1` overrides.
 
 ### Header `variant` = weather (`DAT_0114c854`, read via `FUN_0106e478`) — CONFIRMED
@@ -775,7 +807,12 @@ sx = cx + fx*((x±r)*512 − camX*16)/(16*Dz)        (y likewise)
 ```
 
 Blend = Alpha.256 table chosen by the record's blend offset (§3); texel 0 transparent
-for all tables except 4 and 10. Single sprites are mirrored left-right
+for all tables except 4 and 10. A record is drawn and moved only while strictly inside
+the view rectangle (`x0 < x < x1`, `y0 < y < y1`, the drawn half-size plus one square;
+Mac `UpdateEffects` @ 100aa1f0); outside it is deleted, or wrapped for weather (12–14),
+without moving that tick; split screen (`UpdateEffectsMulti1` @ 100a8580) keeps a record
+inside any view's rectangle (CONFIRMED). Port: `effects.rs` `in_view` with every view's
+`ViewEyes::visible_squares` (the split-screen rectangles INFERRED to match). Single sprites are mirrored left-right
 (`FUN_01033d50(tex,0,…)`). Flame.1–4 cycle one step per *frame*.
 
 | type | dr/tick | use |
@@ -810,7 +847,11 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   missiles — list in §10; size 300 → s = 18; table from face byte +0x152f, 3 → 0) and
   explosions (type 0xB, s = r/16, never occluded: AddFlare gets −size). Software
   occlusion: a marker pixel is written at the flare centre and the flare is dropped if
-  it was overdrawn by the world. Option `DAT_0114c428` (`FUN_01035960`): 0 = no flares
+  it was overdrawn by the world (Mac `AddFlare` @ 100a6fb0 writes 0, `DrawFlares`
+  @ 100a7340 drops the flare if the pixel is no longer 0). Port: the segment from the
+  flare to the eye is tested against the city and against the triangles of every other
+  model near the views (`objects.rs` `FlareOccluders`; the flare's own model is not
+  tested, INFERRED); effect sprites drawn over the centre do not hide it. Option `DAT_0114c428` (`FUN_01035960`): 0 = no flares
   at all (AddFlare returns), 1 = glow only, 2 = everything (default). Main glow
   LensFlare.2xx (4 quarters) at the source, half-size (2/3)·s·fx/16; with option 2,
   ghosts on the line through the screen centre at `centre + f·d` (d = source −
@@ -847,7 +888,9 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   integer steps (people `/0x300`: a third the size), at the part, as a **flat black
   triangle** (software `Plain` colour 0; Warp3D RGB 0, alpha 1), a mode-5 face (slot 0)
   as a black line; skipped when nearer than depth 6000 or off the 320×200 screen.
-  Port: `debris.rs` (no view-rectangle removal or near cull; split once when the
+  Port: `debris.rs` (parts outside every view are removed with their landing puffs, the
+  near cull uses each view's `camH`, the mesh being shared: hidden only when near every
+  view; split once when the
   simulation leaves an object at health < −70, after the tick's combat).
 * **Snowman** (CONFIRMED, Mac `AddCollideObj` @ 10055c70 at 100565f0, OS4
   `FUN_01045288`): a non-person meeting scenery 0xfe clears the cell and throws 5 type-1
@@ -973,7 +1016,17 @@ span ending at 0x01128ae8; every pixel does `lbz; cmpwi 0; beq skip; stb`).
 on painter's sorting of the model's faces: moving objects insertion-sort by the sum of
 the three vertex depths (re-sorted when roll/pitch changes), scenery sorts once by the
 deepest vertex, the tumbling info sign every frame. Models with flag 0 draw their faces
-in file order. Details and counts: `formats.md` Objects.
+in file order. Details and counts: `formats.md` Objects. Port (`objects.rs` `Tris::painter_sort`): the
+depth test decides visibility of opaque and masked faces; a scan of the shipped models
+(94 parsed of 112, 88 of them flagged) found no coplanar overlapping faces drawn on the
+same side (the only coincident ones are exact duplicates or opposite sides), so the
+sort only matters for faces that do not write depth: the 50 % faces and, in hardware,
+the alpha-blended colour-keyed faces (tree canopies, light bars). For flagged models
+those overlay triangles are ordered back to front at mesh build time with the
+original's keys along the unturned model's vertical (the top-down depth); objects that
+pitch or roll and the rotating view are not re-sorted (approximation). The sort's
+painter artefacts (a face with a deeper sum drawn over a nearer one) are not
+reproduced for depth-writing faces.
 
 Mode-6 faces in the shipped models: `TrafficLight1` (table 5 = red), `TrafficLight2`
 (5 red + 6 red+green = amber), `TrafficLight3` (7 green), `TrafficLight4` (6 amber),
@@ -1082,9 +1135,17 @@ Additive blending happens in linear colour rather than palette space.
   @ 10070c20 set both on every bullet, pellet, petrol drop and missile, and
   `MoveObject_General` @ 1006e4f0 sets them each tick for those models; grenades and
   bombs (gravity) keep a shadow. Port: `object_shadows` skips non-gravity
-  `Projectile`s (before, a bullet got the vehicle 3×3 grid: a black square). Port approximations: depth-tested horizontal triangles 1 h-unit above the ground,
-  linear-colour subtraction, no spinning-pickup shadows, the face texture's own key for
-  the hardware `Tree2.clone`/`tanne.clone` (INFERRED same mask).
+  `Projectile`s (before, a bullet got the vehicle 3×3 grid: a black square). Scenery shadows: a face whose slot 0 has mode 5 is a line in palette colour 1
+  (`DrawLine(…, 1)`); spinning models are flattened at their spin heading (`DrawMap`
+  @ 1005a260 passes `DAT_0114c770 + rotation·0x1680 >> 8` when `+0x8164 ≥ 0`, the yaw
+  only); top-down nothing is drawn unless the cube top's depth is > 6000 (CONFIRMED,
+  `DrawSceneryShadow` @ 1007ea20). Port: all three (`objects/shadows.rs`
+  `scenery_shadow_frame`; the depth in port units INFERRED). `Tree2.clone` and
+  `tanne.clone` are byte copies of `Tree2` / `tanne` (CONFIRMED from the shipped files),
+  so the face texture's key is the clone's; hardware filters its 0 / 0x32 alpha
+  bilinearly. Port approximation: depth-tested horizontal triangles 1 h-unit above the
+  ground instead of the draw order; the subtraction is exact on the gamma-encoded
+  palette bytes (§3).
 * Not done: debris (`DrawPart` @ 100794c0, the part list of `FUN_01035438`).
 * **Scenery below its origin.** `DrawMap` @ 1005a260 calls `DrawScenery` with the cube
   top (`height << 4`) and no offset, after that square's cubes, so a model reaching
@@ -1293,7 +1354,10 @@ The launcher (PaybackSetup, config field 19) starts the OS4 build with
   `(7, 8)`. Palette flash (`FUN_0103ad6c`): a full-screen ONE/ONE quad of colour
   `flash/255` after the HUD. Fades: a black quad with alpha.
 * **Lens flares are never occlusion-tested** (the software overdraw test reads the
-  chunky screen). CONFIRMED.
+  chunky screen). CONFIRMED. Flares and the other tables 0/2/4/9/10 are ONE/ONE: the
+  port's flare batch uses ONE / ONE_MINUS_SRC_ALPHA with the colour premultiplied and
+  alpha 0 for every flare and snow sprite (exactly ONE/ONE) and the vertex alpha 0.4 of
+  the rain (exactly `(7, 8)`), so both blends are exact.
 * Shadows: people the black `Shad` sprite (alpha = max); vehicles 8 triangles of the
   `shadow` page, black, alpha = max, `(7, 8)`; model shadows black at alpha 0.3, tree
   faces through `Tree2.clone` / `tanne.clone` (`c3c0`, alpha 0x32, index 0
@@ -1330,11 +1394,21 @@ Approximate or not done:
 
 * the jitter uses a local generator, not the game's, so replays stay valid across
   render modes (the original's hardware load shifts the game RNG);
-* all blending runs in linear light on an sRGB target (Warp3D blends the 16-bit
-  framebuffer values); the framebuffer is not quantised to 15/16 bits;
-* effect and object atlases filter bilinearly across neighbouring atlas tiles at
-  sprite edges (rain is blended `(7, 8)` at alpha 0.4, as the original);
-* object shine modes 0x14 / 0x28 additive and the `(7, 8)` shine modes, the shadow
-  textures (`Tree2.clone`, `shadow` page), fades: still drawn as in software;
-* the rotating-view hardware water turns the UVs with the yaw (sign INFERRED); wall
-  triangles split along the same diagonal as tops (INFERRED).
+* blending runs on the gamma-encoded colour values, as Warp3D blends the framebuffer
+  values; the frame is cut to 16-bit 5-5-5 ("thousands", the Mac's DrawSprocket 16-bit
+  depth) with a 4×4 ordered dither (state 0x80000 / `GL_DITHER` is on; the pattern is
+  INFERRED) once, before the HUD (`resolve.wgsl`), not after every primitive;
+* textures are filtered inside their own atlas tile: the effect sprites (each 64×64
+  sprite or quarter its own texture, `GL_REPEAT` on the Mac, analysis/mac/rendering.md
+  §5) wrap within the tile; object textures are clamped half a texel inside their
+  256×128 slot (clamp rather than repeat at the very edge); tree-shadow clones wrap;
+* fades are hudplat's (`frontend/`): still drawn as in software;
+* rotating-view hardware water (OS4 `FUN_01081ba4` / `FUN_0108a2a0` hardware branch,
+  Mac `DrawAffineTriangleReflect` @ 100ba910; CONFIRMED in both): with a = 0xb3f − yaw,
+  b = 0x167f − yaw and the cos/sin tables C, S (amplitude 256),
+  `u = 128 + 8·((dx·C[a] + dy·S[a]) >> 8)/fx − k·(C[b] + S[b])/16384`,
+  `v = 128 + 8·((dy·C[a] − dx·S[a]) >> 8)/fy − k·(C[b] − S[b])/16384`: the offsets turn
+  with the yaw and point opposite to the top-down formula at yaw 0; port as such;
+* wall triangles: (top x0, top x1, base x0) + (base x1, top x1, base x0) on the north
+  wall and the same corner 1 – corner 3 diagonal on the others (CONFIRMED, Mac
+  `drawCubeSide_North` @ 100d9a50 and the S, W, E functions), as the port.

@@ -62,7 +62,7 @@ pub struct PursuitPlugin;
 
 impl Plugin for PursuitPlugin {
     fn build(&self, app: &mut App) {
-        let hold = std::env::args()
+        let hold = crate::args()
             .skip_while(|a| a != "--wanted")
             .nth(1)
             .and_then(|v| v.parse().ok());
@@ -195,7 +195,7 @@ fn pursue(
     library: Option<ResMut<ObjectLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<Rng>,
-    mut target: ResMut<TargetNode>,
+    mut tnodes: Query<&mut TargetNode>,
     mut set: ParamSet<(
         Query<(Entity, &Obj)>,
         Query<(Entity, &Obj), With<CameraTarget>>,
@@ -218,7 +218,8 @@ fn pursue(
     };
     let aggr = aggr.map_or(2, |a| a.0);
     let occ = vehicle_ai::occupancy(set.p0().iter(), &library, &trig);
-    let Some((ppos, pvel, pspeed)) = set.p1().iter().next().map(|(_, o)| (o.pos, o.vel, o.speed))
+    let Some((pe, ppos, pvel, pspeed)) =
+        set.p1().iter().next().map(|(e, o)| (e, o.pos, o.vel, o.speed))
     else {
         return;
     };
@@ -244,11 +245,15 @@ fn pursue(
                 // The player's nearest node, refreshed by the first pursuer
                 // to find the player's countdown at 0 (`do_Other`
                 // @ 10146280; [`TargetNode`]).
-                if target.refresh == 0 {
-                    target.node = route.nearest(ppos);
-                    target.refresh = 20;
+                let mut node = None;
+                if let Ok(mut target) = tnodes.get_mut(pe) {
+                    if target.refresh == 0 {
+                        target.node = route.nearest(ppos);
+                        target.refresh = 20;
+                    }
+                    node = target.node;
                 }
-                if vehicle_ai::follow_route(&route, &mut nav, &obj, target.node, true) {
+                if vehicle_ai::follow_route(&route, &mut nav, &obj, node, true) {
                     info!("police {e:?}: on the player's node, direct chase");
                     obj.state = State::Pursuit;
                 }

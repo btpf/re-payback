@@ -147,15 +147,40 @@ are one-way. Node coordinates sit at road-lane centres (x&0xFF mostly 0x70–0x9
 ### Next-hop table semantics
 
 Runtime `FUN_000a43f2(node, dest)` = `link[ hop2(node, dest) ]` (CONFIRMED). The table is
-precomputed by the map editor. Verification (`analysis/combat/route_check.py`): it equals
-a **hop-count (BFS) shortest path over the directed link graph** for 99.98 % of
-(src,dst) pairs (map0: 91494 ok / 12 off; map1: 98895 / 15; map2: 278226 / 30). The
-mismatches are all on paths ≥ 24 hops where the stored choice is 0–3 hops longer
-(INFERRED: editor relaxation with a bounded number of passes). Euclidean or Manhattan
-weighting matches far worse (~10 % mismatches) — so **the metric is hop count**.
-Reimplementation: load the table as-is; when generating new `.route` files compute
-BFS next hops (ties: any; lowest link slot is fine). Every node reaches every other
-node in the shipped maps.
+precomputed by the map editor when it saves (`SaveRouting` @ 10077940, only if the graph
+changed). **Editor algorithm** (CONFIRMED, Mac `MapEditor (OS X)`, decompile in
+`analysis/ghidra_mapedx`; reproduces all 31 shipped tables bit for bit — maps 0–2, *The
+Killing Zone* and the 27 Mac user-map routes):
+
+```
+CalculateRouting @ 100776a0:
+  visited[0..1023] = -1                       # once, never cleared again
+  for a in used nodes (index order):
+    next_hop[a][*] = 0
+    for b in used nodes (index order):
+      slot = CalculateRoute(a, b)             # -1 for a == b or no route
+      if slot != -1: next_hop[a][b>>2] |= slot << ((b&3)*2)
+CalculateRoute(a, b) @ 100775b0:
+  best = 2e9; slot = -1; stamp = b*4
+  for k in 0..3 with link[a][k] != 9999:
+    visited[a] = stamp
+    d = CalculateDist(link[a][k], b, stamp); if d < best: best, slot = d, k
+    stamp += 1
+CalculateDist(s, b, stamp) @ 10077480:       # BFS, FIFO of 5000 (node, hops)
+  push (s, 0)
+  while queue: pop (n, d); if visited[n] == stamp: continue
+    visited[n] = stamp; if n == b: return d
+    push (t, d+1) for every link t of n
+  return 2e9
+```
+
+So the metric is hop count (first link wins ties), but the visited stamps `b·4 + k` are
+shared by every source `a` and never reset, and the target is only recognised when first
+expanded: a stamp left by an earlier search hides nodes (sometimes `b` itself) from a later
+one. That is why 0.01 % of the pairs are not shortest paths (map0 12, map1 15, map2 30;
+`analysis/combat/route_check.py` compared plain BFS). Port:
+`payback_formats::Route::calculate_routing`, checked against map 0 in the tests; the game
+still loads the shipped tables. Every node reaches every other node in the shipped maps.
 
 Parser (Python, verified):
 ```python
@@ -618,12 +643,20 @@ ones. The fist is always valid.
 Muzzle lights (when the lighting option is on): pistol (40e6, 40e6, 10e6), minigun (60e6, 60e6,
 8e6), shotgun (60e6, 60e6, 20e6).
 
-**Fist** (68k ~123605).
-- Targets: every person with |Δz| < 250 and |Δx|, |Δy| < 3·r of the hit point pos + 256·dir, with
-  `LOS` clear.
-- Each target takes **30** health, flat (not divided by T), and says Ow. At ≤ 0 it enters state 7.
-- A hit on an NPC gives score 500 × multiplier.
+**Fist** (68k ~123605; [C: Mac `do_Person` @ 1013fbd0 l.117378-117445]).
+- Targets: every person (class 1, armed or not) in object-table order but the puncher, with
+  |Δz| < 250 and |Δx|, |Δy| < 3·r of the hit point pos + 256·dir, and
+  `LineOfSight(pos, z − 0x400 → target, z − 0x400)` clear.
+- Any target in reach: 59 Punch_Hit (4e6, 22050) once, at the puncher, after the scan.
+- Each target with health ≥ 0 says Ow (`0x25 + random(3)`, 5e6, 8000), takes **30** health,
+  flat (not divided by T); at < 1 it enters state 7.
+- On an NPC (owner side `+0x824 == −1`) the player's object (`objects[DAT_1017c60c]`) gets
+  500 × multiplier and `CheckHitObject(t, 0)` runs, whoever punched (no side test on the
+  puncher). Otherwise only `ObjectDead` when the hit killed it.
 - A punch also breaks a crate in the square at pos + 512·dir.
+- Port (`sim/combat.rs` `fire_weapons`): as above. Before, the targets were only people with
+  weapons (so pedestrians could not be punched), in query order, without the line of sight, and
+  the score was a flat 500 (CB-1, CB-2, DT-3).
 
 **Remote bomb.**
 - On drop, the bomb's id is stored. The next press detonates `Destroy(bomb, 50000)` (§5.2,
@@ -845,10 +878,22 @@ AddEffect(11, Blood, x±200, y±200, 21000, 0,0,0, 1000, layer, 0)              
   vehicles took 1/16 of the real damage and chain reactions were rare. Port: `sim/combat.rs`
   `explosions` (class 2 = `Class::Projectile` objects without a `Projectile`, i.e. roadblock props).
 - **Score** [C, same functions]: in single player only. The original pays whenever the exploding
-  object has an owner (`+0x824 >= 0`, AI weapons included) and the victim has none; the port's
-  `Explode` carries `by_player`, so it pays the player's own blasts. `Crime(o, 1)` is called for
-  every such object; the port reports `Hurt` only when the damage is > 0 [I: keeps far-away
-  objects out of the crime table].
+  object is on the player's side (owner side `+0x824 >= 0`) and the victim is an NPC (`== −1`).
+  `Crime(o, 1)` (= `CheckHitObject`) is called for every such object, whatever the damage, and
+  there is no radius, so every NPC in the object table counts as hit (once, `+0x964`). Port:
+  `Obj::side` (below), `Explode::by_player` = the exploding object's side >= 0, and `Hurt` at
+  zero damage (CB-4, CB-5).
+- **Owner side `+0x824`** [C: Mac]: −1 from `NewObj` @ 100575b0 (traffic, pedestrians, AI
+  cars); 0 for the player object (level start and respawn), the car he gets into
+  (`GetInOutVehicles` @ 10066140, kept after he leaves), the person who gets out
+  (`GetOutVehicle` @ 10065660) and script actors (`AddObject` @ 10105780, `AddObjectSpecial`
+  @ 10105b00); back to −1 by the script goto / goto-15 / route-flee calls (`SetTrigger_Long`
+  cases 10107bf0, 10107ce0, 10107ff8); 1 for person shots (`do_Person`): grenade, bomb,
+  missile, petrol, minigun and pistol bullets whoever fires them (so AI grenades and missiles
+  pay the player and count as his crime), shotgun pellets only from a state-2 shooter (else
+  −1); 1 for the tank cannon (`DoVehicleFire` @ 10070c20). Bullet and pellet hits test it as
+  well (`CheckForCollisions` l.27315-27750); the port's bullet hits still use the shooter being
+  the player [I: not ported, open].
 - There is no hard radius: damage falls off as ~1/d³.
 - Distances at which a person (T 90) takes ≥ 100 damage [I, computed]: missile (2.5e7) ≈ 1 square;
   grenade (6e7) ≈ 1.4 squares; remote bomb (1e9) ≈ 3.5 squares; exploding car (1400·25000 =
@@ -857,13 +902,27 @@ AddEffect(11, Blood, x±200, y±200, 21000, 0,0,0, 1000, layer, 0)              
 **`Ignite(obj)`** (OS4 `FUN_01044b70`, 68k `FUN_000cda5e`). Used when a vehicle's health reaches
 ≤ 0, and on missile impact.
 ```
-burn = 100; speed = 0; state = 5 (burning wreck)
+burn = 100; speed = 0; state = 5 (burning wreck; [C: Mac `Explode` @ 10055570])
 v += (rand(100)-50, rand(100)-50, -(200+rand(300)))            // hop
 n = (T>>10) + 2 ; c = clamp(n/2, 2, 6)
 c × fireball type 7 (Flame, ±800, size 2500+rand1500, layer 3)
 c × burning debris type 2 (size 800)
 Explosion(owner, pos.z+500, P = T·25000)
 ```
+
+**Player in a wrecked vehicle** [C: Mac `DoCollideStuff` @ 10067b50 l.25160-25450, OS4
+`FUN_010542b8`]. The driver is the vehicle object itself (a boarded passenger is removed), so
+there is no occupant to kill: the vehicle's death is the driver's.
+- Health < −70: `Detonate(i, 0)` (state 6). If it is a player's object and his death timer is
+  not running: death timer 80, score saved, "Obliterated!" (2025; 2020 for a person).
+- Health < 1, not burning: `Explode(i)` = Ignite above, which sets **state 5**. The player loses
+  the controls and cannot get out (`GetInOutVehicles` @ 10066140 acts only in state 2).
+- Burning: burn −= ticks; below 2 the player's vehicle goes to state 7 with the death timer
+  80, the score saved and "Nuked!" (2024); any other vehicle goes to state 7; burn = 15.
+- God mode is a port cheat: the player's object takes no damage, so it never gets here.
+- Port (`sim/contact.rs` `vehicle_damage`): as above. Before, the player's burning car stayed in
+  state 2, so pressing in/out during the 100 burning ticks got him out alive. Other vehicles go
+  to state 7 at once (the original's 5 then 7; nothing reads the difference).
 
 **`Destroy(obj, power)`** (OS4 `FUN_0104465c`, 68k `FUN_000cd6ae`). Used when health < −70
 (`−71` = "blow apart" marker), by the grenade fuse (3000), the remote bomb (50000), and on
@@ -988,8 +1047,8 @@ player-owned object, i.e. attacker `+0x344 >= 0` and victim `+0x344 == -1`;
 | Carjack a civilian car (occupied) | 1000 |
 | Carjack a police car | 1500 |
 | Explosion damage to an object (single player) | min(6000, q / (k>>5)) with q, k from §5.2 (6000 when k>>5 < 1), per object [C: Mac `Shockwave` @ 10054ac0] |
-| Punch an NPC | 500 |
-| Run someone over / ram (vehicle collision) | min(6000, vmax²>>9), vmax = max of abs(vx), abs(vy) of the impact velocity scaled by mass ratio |
+| Punch an NPC (owner side −1), by anyone | 500 [C: Mac `do_Person` @ 1013fbd0] |
+| Run someone over / ram (vehicle collision), a player-side object (owner side >= 0) on an NPC (−1) | min(6000, v²>>9), v = max(|px|, |py|)·min(m)/m_victim with p the contact push, per touching tick, whatever the damage; then `CheckHitObject(victim, 0)` [C: Mac `CheckForCollisions` @ 1006a150 l.27048-27071, l.27189-27213]. Port: `sim/contact.rs` `contacts` (CB-3) |
 | Burning (flamethrower/fire contact): per tick damage = min(health+0x47, ticks·3000/mass), ≥1 | damage × 32 (OS4 `FUN_01056c58` ~l.46400) |
 | Bullet/pellet hits by a player-owned shot on a non-player | min(8000, k/T), k = 400000 minigun / 200000 pistol / 800000 shotgun pellet (= 40 × the health-damage numerator), T = target toughness `model+0x48ec` (not a distance); × multiplier [C: 68k `FUN_000de0b6` ~119024–119125, ~119455–119500; OS4 `FUN_01056c58` ~46548] |
 | Irony bonus (phrase 2027): a player kills someone with the vehicle that belonged to the victim (`victim+0x340 == killer+0x498`) | 10000 |

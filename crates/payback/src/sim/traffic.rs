@@ -70,6 +70,10 @@ pub struct LightPhase {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrafficSet;
 
+/// The ambient spawner (and the light phase), first in the tick.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpawnSet;
+
 pub struct TrafficPlugin;
 
 impl Plugin for TrafficPlugin {
@@ -79,13 +83,26 @@ impl Plugin for TrafficPlugin {
             .add_systems(OnEnter(AppState::Playing), |mut t: ResMut<SpawnTurn>| {
                 *t = SpawnTurn::default();
             })
+            // Spawning first in the tick, before the contacts and every
+            // object's update (`amiga_levelloop` @ 10100f50: `AddVehicles`
+            // and `DoCollideStuff` before `CheckForCollisions` and
+            // `MainLoop`), so a new object moves in its first tick; the
+            // traffic AI after the vehicles' move, so it steers from this
+            // tick's position (AI-1).
             .add_systems(
                 FixedUpdate,
-                (advance_lights, spawn_ambient, drive_traffic)
-                    .chain()
-                    .in_set(TrafficSet)
-                    .after(super::people::PeopleThink)
-                    .before(super::driving::DrivingSet),
+                (
+                    (advance_lights, spawn_ambient)
+                        .chain()
+                        .in_set(SpawnSet)
+                        .after(crate::replay::ReplayInput)
+                        .before(super::contact::ContactSet)
+                        .before(super::people::PeopleThink),
+                    drive_traffic
+                        .after(super::driving::DrivingMoveSet)
+                        .before(super::driving::DrivingSet),
+                )
+                    .in_set(TrafficSet),
             );
     }
 }

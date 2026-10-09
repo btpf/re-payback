@@ -478,5 +478,7 @@ to 68k `0x11a358–0x11a643` (checked).
    (`0xefd60`) and once at level start (`0xec686`); respawn (`0x43c96`) does not reset it.
    Rect 10's trigger is still armed unless the player died inside rect 10, and then the
    layer count is already 2, so the result is consistent either way. CONFIRMED.
-5. The boat (1000) has no script role. Confirm it is just an escape option, and whether the
-   garage trigger 0x40 at floor 0 works from a boat.
+5. ~~Boat and garage~~ Resolved from the map data: boats only move on water (`vehicles.md`
+   §2.8) and the water body the boat (1000) starts in, 1488 squares connected to (47,12),
+   ends at x = 61; the garage square (107,3) is a flat floor cube 46 squares east. The boat
+   cannot reach trigger 0x40; it has no script role (CONFIRMED, data).

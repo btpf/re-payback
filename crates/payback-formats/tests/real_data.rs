@@ -148,6 +148,17 @@ fn routes_parse_and_connect() {
     }
 }
 
+/// The map editor's next-hop algorithm (`Route::calculate_routing`)
+/// reproduces the shipped table bit for bit.
+#[test]
+fn routes_recalculate_like_the_editor() {
+    let Some(dir) = data_dir() else { return };
+    let stored = payback_formats::Route::parse(&std::fs::read(dir.join("Maps/0.route")).unwrap()).unwrap();
+    let mut r = stored.clone();
+    r.calculate_routing();
+    assert_eq!(r, stored);
+}
+
 #[test]
 fn intro_video_decodes_and_loops() {
     let Some(dir) = data_dir() else { return };

@@ -19,13 +19,23 @@
 //! `PAYBACK_PERF_EXIT=<s>` quits after that many seconds. When
 //! `PAYBACK_PERF` is unset nothing is added except one relaxed atomic load
 //! per mixer block ([`audio_block`]).
+//!
+//! `--perf-check [s]` (default 30 s) is the automatic check
+//! (`tools/perf_check.sh`): the logger runs, the game quits after `s`
+//! seconds and the run fails (exit code 1, "perf-check: FAIL") when, after
+//! a 5 s warm-up, the frames exceed the thresholds ([`Thresholds`],
+//! overridable with `PAYBACK_PERF_MAX_P95`, `PAYBACK_PERF_MAX_FRAME`,
+//! `PAYBACK_PERF_MAX_MAIN` in ms): frame time p95 and max, and the
+//! main-app time (the CPU work of a frame, without waiting for the GPU or
+//! vsync) at p95. A per-frame rebuild like the traffic `City` re-adding
+//! (`5f0c78e`) shows in the main-app time.
 
 use bevy::app::RunFixedMainLoopSystems;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 static ON: AtomicBool = AtomicBool::new(false);
 
@@ -62,9 +72,38 @@ pub fn audio_block(frames: usize, rate: u32, lock_wait: std::time::Duration) {
 
 pub struct PerfPlugin;
 
+/// `--perf-check` limits (ms).
+#[derive(Clone, Copy, Debug)]
+struct Thresholds {
+    p95: f32,
+    max_frame: f32,
+    main_p95: f32,
+}
+
+impl Thresholds {
+    fn from_env() -> Thresholds {
+        let v = |k: &str, d: f32| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+        Thresholds {
+            p95: v("PAYBACK_PERF_MAX_P95", 25.0),
+            max_frame: v("PAYBACK_PERF_MAX_FRAME", 150.0),
+            main_p95: v("PAYBACK_PERF_MAX_MAIN", 16.0),
+        }
+    }
+}
+
+/// Seconds at the start of a `--perf-check` run that are not judged
+/// (start-up, level loading, shader compilation).
+const WARMUP: f64 = 5.0;
+
+fn perf_check() -> Option<f64> {
+    crate::arg("--perf-check")
+        .and_then(|s| s.parse().ok())
+        .or_else(|| crate::args().any(|a| a == "--perf-check").then_some(30.0))
+}
+
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
-        if std::env::var_os("PAYBACK_PERF").is_none() {
+        if std::env::var_os("PAYBACK_PERF").is_none() && perf_check().is_none() {
             return;
         }
         ON.store(true, Ordering::Relaxed);
@@ -90,6 +129,8 @@ impl Plugin for PerfPlugin {
 struct Stats {
     /// (frame ms, ticks run in it).
     frames: Vec<(f32, u32)>,
+    /// Main-app ms of each frame (`First`..`Last`).
+    main: Vec<f32>,
     /// ms between successive frames that ran a tick.
     cadence: Vec<f32>,
 }
@@ -105,6 +146,8 @@ struct Perf {
     last_tick_frame: Option<Instant>,
     window: Stats,
     all: Stats,
+    /// `--perf-check`: the frames after the warm-up.
+    judged: Stats,
     next_report: f64,
     exit_after: Option<f64>,
 }
@@ -122,8 +165,9 @@ impl Default for Perf {
             last_tick_frame: None,
             window: Stats::default(),
             all: Stats::default(),
+            judged: Stats::default(),
             next_report: 10.0,
-            exit_after: std::env::var("PAYBACK_PERF_EXIT").ok().and_then(|s| s.parse().ok()),
+            exit_after: perf_check().or_else(|| std::env::var("PAYBACK_PERF_EXIT").ok().and_then(|s| s.parse().ok())),
         }
     }
 }
@@ -159,8 +203,14 @@ fn frame_start(mut perf: ResMut<Perf>) {
                 (frame - main).max(0.0)
             );
         }
+        let main = spans.pre + spans.fixed + spans.upd;
         perf.window.frames.push((frame, spans.ticks));
         perf.all.frames.push((frame, spans.ticks));
+        perf.all.main.push(main);
+        if perf.begun.elapsed().as_secs_f64() > WARMUP {
+            perf.judged.frames.push((frame, spans.ticks));
+            perf.judged.main.push(main);
+        }
         if spans.ticks > 0 {
             if let Some(prev) = perf.last_tick_frame {
                 let gap = ms(prev, start);
@@ -208,7 +258,44 @@ fn frame_end(mut perf: ResMut<Perf>, mut commands: Commands, exiting: MessageRea
     }
     if quit {
         perf.exit_after = None;
-        commands.write_message(AppExit::Success);
+        let ok = perf_check().is_none() || judge(&perf.judged, Thresholds::from_env());
+        commands.write_message(if ok { AppExit::Success } else { AppExit::error() });
+    }
+}
+
+/// `--perf-check`: the judged frames against the limits; logs the verdict.
+fn judge(s: &Stats, t: Thresholds) -> bool {
+    let (Some(f), Some(m)) = (percentiles(s.frames.iter().map(|f| f.0).collect()), percentiles(s.main.clone())) else {
+        error!("perf-check: FAIL, no frames after the {WARMUP} s warm-up");
+        return false;
+    };
+    let mut fails = Vec::new();
+    if f[2] > t.p95 {
+        fails.push(format!("frame p95 {:.1} ms > {}", f[2], t.p95));
+    }
+    if f[4] > t.max_frame {
+        fails.push(format!("frame max {:.1} ms > {}", f[4], t.max_frame));
+    }
+    if m[2] > t.main_p95 {
+        fails.push(format!("main-app p95 {:.1} ms > {}", m[2], t.main_p95));
+    }
+    let summary = format!(
+        "{} frames, frame p95 {:.1} max {:.1} ms, main-app p50 {:.1} p95 {:.1} max {:.1} ms",
+        s.frames.len(),
+        f[2],
+        f[4],
+        m[1],
+        m[2],
+        m[4]
+    );
+    if fails.is_empty() {
+        info!("perf-check: PASS ({summary})");
+        println!("perf-check: PASS ({summary})");
+        true
+    } else {
+        error!("perf-check: FAIL: {} ({summary})", fails.join(", "));
+        println!("perf-check: FAIL: {} ({summary})", fails.join(", "));
+        false
     }
 }
 

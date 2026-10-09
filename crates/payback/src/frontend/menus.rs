@@ -195,7 +195,7 @@ impl Screen for MainMenu {
             // unless it is Disabled, see `crate::music`), refusing when
             // the film is missing.
             let film = cx.data.mac_path("Videos/payback_high_mpeg1.mpg").is_some()
-                || cx.data.root.join("Videos/intro.video").is_file();
+                || crate::vfs::is_file(cx.data.root.join("Videos/intro.video"));
             if !film {
                 cx.sound(Sfx::Refuse);
                 return Step::Stay;
@@ -216,7 +216,7 @@ impl Screen for MainMenu {
                 Step::Push(Box::new(LoadGame::new()))
             }
             2 => Step::Push(Box::new(ReplayList::new(cx))),
-            3 => Step::Push(Box::new(Credits::new(2200, 2, true, 0x2e, 100))),
+            3 => Step::Push(Box::new(Credits::new(2200, 2, true, 0x2e, 100).with_about())),
             4 => Step::Push(Box::new(CdSetup::new())),
             5 => Step::Push(Box::new(ControlSetup::new(cx))),
             6 => Step::Push(Box::new(LanguageChooser::new(cx))),
@@ -370,7 +370,7 @@ pub(crate) fn save_last_replay(cx: &mut Ctx, name: &str) -> Step {
         return Step::Stay;
     };
     let dir = crate::replay::saves_dir();
-    let res = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&file), r.write()));
+    let res = super::progress::write_file(&dir.join(&file), &r.write());
     match res {
         Ok(()) => Step::Push(Box::new(Message::new(cx.g(2117)))),
         Err(e) => {
@@ -742,7 +742,7 @@ impl Screen for PauseMenu {
 
     /// `options.obj` at (0, -2000), z 10000 (`FUN_0101a7dc`).
     fn back_model(&self) -> Option<ModelView> {
-        Some(ModelView { path: "options/options.obj", pos: [0, -2000, 10000], rot: [self.back, 0, 0] })
+        Some(ModelView { path: "options/options.obj", pos: [0, -2000, 10000], rot: [self.back, 0, 0], paint: None })
     }
 
     fn model(&self) -> Option<ModelView> {

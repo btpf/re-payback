@@ -40,6 +40,8 @@ pub struct Input {
     /// redefine prompt).
     pub keys: Vec<KeyCode>,
     pub pad: Vec<GamepadButton>,
+    /// Gamepad axis ends newly pushed (`bindings::PadAxes`).
+    pub pad_axes: Vec<super::bindings::PadInput>,
 }
 
 /// Menu sounds (Amiga `FUN_010053c4(id, period)`, Mac `PlaySound__Fii`
@@ -159,6 +161,8 @@ pub struct ModelView {
     pub path: &'static str,
     pub pos: [i32; 3],
     pub rot: [i32; 3],
+    /// Paint colour of a vehicle model (`objects::PAINTS` index).
+    pub paint: Option<u8>,
 }
 
 /// The spinning option object of the main/game/pause menus.
@@ -179,6 +183,7 @@ impl OptionObj {
                 path,
                 pos: [0, y, z],
                 rot: [0; 3],
+                paint: None,
             },
             dir: 0,
             next: path,
@@ -240,6 +245,7 @@ impl Bobbing {
                 path,
                 pos: [0, 600, 6000],
                 rot: [0; 3],
+                paint: None,
             },
             v: 100,
         }
@@ -304,9 +310,14 @@ impl Ui<'_> {
         self.front.text(font, s, x, y, 7, Blend::Plain);
     }
 
-    /// Dimmed small-font text (`FUN_0100cc78`: each glyph pixel through
-    /// the 50 % blend with colour 0, i.e. half brightness), centred. Used
-    /// for an option that cannot be changed.
+    /// Dimmed small-font text, centred. Used for an option that cannot be
+    /// changed. The Mac's `DisplayTextAlpha3__FPciiii` @ 1008ee50 →
+    /// `DrawIconAlpha3__FP4Iconii` @ 10086480: each glyph texel goes
+    /// through Alpha table 4 with colour 0 (half brightness; colour 8, the
+    /// second black, becomes 0) and is then blended onto the screen with
+    /// the current table (lighten), so the background shows through the
+    /// dark parts. The Amiga's `FUN_0100cc78` wrote the halved colour
+    /// opaquely.
     pub fn centred_dim(&mut self, s: &str, y: i32, colour: u8) {
         let x = self.cx() - 7 * text_len(s) / 2;
         self.text_dim(s, x, y, colour);
@@ -331,7 +342,7 @@ impl Ui<'_> {
                         let p = g.px[iy * g.w + ix] as usize;
                         if p != 0 {
                             let rgb = [pal[p * 3] / 2, pal[p * 3 + 1] / 2, pal[p * 3 + 2] / 2];
-                            self.front.put_rgb(x + ix as i32, y + iy as i32, rgb);
+                            self.front.put_lighten_rgb(x + ix as i32, y + iy as i32, rgb);
                         }
                     }
                 }

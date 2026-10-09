@@ -15,8 +15,13 @@
 @group(0) @binding(3) var palette: texture_2d<f32>;
 // Alpha.256 table 4: x = current index, y = previous index.
 @group(0) @binding(4) var average: texture_2d<f32>;
-// x = flash (0..1), y = motion blur, z = snap.
-@group(0) @binding(5) var<uniform> params: vec4<f32>;
+struct Params {
+    // x = flash (0..1), y = motion blur, z = snap.
+    fx: vec4<f32>,
+    // xy = the view's bottom-right corner (window pixels, exclusive).
+    view_end: vec4<f32>,
+};
+@group(0) @binding(5) var<uniform> uparams: Params;
 
 struct Out {
     @location(0) colour: vec4<f32>,
@@ -45,6 +50,7 @@ fn pal(i: i32) -> vec3<f32> {
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> Out {
+    let params = uparams.fx;
     let p = vec2<i32>(floor(in.position.xy));
     let src = textureLoad(frame, p, 0);
     let enc = encode(src.rgb);
@@ -56,6 +62,12 @@ fn fragment(in: FullscreenVertexOutput) -> Out {
         if blur {
             let prev = byte(textureLoad(prev_index, p, 0).r);
             shown = byte(textureLoad(average, vec2<i32>(cur, prev), 0).r);
+            // `ScreenAlpha` @ 10154eb0 stops 32 pixels short of the end of
+            // the buffer: those pixels keep the display buffer's colour 0.
+            let end = vec2<i32>(uparams.view_end.xy);
+            if p.y == end.y - 1 && p.x >= end.x - 32 {
+                shown = 0;
+            }
         }
         rgb = pal(shown);
     } else if blur {

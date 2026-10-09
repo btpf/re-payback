@@ -27,8 +27,8 @@ use super::ui::{Ctx, Sfx};
 use bevy::{
     prelude::*,
     window::{
-        Monitor, MonitorSelection, OnMonitor, PrimaryMonitor, PrimaryWindow, VideoMode, VideoModeSelection,
-        WindowMode, WindowResolution,
+        Monitor, MonitorSelection, OnMonitor, PresentMode, PrimaryMonitor, PrimaryWindow, VideoMode,
+        VideoModeSelection, WindowMode, WindowResolution,
     },
 };
 
@@ -194,6 +194,18 @@ pub enum Item {
     /// "Unlock all levels: " on / off (`Settings::unlock_all`, port-added;
     /// no phrase): every story level and city selectable.
     UnlockAll,
+    /// "Smooth motion: " on / off (`Settings::smooth_motion`, port-added;
+    /// `crate::frame`).
+    SmoothMotion,
+    /// "Vsync: " on / off (`Settings::vsync`, port-added).
+    Vsync,
+    /// "Frame limit: " off / 30 / 60 / 120 / 144 (`Settings::frame_limit`,
+    /// port-added; 30 is the original's in-game rate).
+    FrameLimit,
+    /// "Zoom-in map: " on / off (`Settings::zoom_in_map`): the software
+    /// renderer's level-start zoom (`hud::zoom`); dimmed under hardware,
+    /// which skips it as the original does.
+    ZoomInMap,
 }
 
 /// The pause menu's graphics sub-items (item 5), as in the original
@@ -207,9 +219,12 @@ pub const MORE: &str = "More graphics options";
 /// The front end's Graphics options screen: the Mac setup dialog's
 /// controls in its order (display, then rendering), then the HUD and
 /// framing, then the Mac/Amiga content choices, then "Unlock all levels".
-pub const SETUP_ITEMS: [Item; 18] = [
+pub const SETUP_ITEMS: [Item; 22] = [
     Item::Resolution,
     Item::WindowMode,
+    Item::Vsync,
+    Item::FrameLimit,
+    Item::SmoothMotion,
     Item::Hardware,
     Item::Rotating,
     Item::Minimap3d,
@@ -218,6 +233,7 @@ pub const SETUP_ITEMS: [Item; 18] = [
     Item::Fx,
     Item::HiresHud,
     Item::Aspect,
+    Item::ZoomInMap,
     Item::Textures,
     Item::Blood,
     Item::Scenery,
@@ -253,6 +269,13 @@ impl Item {
             Item::Aspect => format!("Aspect: {}", if s.original_aspect { "Original" } else { "Free" }),
             Item::Gas => format!("German gas: {}", on_off(s.variants.gas)),
             Item::UnlockAll => format!("Unlock all levels: {}", on_off(s.unlock_all)),
+            Item::SmoothMotion => format!("Smooth motion: {}", on_off(s.smooth_motion)),
+            Item::Vsync => format!("Vsync: {}", on_off(s.vsync)),
+            Item::ZoomInMap => format!("Zoom-in map: {}", on_off(s.zoom_in_map && !s.hardware)),
+            Item::FrameLimit => match s.frame_limit {
+                0 => format!("Frame limit: {}", on_off(false)),
+                n => format!("Frame limit: {n} fps"),
+            },
             _ => {
                 // A Mac choice reads "Amiga" when the Mac data is missing.
                 let mac = self.variant(s).unwrap_or(false) && !self.needs_mac(cx.data);
@@ -344,6 +367,10 @@ impl Item {
             "scenery" => Item::Scenery,
             "gas" => Item::Gas,
             "unlock_all" => Item::UnlockAll,
+            "smooth_motion" | "smooth" => Item::SmoothMotion,
+            "vsync" => Item::Vsync,
+            "zoom_in_map" | "zoom" => Item::ZoomInMap,
+            "frame_limit" => Item::FrameLimit,
             _ => return None,
         })
     }
@@ -354,8 +381,12 @@ impl Item {
     pub fn dimmed(self, s: &Settings) -> bool {
         match self {
             // Motion blur too (`FUN_0101a7dc` case 3 refuses it).
-            Item::Gouraud | Item::MotionBlur => s.hardware,
-            Item::Resolution => s.window_mode == WindowChoice::Borderless,
+            Item::Gouraud | Item::MotionBlur | Item::ZoomInMap => s.hardware,
+            // Web build: the canvas fills the page; the browser owns the
+            // size, the mode and vsync.
+            #[cfg(target_arch = "wasm32")]
+            Item::WindowMode | Item::Vsync => true,
+            Item::Resolution => cfg!(target_arch = "wasm32") || s.window_mode == WindowChoice::Borderless,
             // Forced on by the rotating view (`Settings::minimap_3d_on`).
             Item::Minimap3d => s.rotating_view,
             _ => false,
@@ -425,6 +456,24 @@ impl Item {
             }
             Item::UnlockAll => {
                 s.unlock_all = !s.unlock_all;
+                true
+            }
+            Item::SmoothMotion => {
+                s.smooth_motion = !s.smooth_motion;
+                true
+            }
+            Item::Vsync => {
+                s.vsync = !s.vsync;
+                true
+            }
+            Item::ZoomInMap => {
+                s.zoom_in_map = !s.zoom_in_map;
+                true
+            }
+            Item::FrameLimit => {
+                let l = &crate::frame::FRAME_LIMITS;
+                let i = l.iter().position(|&n| n == s.frame_limit).unwrap_or(0) as i32;
+                s.frame_limit = l[(i + d).rem_euclid(l.len() as i32) as usize];
                 true
             }
             _ => match self.variant_mut(s) {
@@ -607,6 +656,7 @@ impl super::ui::Screen for GraphicsSetup {
             path: "options/options.obj",
             pos: [0, -2000, 10000],
             rot: [self.back, 0, 0],
+            paint: None,
         })
     }
 
@@ -620,29 +670,42 @@ impl super::ui::Screen for GraphicsSetup {
 /// The primary window at start-up, from the saved settings (or the debug
 /// flags). Sizes are physical; the window is created assuming a scale
 /// factor of 1 and [`apply`] corrects it once the monitor is known.
-/// Exclusive fullscreen starts in the monitor's current mode and switches
-/// to the saved video mode when the monitors are listed.
+/// Exclusive fullscreen needs the monitor's video modes, which are only
+/// listed once the window exists: the window is created hidden and
+/// windowed, and [`apply`] shows it directly in the chosen video mode (the
+/// Mac opens in the chosen screen mode, `UDrawSprocket::GetDSpContext`
+/// @ 10157090), with no switch through the desktop mode.
 pub fn startup_window(title: &str) -> Window {
     let s = Settings::load();
     let (w, h) = forced_size().or(s.resolution).unwrap_or(DEFAULT_SIZE);
-    let mode = match forced_mode().unwrap_or(s.window_mode) {
-        WindowChoice::Windowed => WindowMode::Windowed,
-        WindowChoice::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-        WindowChoice::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current),
+    let (mode, visible) = match forced_mode().unwrap_or(s.window_mode) {
+        WindowChoice::Windowed => (WindowMode::Windowed, true),
+        WindowChoice::Borderless => (WindowMode::BorderlessFullscreen(MonitorSelection::Current), true),
+        WindowChoice::Fullscreen => (WindowMode::Windowed, false),
     };
     Window {
         title: title.into(),
         resolution: WindowResolution::new(w, h),
         mode,
+        visible,
+        present_mode: if s.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync },
         ..default()
     }
 }
+
+/// Frames to wait for the monitor list before showing a hidden fullscreen
+/// window in the desktop mode anyway.
+const MONITOR_WAIT: u32 = 60;
 
 pub struct DisplayPlugin;
 
 impl Plugin for DisplayPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<Display>().add_systems(PreUpdate, (scan, apply).chain());
+        // Web build: the page sizes the canvas (`web::adapt_window`).
+        #[cfg(target_arch = "wasm32")]
+        app.init_resource::<Display>().add_systems(PreUpdate, scan);
     }
 }
 
@@ -675,6 +738,7 @@ fn scan(
 
 /// What was last applied to the window.
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct Applied {
     size: Option<(u32, u32)>,
     mode: WindowChoice,
@@ -682,12 +746,14 @@ struct Applied {
 
 /// Bring the window in line with the settings when they change (and once
 /// at start, when the monitor is known).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn apply(
     settings: Option<Res<Settings>>,
     mut windows: Query<(&mut Window, Option<&OnMonitor>), With<PrimaryWindow>>,
     monitors: Query<&Monitor>,
     primary: Query<&Monitor, With<PrimaryMonitor>>,
     mut last: Local<Option<Applied>>,
+    mut waited: Local<u32>,
 ) {
     let Some(settings) = settings else {
         return;
@@ -704,6 +770,12 @@ fn apply(
     };
     let Some(monitor) = on.and_then(|m| monitors.get(m.0).ok()).or_else(|| primary.single().ok()) else {
         // Not listed yet (first frames).
+        *waited += 1;
+        if !window.visible && *waited > MONITOR_WAIT {
+            warn!("no monitor listed; fullscreen in the desktop mode");
+            window.mode = WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current);
+            window.visible = true;
+        }
         return;
     };
     *last = Some(want);
@@ -724,6 +796,9 @@ fn apply(
     if window.mode != mode {
         window.mode = mode;
     }
+    if !window.visible {
+        window.visible = true;
+    }
     if want.mode == WindowChoice::Windowed {
         if let Some((w, h)) = want.size {
             if (window.resolution.physical_width(), window.resolution.physical_height()) != (w, h) {
@@ -735,6 +810,7 @@ fn apply(
 
 /// The monitor's video mode of that size with the highest refresh rate
 /// and bit depth.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn video_mode(monitor: &Monitor, (w, h): (u32, u32)) -> Option<VideoMode> {
     monitor
         .video_modes

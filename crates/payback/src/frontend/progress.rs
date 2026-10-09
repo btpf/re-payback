@@ -4,8 +4,10 @@
 //! Save slots keep the original 152-byte big-endian layout
 //! (`FUN_0101182c` load, `FUN_01011a70` save; the Mac's `ReadSaveGame` @
 //! 1008b560 / `WriteSaveGame` @ 1008b7e0 write the same bytes) as
-//! `Saves/PaybackSlot<n>.save`, n = 1..14. `Saves` is relative to the
-//! working directory, or the directory in `PAYBACK_SAVES`.
+//! `<saves>/PaybackSlot<n>.save`, n = 1..14, where `<saves>` is
+//! [`saves_dir`]: `PAYBACK_SAVES`, else the per-user data directory
+//! (`%APPDATA%\Payback` on Windows; an old `./Saves` is copied there on
+//! first use).
 //!
 //! A slot holds only the description, the player's name, and the best time
 //! and cup of each of the six levels: no money, score, current level or
@@ -23,6 +25,11 @@
 //! | `volume` | sound volume 0..100 |
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
+//! | `smooth_motion` | 0 / 1: render-only interpolation between game ticks (port-added, default 1; `frame.rs`) |
+//! | `vsync` | 0 / 1: present with vsync (port-added, default 1) |
+//! | `frame_limit` | frames a second, 0 = none (port-added; 30, 60, 120, 144) |
+//! | `zoom_in_map` | 0 / 1: the level-start zoom-in map of software rendering (`hud::zoom`, default 1) |
+//! | `view_size` | 3-D view size /256, 176..256 in steps of 16 (config field 12, `DAT_0114c310`; '-' / '=' in game, software rendering) |
 //! | `minimap_3d` | 0 / 1: the rotating view's tilted minimap, also without the rotating view (port-added, default 0; forced on by the rotating view) |
 //! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
 //! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
@@ -200,36 +207,121 @@ pub fn with_saves_dir<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// `Saves` in the working directory, or `PAYBACK_SAVES`.
+/// Where saves, settings, scores and replays live: `PAYBACK_SAVES` if
+/// set, else the per-user data directory ([`user_data_dir`]), else
+/// `Saves` in the working directory. The original kept them next to the
+/// game (`PROGDIR:Saves`, `S:Payback.config`); a per-user directory works
+/// from any working directory and in read-only install folders.
 pub fn saves_dir() -> PathBuf {
     #[cfg(test)]
     if let Some(d) = TEST_SAVES.with(|t| t.borrow().clone()) {
         return d;
     }
-    std::env::var_os("PAYBACK_SAVES")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| PathBuf::from("Saves"), PathBuf::from)
+    // Web build: the saves live in localStorage (`crate::vfs`).
+    #[cfg(target_arch = "wasm32")]
+    return PathBuf::from(crate::vfs::SAVES);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(d) = std::env::var_os("PAYBACK_SAVES").filter(|v| !v.is_empty()) {
+        return PathBuf::from(d);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| match user_data_dir() {
+            Some(d) => {
+                migrate_legacy_saves(&d);
+                d
+            }
+            None => PathBuf::from("Saves"),
+        })
+        .clone()
+    }
+}
+
+/// The per-user data directory: `%APPDATA%\Payback` on Windows,
+/// `~/Library/Application Support/Payback` on macOS,
+/// `$XDG_DATA_HOME/payback` (default `~/.local/share/payback`) elsewhere.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn user_data_dir() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        env("APPDATA").map(|d| d.join("Payback"))
+    } else if cfg!(target_os = "macos") {
+        env("HOME").map(|h| h.join("Library/Application Support/Payback"))
+    } else {
+        env("XDG_DATA_HOME")
+            .or_else(|| env("HOME").map(|h| h.join(".local/share")))
+            .map(|d| d.join("payback"))
+    }
+}
+
+/// First run with the per-user directory: copy what an older version saved
+/// in `Saves` (the working directory's, else the one next to the
+/// executable) into it, unless it already holds something. The old files
+/// are left in place.
+#[cfg(not(target_arch = "wasm32"))]
+fn migrate_legacy_saves(to: &std::path::Path) {
+    if std::fs::read_dir(to).is_ok_and(|mut d| d.next().is_some()) {
+        return;
+    }
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("Saves")));
+    let Some(from) = [Some(PathBuf::from("Saves")), exe_dir].into_iter().flatten().find(|d| d.is_dir()) else {
+        return;
+    };
+    match copy_tree(&from, to) {
+        Ok(n) => info!("saves: copied {n} files from {} to {}", from.display(), to.display()),
+        Err(e) => warn!("saves: copying {} to {}: {e}", from.display(), to.display()),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(to)?;
+    let mut n = 0;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            n += copy_tree(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 fn slot_path(slot: usize) -> PathBuf {
     saves_dir().join(format!("PaybackSlot{}.save", slot + 1))
 }
 
-/// Write through a temporary file and a rename, so a crash never leaves
-/// a half-written save behind.
+/// Write a save file (slot, settings, scores, replay, ...) through a
+/// temporary file and a rename, so a crash never leaves a half-written save
+/// behind. All save IO goes through here and [`read_file`]: files natively,
+/// localStorage in the web build (`crate::vfs`).
 pub fn write_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        crate::vfs::create_dir_all(dir)?;
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    #[cfg(target_arch = "wasm32")]
+    return crate::vfs::write(path, bytes);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        crate::vfs::write(&tmp, bytes)?;
+        crate::vfs::rename(&tmp, path)
+    }
+}
+
+/// Read a save file written by [`write_file`].
+pub fn read_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    crate::vfs::read(path)
 }
 
 /// Load slot 0..13 (`FUN_0101182c`); `None` = missing or too short.
 pub fn load_slot(slot: usize) -> Option<(String, Profile)> {
-    std::fs::read(slot_path(slot)).ok().and_then(|b| Profile::from_bytes(&b))
+    read_file(&slot_path(slot)).ok().and_then(|b| Profile::from_bytes(&b))
 }
 
 /// Write slot 0..13 (`FUN_01011a70`), replacing what was there.
@@ -346,6 +438,20 @@ pub struct Settings {
     /// Fixed original framing (HFOV ~64 deg, the 320x256 look on 4:3);
     /// false = widen with the window aspect.
     pub original_aspect: bool,
+    /// "Smooth motion" (port-added, default on): objects and cameras drawn
+    /// between the last two game ticks (`crate::frame`); off = the
+    /// original's one new picture per tick.
+    pub smooth_motion: bool,
+    /// Present with vsync (port-added; the Mac requests none).
+    pub vsync: bool,
+    /// Frame limit in frames a second, 0 = none (`crate::frame::FRAME_LIMITS`).
+    pub frame_limit: u16,
+    /// "Zoom-in map" (port option, default on): the level-start zoom of
+    /// software rendering (`hud::zoom`).
+    pub zoom_in_map: bool,
+    /// 3-D view size in 1/256 of the window, 0xB0..0x100 (config field 12,
+    /// `DAT_0114c310`; '-' and '=' in game, `camera::view_size`).
+    pub view_size: u16,
 }
 
 /// Mac-or-Amiga content choices (true = Mac; a Mac choice only applies when
@@ -437,6 +543,11 @@ impl Default for Settings {
             hires_hud: true,
             unlock_all: false,
             original_aspect: true,
+            smooth_motion: true,
+            vsync: true,
+            frame_limit: 0,
+            view_size: 0x100,
+            zoom_in_map: true,
         }
     }
 }
@@ -448,7 +559,7 @@ impl Settings {
 
     pub fn load() -> Settings {
         let mut s = Settings::default();
-        let Ok(text) = std::fs::read_to_string(Self::path()) else {
+        let Ok(text) = read_file(&Self::path()).map(|b| String::from_utf8_lossy(&b).into_owned()) else {
             return s;
         };
         for line in text.lines() {
@@ -480,6 +591,17 @@ impl Settings {
                 "hires_hud" => s.hires_hud = v == "1",
                 "original_aspect" => s.original_aspect = v == "1",
                 "unlock_all" => s.unlock_all = v == "1",
+                "smooth_motion" => s.smooth_motion = v == "1",
+                "zoom_in_map" => s.zoom_in_map = v == "1",
+                "view_size" => {
+                    let n = v.parse::<u16>().ok().map(|n| n.clamp(0xB0, 0x100) & !0xF);
+                    s.view_size = n.unwrap_or(s.view_size);
+                }
+                "vsync" => s.vsync = v == "1",
+                "frame_limit" => {
+                    let n = v.parse::<u16>().ok().filter(|n| crate::frame::FRAME_LIMITS.contains(n));
+                    s.frame_limit = n.unwrap_or(s.frame_limit);
+                }
                 _ => {
                     if let Some((_, f)) = s.variants.fields().into_iter().find(|(n, _)| *n == k) {
                         *f = v == "1";
@@ -539,6 +661,11 @@ impl Settings {
         t += &format!("hires_hud = {}\n", b(self.hires_hud));
         t += &format!("original_aspect = {}\n", b(self.original_aspect));
         t += &format!("unlock_all = {}\n", b(self.unlock_all));
+        t += &format!("smooth_motion = {}\n", b(self.smooth_motion));
+        t += &format!("vsync = {}\n", b(self.vsync));
+        t += &format!("frame_limit = {}\n", self.frame_limit);
+        t += &format!("view_size = {}\n", self.view_size);
+        t += &format!("zoom_in_map = {}\n", b(self.zoom_in_map));
         for (k, v) in self.variants.clone().fields() {
             t += &format!("{k} = {}\n", b(*v));
         }
@@ -704,6 +831,9 @@ mod tests {
             s.required_kills = 12;
             s.variants.textures = false;
             s.resolution = Some((800, 600));
+            s.smooth_motion = false;
+            s.vsync = false;
+            s.frame_limit = 60;
             s.save();
             let text = std::fs::read_to_string(dir.join("Payback.cfg")).unwrap();
             assert!(text.contains("unlock_all = 1\n"));

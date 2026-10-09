@@ -59,7 +59,86 @@ pub const PREV_WEAPON: usize = 9;
 pub const REPEAT_MESSAGE: usize = 10;
 
 pub type KeyTable = [Option<KeyCode>; 11];
-pub type PadTable = [Option<GamepadButton>; 11];
+pub type PadTable = [Option<PadInput>; 11];
+
+/// A gamepad control a binding can use: a button, or an axis pushed to
+/// one end (`positive`). The Mac binds any HID element, axes included, and
+/// an axis counts as pressed near its recorded extreme (`IsHIDControlPressed`
+/// @ 10158300: within ±50 of it on the scaled range, about 60 % of the way
+/// out; [`AXIS_PRESS`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadInput {
+    Button(GamepadButton),
+    Axis(GamepadAxis, bool),
+}
+
+/// How far out an axis counts as pressed.
+pub const AXIS_PRESS: f32 = 0.6;
+
+/// The axes a binding can use, in bit order for [`PadAxes`].
+pub const AXES: [GamepadAxis; 6] = [
+    GamepadAxis::LeftStickX,
+    GamepadAxis::LeftStickY,
+    GamepadAxis::RightStickX,
+    GamepadAxis::RightStickY,
+    GamepadAxis::LeftZ,
+    GamepadAxis::RightZ,
+];
+
+/// Bit of an axis end in [`PadAxes`].
+fn axis_bit(axis: GamepadAxis, positive: bool) -> Option<u16> {
+    AXES.iter().position(|&a| a == axis).map(|i| 1 << (2 * i + positive as usize))
+}
+
+/// Every gamepad's axis ends pressed this frame and the frame before, so
+/// that axis bindings have presses (edges) like buttons.
+#[derive(Resource, Default)]
+pub struct PadAxes(bevy::platform::collections::HashMap<Entity, (u16, u16)>);
+
+impl PadAxes {
+    /// The axis ends newly pushed on gamepad `e` this frame.
+    pub fn just_pressed(&self, e: Entity) -> Vec<PadInput> {
+        let (prev, now) = self.0.get(&e).copied().unwrap_or_default();
+        let new = now & !prev;
+        AXES.iter()
+            .flat_map(|&a| [(a, false), (a, true)])
+            .filter(|&(a, p)| axis_bit(a, p).is_some_and(|b| new & b != 0))
+            .map(|(a, p)| PadInput::Axis(a, p))
+            .collect()
+    }
+
+    /// Gamepad `e` with its axis edges.
+    pub fn state<'a>(&self, e: Entity, g: &'a Gamepad) -> PadState<'a> {
+        let (prev, now) = self.0.get(&e).copied().unwrap_or_default();
+        PadState { g, prev, now }
+    }
+}
+
+/// Update [`PadAxes`] (`PreUpdate`, after the gamepad input).
+pub fn track_pad_axes(mut axes: ResMut<PadAxes>, pads: Query<(Entity, &Gamepad)>) {
+    axes.0.retain(|e, _| pads.contains(*e));
+    for (e, g) in &pads {
+        let mut now = 0;
+        for (i, &a) in AXES.iter().enumerate() {
+            let v = g.get(a).unwrap_or(0.0);
+            if v <= -AXIS_PRESS {
+                now |= 1 << (2 * i);
+            }
+            if v >= AXIS_PRESS {
+                now |= 1 << (2 * i + 1);
+            }
+        }
+        let entry = axes.0.entry(e).or_default();
+        *entry = (entry.1, now);
+    }
+}
+
+/// A gamepad as the bindings read it ([`PadAxes::state`]).
+pub struct PadState<'a> {
+    pub g: &'a Gamepad,
+    prev: u16,
+    now: u16,
+}
 
 /// Columns of the control setup screen.
 pub const COLUMNS: usize = 9;
@@ -67,36 +146,51 @@ pub const COLUMNS: usize = 9;
 /// First multiplayer key-set column.
 pub const KEY_SET_COLUMN: usize = 5;
 
-/// Single-player keyboard: the keys `read_keyboard` has always read.
+/// Single-player keyboard: the Mac default map (`ClearPreference`
+/// @ 100508c0: 7E up, 7D down, 7B left, 7C right, 31 Space, 7F unbound,
+/// 24 Return, 06 Z, 72 Help, 75 Forward-Delete, 2E M; the Amiga map key for
+/// key, except that the Amiga's shoot-alt slot 0x00 fired on the backtick
+/// key). Help is Insert on PC keyboards, Forward-Delete is Delete.
 const SP_KEYS: KeyTable = [
     Some(KeyCode::ArrowUp),
     Some(KeyCode::ArrowDown),
     Some(KeyCode::ArrowLeft),
     Some(KeyCode::ArrowRight),
     Some(KeyCode::Space),
-    Some(KeyCode::ControlLeft),
+    None,
     Some(KeyCode::Enter),
-    Some(KeyCode::ShiftLeft),
-    None,
-    None,
-    // Repeat message: M, the original's default (raw key 0x37).
+    Some(KeyCode::KeyZ),
+    Some(KeyCode::Insert),
+    Some(KeyCode::Delete),
     Some(KeyCode::KeyM),
 ];
 
+/// Fixed next-weapon keys besides the binding (Mac `UpdateInputStatus`
+/// @ 100f8490 key table `0x1018f760`: Help, F3, F10, keypad +), single
+/// player only (the multiplayer key sets use the keypad).
+pub const NEXT_WEAPON_ALIASES: [KeyCode; 3] = [KeyCode::F3, KeyCode::F10, KeyCode::NumpadAdd];
+
+/// Fixed previous-weapon keys (Forward-Delete, F2, F9, keypad −).
+pub const PREV_WEAPON_ALIASES: [KeyCode; 4] = [KeyCode::Delete, KeyCode::F2, KeyCode::F9, KeyCode::NumpadSubtract];
+
 /// A gamepad: up/down/left/right also come from the stick and d-pad.
-const PAD: PadTable = [
-    Some(GamepadButton::RightTrigger2),
-    Some(GamepadButton::LeftTrigger2),
-    Some(GamepadButton::DPadLeft),
-    Some(GamepadButton::DPadRight),
-    Some(GamepadButton::South),
-    None,
-    Some(GamepadButton::North),
-    Some(GamepadButton::East),
-    Some(GamepadButton::RightTrigger),
-    Some(GamepadButton::LeftTrigger),
-    None,
-];
+const PAD: PadTable = {
+    use GamepadButton::*;
+    use PadInput::Button as B;
+    [
+        Some(B(RightTrigger2)),
+        Some(B(LeftTrigger2)),
+        Some(B(DPadLeft)),
+        Some(B(DPadRight)),
+        Some(B(South)),
+        None,
+        Some(B(North)),
+        Some(B(East)),
+        Some(B(RightTrigger)),
+        Some(B(LeftTrigger)),
+        None,
+    ]
+};
 
 /// Multiplayer keyboard key sets, so that up to four players can share a
 /// keyboard.
@@ -216,7 +310,7 @@ impl Controls {
         }
     }
 
-    pub fn set_pad(&mut self, c: usize, action: usize, b: Option<GamepadButton>) {
+    pub fn set_pad(&mut self, c: usize, action: usize, b: Option<PadInput>) {
         if (1..KEY_SET_COLUMN).contains(&c) {
             self.pads[c - 1][action] = b;
         }
@@ -275,6 +369,115 @@ impl Controls {
     }
 }
 
+/// One gamepad number's device (see [`PadSlots`]).
+#[derive(Clone, Debug, PartialEq)]
+struct PadSlot {
+    entity: Entity,
+    /// Name, USB vendor and product id, to recognise the device when it
+    /// comes back as another entity.
+    id: (String, Option<u16>, Option<u16>),
+    connected: bool,
+}
+
+/// Gamepad numbers 1..4 (`Device::Joystick(0..3)`, the control setup's
+/// pad columns), kept per device: the Mac's HID devices map to fixed
+/// joystick numbers (`UInputSprocket`, `HIDBuildDeviceList`), so a pad
+/// that is unplugged keeps its number free until it (or the same model)
+/// comes back, instead of the others moving up. A new pad takes the first
+/// number never used, else the first one whose pad is gone.
+#[derive(Resource, Default, Debug)]
+pub struct PadSlots([Option<PadSlot>; 4]);
+
+impl PadSlots {
+    /// Gamepad number `n`'s entity, while it is connected.
+    pub fn get(&self, n: usize) -> Option<Entity> {
+        self.0.get(n)?.as_ref().filter(|s| s.connected).map(|s| s.entity)
+    }
+
+    /// The lowest-numbered connected gamepad (single player).
+    pub fn first(&self) -> Option<Entity> {
+        (0..4).find_map(|n| self.get(n))
+    }
+
+    /// Number the connected pads (`(entity, name, vendor, product)`, in
+    /// spawn order, the order Bevy saw them connect).
+    fn update(&mut self, mut pads: Vec<(Entity, (String, Option<u16>, Option<u16>))>) {
+        pads.sort_by_key(|p| p.0.index_u32());
+        for s in self.0.iter_mut().flatten() {
+            s.connected = pads.iter().any(|p| p.0 == s.entity);
+        }
+        for (e, id) in pads {
+            if self.0.iter().flatten().any(|s| s.entity == e) {
+                continue;
+            }
+            let back = self.0.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected && s.id == id));
+            let fresh = || self.0.iter().position(Option::is_none);
+            let stale = || self.0.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected));
+            if let Some(n) = back.or_else(fresh).or_else(stale) {
+                self.0[n] = Some(PadSlot { entity: e, id, connected: true });
+            }
+        }
+    }
+}
+
+/// Keep [`PadSlots`] in step with the connected gamepads.
+pub fn assign_pads(mut slots: ResMut<PadSlots>, pads: Query<(Entity, &Gamepad, Option<&Name>)>) {
+    let list: Vec<_> = pads
+        .iter()
+        .map(|(e, g, n)| (e, (n.map_or_else(String::new, |n| n.as_str().to_string()), g.vendor_id(), g.product_id())))
+        .collect();
+    let changed = list.len() != slots.0.iter().flatten().filter(|s| s.connected).count()
+        || list.iter().any(|(e, _)| !slots.0.iter().flatten().any(|s| s.connected && s.entity == *e));
+    if changed {
+        slots.update(list);
+    }
+}
+
+/// What the character keys print on this keyboard layout, learnt from
+/// the key presses (the Mac named keys through the system layout,
+/// `ALCharCodeFromKeyCodeAndMap`; Bevy's `KeyCode` is the physical US
+/// position, so on AZERTY the key `KeyCode::KeyQ` prints "A").
+static KEY_LABELS: std::sync::Mutex<Vec<(KeyCode, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The layout's label of a character key, once it has been pressed.
+pub fn key_label(k: KeyCode) -> Option<String> {
+    KEY_LABELS.lock().ok()?.iter().find(|(c, _)| *c == k).map(|(_, l)| l.clone())
+}
+
+/// Learn [`key_label`]s from the keyboard input (`PreUpdate`).
+pub fn learn_key_labels(mut events: MessageReader<bevy::input::keyboard::KeyboardInput>) {
+    use bevy::input::keyboard::Key;
+    for ev in events.read() {
+        let Key::Character(s) = &ev.logical_key else { continue };
+        let mut chars = s.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else { continue };
+        if c.is_whitespace() || c.is_control() || !character_key(ev.key_code) {
+            continue;
+        }
+        let label: String = c.to_uppercase().collect();
+        if let Ok(mut labels) = KEY_LABELS.lock() {
+            match labels.iter_mut().find(|(k, _)| *k == ev.key_code) {
+                Some((_, l)) if *l != label => *l = label,
+                Some(_) => {}
+                None => labels.push((ev.key_code, label)),
+            }
+        }
+    }
+}
+
+/// Keys whose label depends on the layout (letters, digits, punctuation).
+fn character_key(k: KeyCode) -> bool {
+    use KeyCode::*;
+    let id = key_id(k);
+    id.starts_with("Key")
+        || id.starts_with("Digit")
+        || matches!(
+            k,
+            Minus | Equal | BracketLeft | BracketRight | Backslash | Semicolon | Quote | Backquote | Comma | Period
+                | Slash | IntlBackslash
+        )
+}
+
 /// Keys pressed for a single-player binding: Ctrl, Shift and Enter count
 /// on both sides (multiplayer key sets share the keyboard, so they use
 /// the exact key).
@@ -297,12 +500,20 @@ pub fn key_just(keys: &ButtonInput<KeyCode>, k: Option<KeyCode>, pair: bool) -> 
     k.is_some_and(|k| if pair { keys.any_just_pressed(key_variants(k)) } else { keys.just_pressed(k) })
 }
 
-pub fn pad_held(pad: &Gamepad, b: Option<GamepadButton>) -> bool {
-    b.is_some_and(|b| pad.pressed(b))
+pub fn pad_held(pad: &PadState, b: Option<PadInput>) -> bool {
+    match b {
+        Some(PadInput::Button(b)) => pad.g.pressed(b),
+        Some(PadInput::Axis(a, p)) => axis_bit(a, p).is_some_and(|bit| pad.now & bit != 0),
+        None => false,
+    }
 }
 
-pub fn pad_just(pad: &Gamepad, b: Option<GamepadButton>) -> bool {
-    b.is_some_and(|b| pad.just_pressed(b))
+pub fn pad_just(pad: &PadState, b: Option<PadInput>) -> bool {
+    match b {
+        Some(PadInput::Button(b)) => pad.g.just_pressed(b),
+        Some(PadInput::Axis(a, p)) => axis_bit(a, p).is_some_and(|bit| pad.now & !pad.prev & bit != 0),
+        None => false,
+    }
 }
 
 /// Keys the redefine prompt refuses: the digits pick weapons, `-` and `=`
@@ -354,16 +565,23 @@ pub fn key_id(k: KeyCode) -> String {
     format!("{k:?}")
 }
 
-pub fn pad_id(b: GamepadButton) -> String {
-    format!("{b:?}")
+/// Settings-file name of a gamepad control: Bevy's `GamepadButton` name,
+/// or a `GamepadAxis` name with `+` / `-` for the end.
+pub fn pad_id(b: PadInput) -> String {
+    match b {
+        PadInput::Button(b) => format!("{b:?}"),
+        PadInput::Axis(a, p) => format!("{a:?}{}", if p { '+' } else { '-' }),
+    }
 }
 
 pub fn parse_key(s: &str) -> Option<KeyCode> {
     KEYS.iter().copied().find(|k| key_id(*k) == s)
 }
 
-pub fn parse_pad(s: &str) -> Option<GamepadButton> {
-    PADS.iter().copied().find(|b| pad_id(*b) == s)
+pub fn parse_pad(s: &str) -> Option<PadInput> {
+    let buttons = PADS.iter().map(|&b| PadInput::Button(b));
+    let axes = AXES.iter().flat_map(|&a| [PadInput::Axis(a, false), PadInput::Axis(a, true)]);
+    buttons.chain(axes).find(|b| pad_id(*b) == s)
 }
 
 #[cfg(test)]
@@ -375,7 +593,8 @@ mod tests {
         let mut c = Controls::default();
         c.set_key(0, NEXT_WEAPON, Some(KeyCode::KeyM));
         c.set_key(6, SHOOT, None);
-        c.set_pad(3, BRAKE, Some(GamepadButton::West));
+        c.set_pad(3, BRAKE, Some(PadInput::Button(GamepadButton::West)));
+        c.set_pad(1, SHOOT_ALT, Some(PadInput::Axis(GamepadAxis::RightZ, true)));
         c.set_pad(1, NEXT_WEAPON, None);
         let mut t = String::new();
         c.write(&mut t);
@@ -389,12 +608,31 @@ mod tests {
             assert!(d.read(k.trim(), v.trim()), "{line}");
         }
         assert_eq!(c, d);
-        assert_eq!(d.pads[2][BRAKE], Some(GamepadButton::West));
+        assert_eq!(d.pads[2][BRAKE], Some(PadInput::Button(GamepadButton::West)));
+        assert_eq!(d.pads[0][SHOOT_ALT], Some(PadInput::Axis(GamepadAxis::RightZ, true)));
         assert_eq!(d.mp_keys[1][SHOOT], None);
         assert!(!d.read("key.fly", "KeyF"));
         assert!(!d.read("pad5.brake", "West"));
         assert!(d.read("mp2.pad.brake", "East"), "old per-player pad lines are skipped");
         assert_eq!(c, d);
+    }
+
+    #[test]
+    fn pad_numbers_stable() {
+        let e = |i: u32| Entity::from_raw_u32(i).unwrap();
+        let id = |n: &str| (n.to_string(), Some(1), Some(2));
+        let mut s = PadSlots::default();
+        s.update(vec![(e(7), id("b")), (e(5), id("a"))]);
+        assert_eq!((s.get(0), s.get(1)), (Some(e(5)), Some(e(7))));
+        // Pad 1 unplugged: pad 2 keeps its number.
+        s.update(vec![(e(7), id("b"))]);
+        assert_eq!((s.get(0), s.get(1), s.first()), (None, Some(e(7)), Some(e(7))));
+        // A third pad takes a fresh number, not the absent pad's.
+        s.update(vec![(e(7), id("b")), (e(9), id("c"))]);
+        assert_eq!(s.get(2), Some(e(9)));
+        // Pad 1 comes back as a new entity: same number.
+        s.update(vec![(e(7), id("b")), (e(9), id("c")), (e(11), id("a"))]);
+        assert_eq!(s.get(0), Some(e(11)));
     }
 
     #[test]
@@ -412,7 +650,12 @@ mod tests {
             assert_eq!(parse_key(&key_id(k)), Some(k));
         }
         for &b in PADS {
-            assert_eq!(parse_pad(&pad_id(b)), Some(b));
+            assert_eq!(parse_pad(&pad_id(PadInput::Button(b))), Some(PadInput::Button(b)));
+        }
+        for &a in &AXES {
+            for p in [false, true] {
+                assert_eq!(parse_pad(&pad_id(PadInput::Axis(a, p))), Some(PadInput::Axis(a, p)));
+            }
         }
     }
 }

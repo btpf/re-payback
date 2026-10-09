@@ -201,12 +201,14 @@ impl MaterialExtension for OnTop {
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_compare = Some(CompareFunction::Always);
             depth.depth_write_enabled = Some(false);
         }
+        // Game views hold gamma-encoded palette RGB (`params.y`).
+        crate::objects::gamma_def(descriptor, key.mesh_key);
         Ok(())
     }
 }
@@ -217,6 +219,8 @@ impl MaterialExtension for OnTop {
 /// draws mode 4 with the default ONE/ONE blend whatever the argument.
 fn blend(m: &mut ArrowMaterial, hardware: bool) {
     m.extension.params.x = if hardware { 1.0 } else { 0.0 };
+    // Drawn in the game views only: gamma-encoded output (`objects.wgsl`).
+    m.extension.params.y = if crate::camera::postfx::linear_blend() { 0.0 } else { 1.0 };
     m.base.base_color = Color::srgba(1.0, 1.0, 1.0, if hardware { 1.0 } else { 0.5 });
     m.base.alpha_mode = if hardware { AlphaMode::Add } else { AlphaMode::Blend };
 }

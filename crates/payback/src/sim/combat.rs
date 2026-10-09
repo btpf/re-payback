@@ -192,6 +192,10 @@ pub struct Explode {
     pub layer: usize,
     /// Object excluded from the blast (the exploding thing itself).
     pub source: Option<Entity>,
+    /// The exploding object is on the player's side (owner side `+0x824
+    /// >= 0`, [`Obj::side`]): its blast pays score and counts as the
+    /// player's crime (`Shockwave` @ 10054ac0). AI grenades, missiles and
+    /// bombs count too, as in the original; script explosions don't.
     pub by_player: bool,
     /// The player whose weapon this is (kill credit in multiplayer).
     pub player: Option<u8>,
@@ -302,6 +306,11 @@ fn spawn_projectile(
     obj.state = State::Parked;
     obj.level = level;
     obj.owner = Some(shooter);
+    // Owner side (`+0x824`, Mac `do_Person` @ 1013fbd0): 1 for every
+    // person's shot, whoever fires it, except shotgun pellets, which are 1
+    // only from the player and −1 from anyone else. Only explosions read
+    // it here (`Explode::by_player`, CB-5).
+    obj.side = if kind == ProjectileKind::Pellet && player.is_none() { -1 } else { 1 };
     if kind == ProjectileKind::Grenade {
         obj.health = 80;
     }
@@ -341,15 +350,28 @@ fn fire_weapons(
     mut hurt: MessageWriter<Hurt>,
     mut triggers: ResMut<Triggers>,
     mission: Res<MissionState>,
-    mut crimes: Option<ResMut<super::police::Crimes>>,
-    mut debris: ResMut<Parts>,
+    (mut crimes, mut debris, mut bystanders, mut cars, session, mode): (
+        Option<ResMut<super::police::Crimes>>,
+        ResMut<Parts>,
+        Query<(Entity, &mut Obj), (With<Person>, Without<Arsenal>)>,
+        Query<(Entity, &mut Obj), (With<CameraTarget>, Without<Person>)>,
+        Res<super::people::PlayerSession>,
+        Res<crate::level::GameMode>,
+    ),
 ) {
     let (Some(mut library), Some(city)) = (library, city) else {
         return;
     };
-    // Snapshot of targets for melee.
-    let targets: Vec<(Entity, IVec3)> = shooters.iter().map(|(e, o, ..)| (e, o.pos)).collect();
-    let mut punched: Vec<(Entity, Entity)> = Vec::new();
+    // Melee targets: every person, armed or not, in object-table order
+    // (CB-1, DT-3; Mac `do_Person` @ 1013fbd0 scans the object array).
+    let mut targets: Vec<(Entity, IVec3, u32)> = shooters
+        .iter()
+        .map(|(e, o, ..)| (e, o.pos, o.slot))
+        .chain(bystanders.iter().map(|(e, o)| (e, o.pos, o.slot)))
+        .collect();
+    targets.sort_by_key(|t| t.2);
+    // (puncher, its player number if a player, target).
+    let mut punched: Vec<(Entity, Option<u8>, Entity)> = Vec::new();
     for e__ in crate::sim::table_order(shooters.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((e, mut obj, mut ars, stick, is_player)) = shooters.get_mut(e__) else { continue };
         if ars.pose > 0 {
@@ -461,16 +483,26 @@ fn fire_weapons(
         };
         match w {
             Weapon::Fist => {
-                // Melee: people near pos + 256·dir (§3.2 Fist).
+                // Melee: people near pos + 256·dir with line of sight at
+                // head height (§3.2 Fist; Mac `do_Person` @ 1013fbd0,
+                // 68k `FUN_000e3a58` ~123605: `LineOfSight(pos, z −
+                // 0x400 .. target, z − 0x400)`). Punch_Hit plays once at
+                // the puncher if anyone was in reach.
                 let hit = obj.pos + dir;
-                for &(t, tp) in &targets {
+                let mut any = false;
+                for &(t, tp, _) in &targets {
                     if t != e
                         && (tp.z - hit.z).abs() < 250
                         && (tp.x - hit.x).abs() < 3 * 192
                         && (tp.y - hit.y).abs() < 3 * 192
+                        && super::collide::line_of_sight(&city, obj.pos, tp)
                     {
-                        punched.push((e, t));
+                        punched.push((e, player, t));
+                        any = true;
                     }
+                }
+                if any {
+                    commands.spawn(Sound::once(id::PUNCH_HIT, 4e6, 22050.0, at));
                 }
                 // A punch also breaks a crate 512 ahead.
                 let ahead = obj.pos + dir * 2;
@@ -612,42 +644,61 @@ fn fire_weapons(
             }
         }
     }
-    // Apply punches: 30 damage, flat.
-    for (attacker, target) in punched {
-        let Ok([(_, mut a, ..), (_, mut t, ..)]) = shooters.get_many_mut([attacker, target]) else {
-            continue;
+    // Apply punches, puncher by puncher in table order (Mac `do_Person`
+    // @ 1013fbd0): a target with health >= 0 says Ow and loses 30, flat.
+    // On an NPC (owner side −1) the player's object gets 500 × the
+    // multiplier and the hit counts as his (`CheckHitObject(t, 0)`),
+    // whoever punched (CB-2); between players only the multiplayer kill
+    // credit.
+    let mut pays: Vec<(Option<Entity>, i32)> = Vec::new();
+    for (attacker, attacker_player, target) in punched {
+        let t = match shooters.get_mut(target) {
+            Ok((_, o, ..)) => Some(o),
+            Err(_) => bystanders.get_mut(target).ok().map(|(_, o)| o),
         };
-        if t.health <= 0 {
+        let Some(mut t) = t else { continue };
+        if t.health < 0 {
             continue;
         }
-        // God mode (`crate::cheats`): no damage.
-        if !t.god {
-            t.health -= 30;
-        }
-        commands.spawn(Sound::once(
-            id::PUNCH_HIT,
-            4e6,
-            22050.0,
-            SoundPos::At(t.posf()),
-        ));
         commands.spawn(Sound::once(
             id::OW1 + rng.rand(3) as u16,
             5e6,
             8000.0,
             SoundPos::At(t.posf()),
         ));
-        if a.state == State::Player {
-            // Players punching each other only matters for the kill
-            // credit (multiplayer).
-            if t.state != State::Player {
-                a.score += 500;
-            }
+        // God mode (`crate::cheats`): no damage.
+        if !t.god {
+            t.health -= 30;
+        }
+        let check = t.side == -1;
+        if check {
+            pays.push((attacker_player.map(|_| attacker), 500 * session.multiplier));
+        }
+        if check || (attacker_player.is_some() && t.player.is_some()) {
             hurt.write(Hurt {
                 victim: target,
                 by_player: true,
                 by_weapon: false,
-                attacker: Some(a.player.unwrap_or(0)),
+                attacker: attacker_player,
             });
+        }
+    }
+    for (payee, pay) in pays {
+        // An NPC's punch pays the single player (the original's
+        // `objects[DAT_1017c60c]`).
+        let payee = payee.or_else(|| {
+            if mode.is_multiplayer() {
+                return None;
+            }
+            let on_foot = shooters.iter().filter(|(.., p)| *p).map(|(e, o, ..)| (o.slot, e));
+            let driving = cars.iter().map(|(e, o)| (o.slot, e));
+            on_foot.chain(driving).min().map(|(_, e)| e)
+        });
+        let Some(payee) = payee else { continue };
+        if let Ok((_, mut o, ..)) = shooters.get_mut(payee) {
+            o.score += pay;
+        } else if let Ok((_, mut o)) = cars.get_mut(payee) {
+            o.score += pay;
         }
     }
 }
@@ -770,6 +821,8 @@ fn move_projectiles(
     mut q: Query<(Entity, &mut Obj, &Projectile)>,
 ) {
     let Some(city) = city else { return };
+    // Snowmen knocked down this tick (the map edit lands later).
+    let mut snowmen: Vec<(usize, usize, usize)> = Vec::new();
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((e, mut obj, p)) = q.get_mut(e__) else { continue };
         let kind = p.kind;
@@ -792,8 +845,44 @@ fn move_projectiles(
 
         // Scenery stops projectiles and breaks crates.
         let (sx, sy) = ((next.x >> 11) as usize, (next.y >> 11) as usize);
-        let scenery_hit = sx < MAP_SIZE
-            && sy < MAP_SIZE
+        let on_map = sx < MAP_SIZE && sy < MAP_SIZE;
+        // A snowman is knocked down by any non-person that reaches it,
+        // projectiles too, which fly on (Mac `AddCollideObj` @ 10055c70:
+        // the 0xfe test comes before the class-2 branch that removes the
+        // shot; 68k `FUN_000cdfdc`): 5 type-1 Dust puffs as for a car
+        // (`driving.rs`), from the projectile's height (CB-6).
+        let snowman = on_map && city.map.square(sx, sy).cubes[obj.level].scenery == super::driving::SNOWMAN;
+        if snowman && !snowmen.contains(&(sx, sy, obj.level)) {
+            snowmen.push((sx, sy, obj.level));
+            for _ in 0..5 {
+                let size = 600 + rng.rand(300);
+                let vz = rng.rand(100) - 50;
+                let vy = rng.rand(100) - 50;
+                let vx = rng.rand(300) - 150;
+                let z = obj.pos.z + rng.rand(300) - 150;
+                let y = (sy * 2048 + 0x270) as i32 + rng.rand(800);
+                let x = (sx * 2048 + 0x39c) as i32 + rng.rand(200);
+                effects.add(
+                    1,
+                    Tex::Dust,
+                    Vec3::new(x as f32, y as f32, z as f32),
+                    Vec3::new(vx as f32, vy as f32, vz as f32),
+                    size as f32,
+                    layer,
+                    Blend::Add,
+                );
+            }
+            set_scenery.write(SetScenery {
+                sx,
+                sy,
+                level: obj.level,
+                scenery: 0,
+                special: None,
+                rotation: None,
+            });
+        }
+        let scenery_hit = on_map
+            && !snowman
             && city.map.square(sx, sy).cubes[obj.level].scenery != 0
             && !kind.gravity();
         if scenery_hit {
@@ -841,7 +930,7 @@ fn move_projectiles(
                         power: 3000 * 20000,
                         layer: obj.level,
                         source: Some(e),
-                        by_player: p.by_player,
+                        by_player: obj.side >= 0,
                         player: p.player,
                     });
                     remove = true;
@@ -865,7 +954,7 @@ fn move_projectiles(
                         power: 50000 * 20000,
                         layer: obj.level,
                         source: Some(e),
-                        by_player: p.by_player,
+                        by_player: obj.side >= 0,
                         player: p.player,
                     });
                     remove = true;
@@ -882,7 +971,7 @@ fn move_projectiles(
                         power: 1000 * 25000,
                         layer: obj.level,
                         source: Some(e),
-                        by_player: p.by_player,
+                        by_player: obj.side >= 0,
                         player: p.player,
                     });
                     remove = true;
@@ -1023,7 +1112,7 @@ fn projectile_hits(
                         power: 1000 * 25000,
                         layer: po.level,
                         source: Some(pe),
-                        by_player: p.by_player,
+                        by_player: po.side >= 0,
                         player: p.player,
                     });
                     commands.entity(pe).despawn();
@@ -1114,16 +1203,26 @@ fn projectile_hits(
     }
 }
 
+/// Report a player-side blast's hit on every NPC, even at zero damage, as
+/// the original does (`Shockwave` @ 10054ac0 calls `CheckHitObject(i, 1)`
+/// for every owner-side −1 object, no radius). Off: with it every grenade
+/// or missile makes each NPC around a GBH victim and the wanted level jumps
+/// to 4 at once, which got the autoplay bot busted repeatedly (even in the
+/// grenade tutorial). Only hits that do damage count, as before (CB-4,
+/// explosions part, left for a decision).
+const BLAST_CRIME_AT_ZERO_DAMAGE: bool = false;
+
 /// Explosion damage, knock-back, score and effects (§5.2; Mac `Shockwave`
 /// @ 10054ac0 = 68k `FUN_000cd22e` / OS4 `FUN_0104405c`).
 ///
 /// With q = (P>>4)/T: people and vehicles lose q/k, class-2 props
 /// (barrier, cone, dummy; `model+0x8165 == 2`) only (q>>4)/k and get no
-/// knock-back. In single player a player-owned blast on an object not
-/// owned by a player pays `min(6000, q/(k>>5))` (6000 when k>>5 < 1)
-/// times the multiplier. The original also pays blasts from AI-owned
-/// weapons (attacker owner `+0x824 >= 0`); the port's `Explode` only
-/// knows `by_player`, so it pays the player's blasts.
+/// knock-back. In single player a blast from a player-side object (owner
+/// side `+0x824 >= 0`: the player's car, his shots, and every person's
+/// grenade, missile or bomb) on an NPC (side −1) pays `min(6000,
+/// q/(k>>5))` (6000 when k>>5 < 1) times the multiplier and reports the
+/// hit (`CheckHitObject(i, 1)`) even at zero damage: there is no radius,
+/// so every NPC in the object table counts as hit once.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn explosions(
     mut commands: Commands,
@@ -1193,13 +1292,21 @@ fn explosions(
             if matches!(o.filter, -1 | 1 | 3) && !o.god {
                 let dmg = if prop { (q >> 4) / k } else { q / k };
                 o.health -= dmg.min(i32::MAX as i64) as i32;
-                if pays && !is_target && o.state != State::Player && o.player.is_none() {
+                // Single player, a player-side blast on an NPC (owner side
+                // −1): score and `CheckHitObject(i, 1)`. The original
+                // calls it whatever the damage, with no radius, so every
+                // NPC in the object table counts as hit; that is
+                // `BLAST_CRIME_AT_ZERO_DAMAGE` (off: see its note).
+                let check = pays && o.side == -1 && !is_target;
+                if check {
                     score += if k >> 5 < 1 { 6000 } else { (q / (k >> 5)).min(6000) };
                 }
-                if dmg > 0 {
+                if (check && BLAST_CRIME_AT_ZERO_DAMAGE) || dmg > 0 {
                     hurt.write(Hurt {
                         victim: e,
-                        by_player: ex.by_player,
+                        // Crime only from the check; in multiplayer the
+                        // blast's player gets the kill credit.
+                        by_player: check || (ex.by_player && mode.is_multiplayer()),
                         by_weapon: true,
                         attacker: ex.player,
                     });
@@ -1542,3 +1649,7 @@ fn swap_pose_models(mut q: Query<(&Arsenal, &mut Person)>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/combat.rs"]
+mod tests;

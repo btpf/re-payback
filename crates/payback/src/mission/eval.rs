@@ -158,119 +158,133 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
     let mut fired = Vec::new();
     // Points of the arrow triggers, for the seek target (`arrow.rs`).
     let mut seek = Vec::new();
-    let mut keep = Vec::with_capacity(triggers.len());
     let mut stopped = Vec::new();
-    for mut t in triggers.drain(..) {
-        // Orders: the first completion by any actor that got the order
-        // and still carries the id (the Mac's arrival/boarding hooks
-        // `ObjectAtLocation`, `ObjectIntoBuilding`, `ObjectIntoPlVehicle`,
-        // `ObjectIntoVehicle` compare ids). Until then the trigger waits,
-        // also when every actor is gone.
-        if !t.group.is_empty() {
-            let want = match t.kind {
-                kind::ACTOR_GOTO | kind::ACTOR_GOTO_15 => kind::ACTOR_GOTO,
-                k => k,
-            };
-            let done = actor_reports.iter().any(|r| {
-                r.0 == want
-                    && t.group.contains(&r.1)
-                    && world.get::<Obj>(r.1).is_none_or(|o| o.script_id == t.a)
-            });
-            if done {
-                fired.push((t.event, t.kind));
-                stopped.extend(t.sound);
-            } else {
-                keep.push(t);
+    // In place, in table order (`CheckForTriggers` @ 100f4a50): a trigger
+    // that fires or is dropped goes with `RemoveTrigger` @ 100f4560 (68k
+    // `Trigger_Remove` `0xa45c6`), which moves the last trigger into its
+    // index; the loop goes on with the next index, so the trigger moved in
+    // is skipped this frame (a countdown misses a tick) and the list order
+    // changes, as in the original (missions.md §1.3). Hook-fired types
+    // are the exception ([`hook_fired`]).
+    let mut i = 0;
+    while i < triggers.len() {
+        let t = &mut triggers[i];
+        let remove = 'eval: {
+            // Orders: the first completion by any actor that got the order
+            // and still carries the id (the Mac's arrival/boarding hooks
+            // `ObjectAtLocation`, `ObjectIntoBuilding`, `ObjectIntoPlVehicle`,
+            // `ObjectIntoVehicle` compare ids). Until then the trigger waits,
+            // also when every actor is gone.
+            if !t.group.is_empty() {
+                let want = match t.kind {
+                    kind::ACTOR_GOTO | kind::ACTOR_GOTO_15 => kind::ACTOR_GOTO,
+                    k => k,
+                };
+                let done = actor_reports.iter().any(|r| {
+                    r.0 == want
+                        && t.group.contains(&r.1)
+                        && world.get::<Obj>(r.1).is_none_or(|o| o.script_id == t.a)
+                });
+                if done {
+                    fired.push((t.event, t.kind));
+                }
+                break 'eval done;
             }
-            continue;
-        }
-        // Id triggers: keep the bound actor while it is there and carries
-        // the id, else bind to the first actor with the id, else wait.
-        if t.by_id {
-            let bound = t
-                .actor
-                .and_then(|e| world.get::<Obj>(e))
-                .is_some_and(|o| o.script_id == t.a && o.state != State::Removed);
-            if !bound {
-                t.actor = Script::new(world).actors(t.a).first().copied();
-                if t.actor.is_none() {
-                    keep.push(t);
-                    continue;
+            // Id triggers: keep the bound actor while it is there and carries
+            // the id, else bind to the first actor with the id, else wait.
+            if t.by_id {
+                let bound = t
+                    .actor
+                    .and_then(|e| world.get::<Obj>(e))
+                    .is_some_and(|o| o.script_id == t.a && o.state != State::Removed);
+                if !bound {
+                    t.actor = Script::new(world).actors(t.a).first().copied();
+                    if t.actor.is_none() {
+                        break 'eval false;
+                    }
                 }
             }
-        }
-        let actor = t.actor.and_then(|e| actor_view(world, e));
-        // Actor gone: only a reported death fires the "destroyed/killed"
-        // types (0xa653a is called from damage code); removal on arrival or
-        // boarding drops the trigger silently.
-        if t.actor.is_some() && actor.is_none() {
-            let killed = t.actor.is_some_and(|e| {
-                actor_reports
-                    .iter()
-                    .any(|r| r.0 == kind::ACTOR_KILLED && r.1 == e)
-            });
-            // Orders that end with the actor removed (0x12 arrived and
-            // vanished, 0x0c / 0x3d got into the vehicle) report their
-            // completion as they remove it.
-            let completed = matches!(
-                t.kind,
-                kind::ACTOR_GOTO_VANISH | kind::ACTOR_BOARDS_PLAYER | kind::ACTOR_BOARDS_ACTOR
-            ) && t.actor.is_some_and(|e| actor_reports.iter().any(|r| r.0 == t.kind && r.1 == e));
-            if completed
-                || killed
-                    && matches!(
-                        t.kind,
-                        kind::ACTOR_GONE
-                            | kind::ACTOR_KILLED
-                            | kind::ACTOR_ATTACKED
-                            | kind::ACTOR_ATTACKED_QUIET
-                    )
+            let actor = t.actor.and_then(|e| actor_view(world, e));
+            // Actor gone: only a reported death fires the "destroyed/killed"
+            // types (0xa653a is called from damage code); removal on arrival or
+            // boarding drops the trigger silently.
+            if t.actor.is_some() && actor.is_none() {
+                let killed = t.actor.is_some_and(|e| {
+                    actor_reports
+                        .iter()
+                        .any(|r| r.0 == kind::ACTOR_KILLED && r.1 == e)
+                });
+                // Orders that end with the actor removed (0x12 arrived and
+                // vanished, 0x0c / 0x3d got into the vehicle) report their
+                // completion as they remove it.
+                let completed = matches!(
+                    t.kind,
+                    kind::ACTOR_GOTO_VANISH | kind::ACTOR_BOARDS_PLAYER | kind::ACTOR_BOARDS_ACTOR
+                ) && t.actor.is_some_and(|e| actor_reports.iter().any(|r| r.0 == t.kind && r.1 == e));
+                if completed
+                    || killed
+                        && matches!(
+                            t.kind,
+                            kind::ACTOR_GONE
+                                | kind::ACTOR_KILLED
+                                | kind::ACTOR_ATTACKED
+                                | kind::ACTOR_ATTACKED_QUIET
+                        )
+                {
+                    fired.push((t.event, t.kind));
+                }
+                break 'eval true;
+            }
+            // The Mac stores the script id and looks the actor up by it every
+            // frame (`SetTrigger_Long` @ 10106e50, `CheckForTriggers` @
+            // 100f4a50 via `GetObject` @ 100530e0; `ObjectDead` @ 100f6c40
+            // compares ids). An actor whose id changed (released by
+            // `Actor_Release`/`ReleaseIdle`, id -1) no longer matches: the
+            // trigger stays armed but dormant. (The Amiga kept the pointer and
+            // went on watching it, 68k `0xa4a68`.)
+            if let Some(a) = &actor
+                && t.a != -1
+                && a.script_id != t.a
             {
+                break 'eval false;
+            }
+            if let Some(p) = crate::arrow::seek_point(world, t, actor.as_ref().map(|a| (a.pos, a.level))) {
+                seek.push(p);
+            }
+            let fire = condition(
+                world,
+                t,
+                p,
+                actor.as_ref(),
+                &mut reports,
+                &actor_reports,
+                &city_scenery,
+            );
+            if fire {
+                if let Some(a) = &actor {
+                    crate::autoplay::log(format_args!(
+                        "trigger {:#x} type {:#x} fired on actor at {:?} alive {}",
+                        t.event, t.kind, a.pos, a.alive
+                    ));
+                }
                 fired.push((t.event, t.kind));
             }
-            stopped.extend(t.sound);
-            continue;
-        }
-        // The Mac stores the script id and looks the actor up by it every
-        // frame (`SetTrigger_Long` @ 10106e50, `CheckForTriggers` @
-        // 100f4a50 via `GetObject` @ 100530e0; `ObjectDead` @ 100f6c40
-        // compares ids). An actor whose id changed (released by
-        // `Actor_Release`/`ReleaseIdle`, id -1) no longer matches: the
-        // trigger stays armed but dormant. (The Amiga kept the pointer and
-        // went on watching it, 68k `0xa4a68`.)
-        if let Some(a) = &actor
-            && t.a != -1
-            && a.script_id != t.a
-        {
-            keep.push(t);
-            continue;
-        }
-        if let Some(p) = crate::arrow::seek_point(world, &t, actor.as_ref().map(|a| (a.pos, a.level))) {
-            seek.push(p);
-        }
-        let fire = condition(
-            world,
-            &mut t,
-            p,
-            actor.as_ref(),
-            &mut reports,
-            &actor_reports,
-            &city_scenery,
-        );
-        if fire {
-            if let Some(a) = &actor {
-                crate::autoplay::log(format_args!(
-                    "trigger {:#x} type {:#x} fired on actor at {:?} alive {}",
-                    t.event, t.kind, a.pos, a.alive
-                ));
+            fire
+        };
+        if remove {
+            stopped.extend(triggers.swap_remove(i).sound);
+            // A trigger the game fires from an event hook (`ObjectDead`,
+            // `ObjectIntoPlVehicle`, `ObjectAtLocation`, ...) fires when
+            // the event happens in the original, not in this loop; the
+            // port reports those events for one frame only, so one moved
+            // into this index is tested now rather than losing its event.
+            if triggers.get(i).is_some_and(hook_fired) {
+                continue;
             }
-            fired.push((t.event, t.kind));
-            stopped.extend(t.sound);
-        } else {
-            keep.push(t);
         }
+        i += 1;
     }
-    world.resource_mut::<Triggers>().list = keep;
+    world.resource_mut::<Triggers>().list = triggers;
     crate::arrow::seek_tick(world, seek, 1);
     for e in stopped {
         if let Ok(em) = world.get_entity_mut(e) {
@@ -278,6 +292,33 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
         }
     }
     fired
+}
+
+/// Triggers fired from event hooks in the original (the port's one-frame
+/// reports): orders, deaths and attacks, and the edge events.
+fn hook_fired(t: &Trigger) -> bool {
+    use kind::*;
+    !t.group.is_empty()
+        || matches!(
+            t.kind,
+            ACTOR_GONE
+                | ACTOR_KILLED
+                | ACTOR_ATTACKED
+                | ACTOR_ATTACKED_QUIET
+                | ACTOR_IN_WATER
+                | ACTOR_GOTO
+                | ACTOR_GOTO_15
+                | ACTOR_GOTO_VANISH
+                | ACTOR_BOARDS_PLAYER
+                | ACTOR_BOARDS_ACTOR
+                | WEAPON_FIRED
+                | WEAPON_SWITCHED
+                | HANDBRAKE
+                | COP_KILLED
+                | CUBE_SMASHED
+                | RESPAWNED
+                | RC_THROTTLE
+        )
 }
 
 #[allow(clippy::too_many_arguments)]

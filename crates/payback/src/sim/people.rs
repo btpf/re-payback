@@ -13,7 +13,7 @@ use crate::level::{AppState, GameMode, LevelEntity, LevelLoaded, StartPoints};
 use crate::objects::{ObjectLibrary, corner_positions};
 use crate::world::{City, heading_to_render, object_to_render};
 use bevy::{mesh::VertexAttributeValues, prelude::*};
-use payback_formats::map::{self, FaceType, MAP_SIZE, Slope};
+use payback_formats::map::{self, FaceType, MAP_SIZE};
 use payback_formats::{Motion, obj::Vertex};
 
 /// Collision radius of every person: MaleNormal's max |X| / 3 (people.md §2.1).
@@ -171,11 +171,14 @@ pub struct HumanMotion(pub Motion);
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlayerSpawned;
 
-/// People decide what to do (controls and AI fill the stick).
+/// People move, then decide what to do (controls and AI fill the stick),
+/// as `object_MainLoop` @ 1014a670 moves each object before its
+/// `do_Person` (AI-1; per phase, not interleaved per object).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeopleThink;
 
-/// People move and animate; other systems order themselves after it.
+/// People steer (the stick sets the next tick's velocity) and animate;
+/// other systems order themselves after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeopleSet;
 
@@ -199,12 +202,18 @@ impl Plugin for PeoplePlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (player_stick, panic_peds, ped_ai, super::ai::people_orders)
+                    (
+                        swim_test.run_if(|| crate::args().any(|a| a == "--swim-test")),
+                        move_people,
+                        player_stick,
+                        panic_peds,
+                        ped_ai,
+                        super::ai::people_orders,
+                    )
                         .chain()
                         .in_set(PeopleThink),
                     (
-                        swim_test.run_if(|| std::env::args().any(|a| a == "--swim-test")),
-                        move_people,
+                        steer_people,
                         animate_people,
                         regen_and_respawn,
                         despawn_far,
@@ -385,6 +394,9 @@ pub fn make_player(commands: &mut Commands, e: Entity, player: u8) {
         }
         if let Some(mut o) = world.get_mut::<Obj>(e) {
             o.player = Some(player);
+            // Owner side 0 (`+0x824`, set at the level start and respawn
+            // in Mac `amiga_levelloop` @ 10100f50).
+            o.side = 0;
         }
     });
 }
@@ -401,6 +413,9 @@ fn read_keyboard(
     player: Query<(&Obj, &crate::sim::combat::Arsenal), With<crate::camera::CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
     mut dialog: ResMut<crate::hud::Dialog>,
+    smooth: Res<crate::frame::Smooth>,
+    (slots, axes): (Res<crate::frontend::bindings::PadSlots>, Res<crate::frontend::bindings::PadAxes>),
+    mut latch: Local<(u64, [bool; 6])>,
 ) {
     use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
     // Multiplayer devices are read by `multiplayer::read_devices`.
@@ -416,8 +431,10 @@ fn read_keyboard(
         }
     };
     let (k, p) = (&controls.keys, &controls.pads[0]);
-    let pad = pads.iter().min_by_key(|(e, _)| *e).map(|(_, g)| g);
-    let stick = pad.map_or(Vec2::ZERO, |g| g.left_stick() + g.dpad());
+    // The lowest-numbered connected pad (`bindings::PadSlots`).
+    let pad = slots.first().and_then(|e| pads.get(e).ok()).map(|(e, g)| axes.state(e, g));
+    let pad = pad.as_ref();
+    let stick = pad.map_or(Vec2::ZERO, |p| p.g.left_stick() + p.g.dpad());
     let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
     let just = |a: usize| key_just(&keys, k[a], true) || pad.is_some_and(|g| pad_just(g, p[a]));
     let input = &mut inputs.0[0];
@@ -427,6 +444,25 @@ fn read_keyboard(
     input.reverse = held(b::REVERSE) || stick.y < -0.5;
     input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
     input.brake = held(b::BRAKE);
+    // The original reads the input once per tick; here it is read every
+    // frame, so a press that starts and ends between two ticks is kept
+    // until the next tick has seen it (`Smooth::ticks` counts the ticks).
+    let (seen, held_since) = &mut *latch;
+    if *seen != smooth.ticks() {
+        *seen = smooth.ticks();
+        *held_since = [false; 6];
+    }
+    for (h, now) in held_since.iter_mut().zip([
+        &mut input.left,
+        &mut input.right,
+        &mut input.accel,
+        &mut input.reverse,
+        &mut input.fire,
+        &mut input.brake,
+    ]) {
+        *h |= *now;
+        *now = *h;
+    }
     if just(b::IN_OUT) {
         input.use_pressed = true;
     }
@@ -452,9 +488,9 @@ fn read_keyboard(
             input.weapon_pressed = Some(i as u8);
         }
     }
-    let step = if just(b::NEXT_WEAPON) {
+    let step = if just(b::NEXT_WEAPON) || keys.any_just_pressed(b::NEXT_WEAPON_ALIASES) {
         1
-    } else if just(b::PREV_WEAPON) {
+    } else if just(b::PREV_WEAPON) || keys.any_just_pressed(b::PREV_WEAPON_ALIASES) {
         -1
     } else {
         0
@@ -668,8 +704,10 @@ fn pavement(city: &City, pos: IVec3, level: usize) -> bool {
     sx < MAP_SIZE && sy < MAP_SIZE && city.map.square(sx, sy).cubes[level].flags & 0x20 != 0
 }
 
-/// Movement, gravity, collision and water for every person (people.md §4),
-/// then the controls that set the velocity for the next tick.
+/// Movement, gravity, collision and water for every person (people.md §4;
+/// `MoveObject_General` @ 1006e4f0 and the swim part of `do_Person`); the
+/// controls that set the velocity for the next tick come after the AI, in
+/// [`steer_people`].
 #[allow(clippy::type_complexity)]
 fn move_people(
     mut commands: Commands,
@@ -678,11 +716,11 @@ fn move_people(
     library: Option<Res<crate::objects::ObjectLibrary>>,
     mut rng: ResMut<Rng>,
     mut effects: ResMut<crate::effects::Effects>,
-    mut q: Query<(Entity, &mut Obj, &mut Person, &Stick)>,
+    mut q: Query<(Entity, &mut Obj, &mut Person)>,
 ) {
     let Some(city) = city else { return };
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
-        let Ok((e, mut obj, mut p, stick)) = q.get_mut(e__) else { continue };
+        let Ok((e, mut obj, mut p)) = q.get_mut(e__) else { continue };
         if obj.state == State::Removed {
             continue;
         }
@@ -785,9 +823,26 @@ fn move_people(
             }
         }
 
-        // Controls: stun, turning, speed and the velocity used by the next
-        // tick's move (the original moves first, `MoveObject_General` @
-        // 1006e4f0 / 68k `FUN_000e0e46`, then `do_Person` computes it).
+        obj.pos = next;
+        obj.prev_pos = next;
+    }
+}
+
+/// The second half of `do_Person` @ 1013fbd0 for every person, after its
+/// AI ([`PeopleThink`]) and boarding: stun, turning, speed and the velocity
+/// used by the next tick's move. The original moves an object
+/// (`MoveObject_General` @ 1006e4f0 / 68k `FUN_000e0e46`), then runs its
+/// AI and controls (`object_MainLoop` @ 1014a670); the port does the same
+/// per phase: every person moves ([`move_people`]), then every person
+/// thinks, then every person steers.
+fn steer_people(trig: Res<Trig>, mut q: Query<(Entity, &mut Obj, &mut Person, &Stick)>) {
+    for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((_, mut obj, mut p, stick)) = q.get_mut(e__) else { continue };
+        if obj.state == State::Removed {
+            continue;
+        }
+        // Controls (the AI and player input filled the stick after this
+        // tick's move).
         let (mut steer, mut throttle) = (stick.steer, stick.throttle);
         if p.stun > 0 {
             p.stun -= 1;
@@ -845,8 +900,6 @@ fn move_people(
         obj.vel.x = (obj.vel.x + (obj.speed * s >> 7)) / 3;
         obj.vel.y = (obj.vel.y + (obj.speed * c >> 7)) / 3;
 
-        obj.pos = next;
-        obj.prev_pos = next;
         if obj.health < 1 && obj.state != State::Dead {
             obj.state = State::Dead;
         }
@@ -900,9 +953,14 @@ fn animate_people(
     mut commands: Commands,
     city: Option<Res<City>>,
     data: Res<GameData>,
+    trig: Res<Trig>,
+    mut effects: ResMut<crate::effects::Effects>,
     mut q: Query<(&Obj, &mut Person)>,
 ) {
     let Some(city) = city else { return };
+    let mut step = |commands: &mut Commands, obj: &Obj, frame: i32| {
+        footstep(commands, &mut effects, &trig, &city, &data, obj, frame);
+    };
     for (obj, mut p) in &mut q {
         if obj.speed == 0 {
             if obj.prev_speed != 0 {
@@ -930,7 +988,7 @@ fn animate_people(
             p.frame_prev = p.frame_next;
             p.frame_next = (p.frame_next + 1).rem_euclid(12);
             if p.frame_prev == 0 || p.frame_prev == 6 {
-                footstep(&mut commands, &city, &data, obj);
+                step(&mut commands, obj, p.frame_prev);
             }
             n += 1;
         }
@@ -939,7 +997,7 @@ fn animate_people(
             // Walking backwards plants a foot too (Mac `do_Person` l.106448,
             // 68k ~122773).
             if p.frame_next == 0 || p.frame_next == 6 {
-                footstep(&mut commands, &city, &data, obj);
+                step(&mut commands, obj, p.frame_next);
             }
             p.blend += 256;
             p.frame_next = p.frame_prev;
@@ -951,7 +1009,22 @@ fn animate_people(
 
 /// Footstep sound from the surface under the person: the texture's
 /// `.CubeTextureList` value is the sound id; water squares splash.
-fn footstep(commands: &mut Commands, city: &City, data: &GameData, obj: &Obj) {
+///
+/// Any cube takes its top texture's sound (texture 0, Pavement, gives
+/// stone), whatever its face type or slope (Mac `do_Person` @ 1013fbd0
+/// l.116461). Snow and slush steps (sounds 0x32, 0x33) leave a footprint:
+/// a type-8 Dust2 splat (size 0x82, on the person's level, subtractive)
+/// half a step to the right of the heading when the planted frame is 6,
+/// else to the left (Mac l.116470-116485, 68k `FUN_000e3a58` ~122789).
+fn footstep(
+    commands: &mut Commands,
+    effects: &mut crate::effects::Effects,
+    trig: &Trig,
+    city: &City,
+    data: &GameData,
+    obj: &Obj,
+    frame: i32,
+) {
     let (sx, sy) = ((obj.pos.x >> 11) as usize, (obj.pos.y >> 11) as usize);
     if sx >= MAP_SIZE || sy >= MAP_SIZE {
         return;
@@ -960,18 +1033,29 @@ fn footstep(commands: &mut Commands, city: &City, data: &GameData, obj: &Obj) {
     let top = cube.faces[map::TOP];
     let sound = if top.kind == FaceType::Reflect {
         id::FOOTSTEP_WATER
-    } else if top.visible() && cube.slope != Slope::Off {
+    } else {
         data.texture_flags(top.texture)
             .map(|f| f as u16)
             .unwrap_or(id::FOOTSTEP_STONE)
-    } else {
-        id::FOOTSTEP_STONE
     };
     let mut at = obj.posf();
     at.z -= 200.0;
     // The splash carries 15000, other steps 19000 (Mac `do_Person` l.106454).
     let range = if sound == id::FOOTSTEP_WATER { 15000.0 } else { 19000.0 };
     commands.spawn(Sound::once(sound, 3_000_000.0, range, SoundPos::At(at)));
+    if sound == 0x32 || sound == 0x33 {
+        let (s, c) = (trig.sin(obj.heading) >> 1, trig.cos(obj.heading) >> 1);
+        let side = if frame == 6 { IVec3::new(c, -s, 0) } else { IVec3::new(-c, s, 0) };
+        effects.add(
+            8,
+            crate::effects::Tex::Dust2,
+            (obj.pos + side).as_vec3(),
+            Vec3::ZERO,
+            130.0,
+            obj.level as u8,
+            crate::effects::Blend::Subtract,
+        );
+    }
 }
 
 /// Player health regeneration, death and respawn (people.md §4.5).
@@ -1276,3 +1360,7 @@ fn update_listener(
     }
     others.0 = players.iter().skip(1).map(|p| p.1).collect();
 }
+
+#[cfg(test)]
+#[path = "tests/people.rs"]
+mod tests;

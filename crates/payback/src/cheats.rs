@@ -1,7 +1,7 @@
 //! Cheats (port addition, not in the original; docs/re/frontend_menus.md
 //! "Cheat menu"): F12 in a single-player level opens a menu
-//! (`crate::frontend::cheats`) with God mode, All weapons and Spawn
-//! vehicle.
+//! (`crate::frontend::cheats`) with God mode, All weapons, Spawn vehicle
+//! and the wanted level (clear, up, down).
 //!
 //! Every cheat changes the simulation, so the menu only queues it
 //! ([`Cheats::queue`]); [`apply`] takes the queue at the start of the next
@@ -24,18 +24,29 @@
 //!   the nearest free spot straight ahead ([`find_spot`]), else the
 //!   nearest free one around. Boats and the helicopter spawn like the rest
 //!   (a boat prefers water ahead, a car dry ground; either falls back to
-//!   any free spot).
+//!   any free spot). In one of the [`PAINT_COUNT`] paint colours when the
+//!   model has paintable faces (`objects::paintable`; the original paints
+//!   every traffic car `random(8)`, `AddThing` @ 10058350, and scripts
+//!   choose it in `CreateActor`); fixed liveries (police, taxi, bus, ...)
+//!   have only colour 0.
+//! - **Wanted level**: clear (0), up or down one level, 0..[`MAX_WANTED`],
+//!   on the player's object (`Obj::wanted`, the original's `+0x32e`),
+//!   restarting the decay timer (`WantedTimer`, `DAT_0030c3b8`) as a crime
+//!   that changes the level does (`sim::police::crimes`). The police
+//!   react to the new level as to any other change: pursuit from 3,
+//!   police in traffic from 4, roadblocks from 5, cops on foot from 3.
 //!
 //! Debug: `--cheat-script <tick>:<cheat>,...` queues cheats at those ticks
-//! of a recorded game (`god`, `nogod`, `weapons`, `vehicle=<type>`), e.g.
-//! for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
+//! of a recorded game (`god`, `nogod`, `weapons`, `vehicle=<type>[:<paint>]`,
+//! `wanted+`, `wanted-`, `wanted0`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
 //! menus (`crate::frontend`).
 
 use crate::camera::CameraTarget;
 use crate::level::{AppState, GameMode};
-use crate::objects::ObjectLibrary;
+use crate::objects::{ObjectLibrary, PAINT_COUNT};
 use crate::replay::{Mode, ReplayState};
 use crate::sim::combat::Arsenal;
+use crate::sim::police::WantedTimer;
 use crate::sim::{Obj, Trig, collide};
 use crate::vehicles::{Vehicle, kind as vk};
 use crate::world::{City, heading_to_render, object_to_render};
@@ -52,10 +63,19 @@ pub const VEHICLES: [usize; 26] = [
 /// Ammo per weapon after "All weapons" (shown as 00999 on the HUD).
 pub const FULL_AMMO: i32 = 999;
 
+/// Highest wanted level (six sirens on the HUD; the crime tables top out
+/// at 6, `sim::police`).
+pub const MAX_WANTED: i32 = 6;
+
 /// Replay event kinds ([`CheatEvent::kind`]).
 const EV_GOD: u32 = 1;
 const EV_WEAPONS: u32 = 2;
+/// Argument: the type, plus the paint colour << 8 (files from before the
+/// colours have 0 there: black, as such a vehicle was spawned).
 const EV_VEHICLE: u32 = 3;
+/// Argument: +1 up, -1 down.
+const EV_WANTED: u32 = 4;
+const EV_CLEAR_WANTED: u32 = 5;
 
 /// One cheat action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,8 +83,12 @@ pub enum Cheat {
     /// God mode on or off.
     God(bool),
     AllWeapons,
-    /// Spawn a vehicle of this `vehicles::TYPES` index.
-    Vehicle(usize),
+    /// Spawn a vehicle of this `vehicles::TYPES` index in this paint
+    /// colour (`objects::PAINTS` index).
+    Vehicle(usize, u8),
+    /// Wanted level up (+1) or down (-1).
+    Wanted(i32),
+    ClearWanted,
 }
 
 impl Cheat {
@@ -72,7 +96,9 @@ impl Cheat {
         let (kind, arg) = match self {
             Cheat::God(on) => (EV_GOD, on as i32),
             Cheat::AllWeapons => (EV_WEAPONS, 0),
-            Cheat::Vehicle(k) => (EV_VEHICLE, k as i32),
+            Cheat::Vehicle(k, c) => (EV_VEHICLE, k as i32 | (c as i32) << 8),
+            Cheat::Wanted(d) => (EV_WANTED, d.signum()),
+            Cheat::ClearWanted => (EV_CLEAR_WANTED, 0),
         };
         CheatEvent { tick, kind, arg }
     }
@@ -81,31 +107,61 @@ impl Cheat {
         Some(match e.kind {
             EV_GOD => Cheat::God(e.arg != 0),
             EV_WEAPONS => Cheat::AllWeapons,
-            EV_VEHICLE => Cheat::Vehicle(usize::try_from(e.arg).ok().filter(|k| VEHICLES.contains(k))?),
+            EV_VEHICLE => vehicle(e.arg & 0xff, e.arg >> 8)?,
+            EV_WANTED if e.arg != 0 => Cheat::Wanted(e.arg.signum()),
+            EV_CLEAR_WANTED => Cheat::ClearWanted,
             _ => return None,
         })
     }
 
-    /// `god`, `nogod`, `weapons`, `vehicle=<type>` (`--cheat-script`).
+    /// `god`, `nogod`, `weapons`, `vehicle=<type>[:<paint>]`, `wanted+`,
+    /// `wanted-`, `wanted0` (`--cheat-script`).
     fn parse(s: &str) -> Option<Cheat> {
         Some(match s.trim() {
             "god" => Cheat::God(true),
             "nogod" => Cheat::God(false),
             "weapons" => Cheat::AllWeapons,
-            v => Cheat::Vehicle(v.strip_prefix("vehicle=")?.parse().ok().filter(|k| VEHICLES.contains(k))?),
+            "wanted+" => Cheat::Wanted(1),
+            "wanted-" => Cheat::Wanted(-1),
+            "wanted0" => Cheat::ClearWanted,
+            v => {
+                let v = v.strip_prefix("vehicle=")?;
+                let (k, c) = v.split_once(':').unwrap_or((v, "0"));
+                vehicle(k.parse().ok()?, c.parse().ok()?)?
+            }
         })
     }
 }
 
-/// Cheat state: god mode (sim state, changed only in the fixed tick) and
-/// the actions the menu has queued for the next tick.
+/// A valid [`Cheat::Vehicle`].
+fn vehicle(kind: i32, colour: i32) -> Option<Cheat> {
+    let k = usize::try_from(kind).ok().filter(|k| VEHICLES.contains(k))?;
+    let c = u8::try_from(colour).ok().filter(|&c| (c as usize) < PAINT_COUNT)?;
+    Some(Cheat::Vehicle(k, c))
+}
+
+/// Cheat state: god mode (sim state, changed only in the fixed tick), the
+/// player's wanted level as of the last tick (for the menu) and the
+/// actions the menu has queued for the next tick.
 #[derive(Resource, Default, Debug)]
 pub struct Cheats {
     pub god: bool,
+    /// The player's wanted level after the last tick (a copy, for the menu).
+    pub wanted: i32,
     pub queue: Vec<Cheat>,
 }
 
 impl Cheats {
+    /// The wanted level as it will be once the queue is applied (the menu
+    /// shows this).
+    pub fn wanted_pending(&self) -> i32 {
+        self.queue.iter().fold(self.wanted, |w, c| match c {
+            Cheat::Wanted(d) => (w + d).clamp(0, MAX_WANTED),
+            Cheat::ClearWanted => 0,
+            _ => w,
+        })
+    }
+
     /// God mode as it will be once the queue is applied (the menu shows
     /// this).
     pub fn god_pending(&self) -> bool {
@@ -176,11 +232,15 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
         match a {
             Cheat::God(on) => world.resource_mut::<Cheats>().god = on,
             Cheat::AllWeapons => all_weapons(world),
-            Cheat::Vehicle(k) => {
-                spawn_vehicle(world, k);
+            Cheat::Vehicle(k, c) => {
+                spawn_vehicle(world, k, c);
             }
+            Cheat::Wanted(d) => set_wanted(world, |w| w + d),
+            Cheat::ClearWanted => set_wanted(world, |_| 0),
         }
     }
+    let wanted = player(world).and_then(|(e, ..)| world.get::<Obj>(e)).map_or(0, |o| o.wanted);
+    world.resource_mut::<Cheats>().wanted = wanted;
     let god = world.resource::<Cheats>().god;
     let mut q = world.query::<&mut Obj>();
     for mut o in q.iter_mut(world) {
@@ -204,6 +264,21 @@ fn player(world: &mut World) -> Option<(Entity, IVec3, i32)> {
     v.first().map(|&(_, e, p, h)| (e, p, h))
 }
 
+/// Set the player's wanted level to `f(level)`, within 0..[`MAX_WANTED`];
+/// a change restarts the decay timer, as a crime's does
+/// (`sim::police::crimes`, 68k `FUN_000ccc96`).
+fn set_wanted(world: &mut World, f: impl Fn(i32) -> i32) {
+    let Some((e, ..)) = player(world) else { return };
+    let Some(mut o) = world.get_mut::<Obj>(e) else { return };
+    let w = f(o.wanted).clamp(0, MAX_WANTED);
+    if o.wanted != w {
+        o.wanted = w;
+        if let Some(mut t) = world.get_resource_mut::<WantedTimer>() {
+            t.0 = 0;
+        }
+    }
+}
+
 /// Every weapon with at least [`FULL_AMMO`] (the arsenal travels with the
 /// player: the person's, or the car's while driving).
 fn all_weapons(world: &mut World) {
@@ -215,12 +290,12 @@ fn all_weapons(world: &mut World) {
     }
 }
 
-/// Spawn a parked vehicle of type `kind` in front of the player, facing
-/// the player's heading ([`find_spot`]). Nothing when there is no free
-/// spot.
-fn spawn_vehicle(world: &mut World, kind: usize) -> Option<Entity> {
+/// Spawn a parked vehicle of type `kind` in paint `colour` in front of the
+/// player, facing the player's heading ([`find_spot`]). Nothing when there
+/// is no free spot.
+fn spawn_vehicle(world: &mut World, kind: usize, colour: u8) -> Option<Entity> {
     let (_, pos, heading) = player(world)?;
-    let car = crate::vehicles::spawn_vehicle_world(world, kind as i32, pos, heading, 0)?;
+    let car = crate::vehicles::spawn_vehicle_world(world, kind as i32, pos, heading, colour as i32)?;
     let (model, slot) = world.get::<Obj>(car).map(|o| (o.model, o.slot))?;
     let info = world.resource::<ObjectLibrary>().model(model).info.clone();
     let body = Body {
@@ -366,16 +441,43 @@ mod tests {
 
     #[test]
     fn events_round_trip() {
-        for c in [Cheat::God(true), Cheat::God(false), Cheat::AllWeapons, Cheat::Vehicle(11), Cheat::Vehicle(27)] {
+        for c in [
+            Cheat::God(true),
+            Cheat::God(false),
+            Cheat::AllWeapons,
+            Cheat::Vehicle(11, 0),
+            Cheat::Vehicle(27, 7),
+            Cheat::Vehicle(0, 3),
+            Cheat::Wanted(1),
+            Cheat::Wanted(-1),
+            Cheat::ClearWanted,
+        ] {
             let e = c.event(42);
             assert_eq!(e.tick, 42);
             assert_eq!(Cheat::from_event(&e), Some(c));
         }
-        // Thrust frames and unknown kinds are not cheats.
+        // Files from before the colours: the type alone, black.
+        assert_eq!(Cheat::from_event(&CheatEvent { tick: 1, kind: EV_VEHICLE, arg: 11 }), Some(Cheat::Vehicle(11, 0)));
+        // Thrust frames, bad colours and unknown kinds are not cheats.
         assert_eq!(Cheat::from_event(&CheatEvent { tick: 1, kind: EV_VEHICLE, arg: 25 }), None);
+        assert_eq!(Cheat::from_event(&CheatEvent { tick: 1, kind: EV_VEHICLE, arg: 11 | 8 << 8 }), None);
         assert_eq!(Cheat::from_event(&CheatEvent { tick: 1, kind: 99, arg: 0 }), None);
-        assert_eq!(Cheat::parse("vehicle=23"), Some(Cheat::Vehicle(23)));
+        assert_eq!(Cheat::parse("vehicle=23"), Some(Cheat::Vehicle(23, 0)));
+        assert_eq!(Cheat::parse("vehicle=11:3"), Some(Cheat::Vehicle(11, 3)));
+        assert_eq!(Cheat::parse("vehicle=11:8"), None);
         assert_eq!(Cheat::parse("nogod"), Some(Cheat::God(false)));
+        assert_eq!(Cheat::parse("wanted+"), Some(Cheat::Wanted(1)));
+        assert_eq!(Cheat::parse("wanted-"), Some(Cheat::Wanted(-1)));
+        assert_eq!(Cheat::parse("wanted0"), Some(Cheat::ClearWanted));
+    }
+
+    #[test]
+    fn pending_wanted() {
+        let mut c = Cheats { wanted: 5, ..Default::default() };
+        c.queue = vec![Cheat::Wanted(1), Cheat::Wanted(1), Cheat::AllWeapons];
+        assert_eq!(c.wanted_pending(), MAX_WANTED);
+        c.queue = vec![Cheat::ClearWanted, Cheat::Wanted(-1), Cheat::Wanted(1)];
+        assert_eq!(c.wanted_pending(), 1);
     }
 
     #[test]

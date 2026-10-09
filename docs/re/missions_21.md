@@ -363,6 +363,15 @@ Race21(ev = 20000+c):               // car passed its next checkpoint
 There is no time limit and no check that the player stays in car 10: the checkpoint
 triggers watch actor 10 itself. AI racers that finish keep looping their waypoints.
 
+**Port, autoplay (MS-1).** From commit `6dbfb2c` the autoplay bot's car 10 was wrecked mid-race in every run
+("What the hell are doing?", ev 10). Cause: the bot, not the game. It set the car's heading, speed and velocity
+directly every tick, so after a corner it kept driving at full speed into the wall or into car 11, and the
+driving pass's wall bounces (`BounceUnit`, v²>>14 per hit) and contact damage (`CheckForCollisions`) then
+applied every tick. Traced with `--autoplay-debug` (car 10 lost 24 health a tick against car 11 at (3,80)).
+The bot now drives with the game's AI driver at the wheel (`autoplay.rs` `steer_car`, the controls only), at
+most the best AI's leg cap, passing a waypoint within the AI's own goto radius; the car survives and finishes
+(5th or so). The AI racers' ramming (skill 99+ skips the look-ahead) was not the cause.
+
 ### M4: Police surveillance van (slot 4, start event 400, phone 5) 68k `0xc9e60` + `0xc8642..0xc87f2`
 
 ```

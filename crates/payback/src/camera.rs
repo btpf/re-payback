@@ -1,5 +1,6 @@
 //! Cameras: the game's overhead camera (docs/re/rendering.md §6, OS4
-//! `FUN_010556e0`) and a free debug camera (toggle with F2).
+//! `FUN_010556e0`) and a free debug camera (toggle with F6; F2 is a
+//! previous-weapon key on the Mac).
 //!
 //! Split screen (multiplayer, `FUN_0105bd98`): every player has a view
 //! with its own camera state ([`ViewCams`]). Player 1 keeps the
@@ -117,6 +118,55 @@ pub struct ExtraView(pub u8);
 #[derive(Component)]
 pub struct OverlayCamera;
 
+/// The view size in 1/256 of the window (`DAT_0114c310`, config field
+/// 12): 0xB0..0x100 in steps of 0x10, '=' grows and '-' shrinks it in game
+/// (`FUN_01051940` / `FUN_01051a10`), software rendering and one player
+/// only (refused and forced to 0x100 under Warp3D; `FUN_0105bd98` scales
+/// the view's W and H by it). The view is centred, black around it, and
+/// the HUD is drawn relative to it (`FUN_0101168c` moves the framebuffer
+/// pointer).
+pub fn view_size(settings: Option<&crate::frontend::progress::Settings>, players: usize) -> u32 {
+    match settings {
+        Some(s) if !s.hardware && players <= 1 => (s.view_size as u32).clamp(VIEW_SIZE_MIN, 0x100),
+        _ => 0x100,
+    }
+}
+
+/// Smallest view size (`DAT_0114c310`).
+pub const VIEW_SIZE_MIN: u32 = 0xB0;
+
+/// The single view's rectangle (x, y, w, h) in a `w`×`h` window at view
+/// size `size` (/256), centred.
+pub fn sized_view_rect(w: u32, h: u32, size: u32) -> (u32, u32, u32, u32) {
+    let (vw, vh) = ((w * size / 256).max(1), (h * size / 256).max(1));
+    ((w - vw.min(w)) / 2, (h - vh.min(h)) / 2, vw, vh)
+}
+
+/// '=' / '-' in game: grow or shrink the view by 0x10 (`FUN_01051940` /
+/// `FUN_01051a10`), refused under hardware rendering and in split screen.
+fn view_size_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<GameMode>,
+    time: Res<Time<Virtual>>,
+    settings: Option<ResMut<crate::frontend::progress::Settings>>,
+) {
+    let Some(mut s) = settings else { return };
+    if s.hardware || mode.is_multiplayer() || time.is_paused() {
+        return;
+    }
+    let d: i32 = if keys.just_pressed(KeyCode::Equal) {
+        0x10
+    } else if keys.just_pressed(KeyCode::Minus) {
+        -0x10
+    } else {
+        return;
+    };
+    let next = (s.view_size as i32 + d).clamp(VIEW_SIZE_MIN as i32, 0x100) as u16;
+    if next != s.view_size {
+        s.view_size = next;
+    }
+}
+
 /// Render layer nothing is on (the overlay camera's).
 const EMPTY_LAYER: usize = 30;
 
@@ -198,6 +248,18 @@ const DRIVING: Follow = Follow {
     c: 3,
     r: None,
 };
+/// The player's RC car, top-down (Mac `UpdateMapPosition` @ 10068cb0, the
+/// `_DAT_1017c484 != −1` branch: lead `v·150`, `sin·225`, height
+/// `clamp(|3·speed| + 800 − z/16, 1, 3000)`). With the rotating view it
+/// uses `v·200`, `sin·225`, `min(|2·speed| + 1000 − z/16, 3000) − 600`,
+/// i.e. [`DRIVING_ROTATING`].
+const RC: Follow = Follow {
+    k: 225,
+    v: 150,
+    b: 800,
+    c: 3,
+    r: None,
+};
 /// Rotating view, on foot (`FUN_010556e0`, model `+0x4909` set: people).
 const ON_FOOT_ROTATING: Follow = Follow {
     k: 150,
@@ -240,6 +302,9 @@ pub struct RotatingView(pub bool);
 pub struct ViewEyes {
     /// The followed camera of each view, one game tick at a time.
     follow: Vec<GameCam>,
+    /// `follow` one tick earlier: with smooth motion (`crate::frame`) the
+    /// views are drawn between the two, as the objects are.
+    prev: Vec<GameCam>,
     /// The camera each view is drawn from this frame.
     pub cams: Vec<GameCam>,
     /// View 0 is the replay TV camera (its visible range is 3 squares
@@ -265,10 +330,10 @@ impl Default for RotatingView {
 
 /// `--rotating-view [0|1]` or `--no-rotating-view`, overriding the setting.
 fn forced_rotating() -> Option<bool> {
-    if std::env::args().any(|a| a == "--no-rotating-view") {
+    if crate::args().any(|a| a == "--no-rotating-view") {
         return Some(false);
     }
-    std::env::args()
+    crate::args()
         .any(|a| a == "--rotating-view")
         .then(|| crate::arg("--rotating-view").is_none_or(|v| v != "0"))
 }
@@ -369,6 +434,7 @@ impl Plugin for CameraPlugin {
             .init_resource::<TvCamera>()
             .add_plugins(postfx::PostFxPlugin)
             .add_systems(PreUpdate, follow_settings)
+            .add_systems(Update, view_size_keys.run_if(in_state(AppState::Playing)))
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 OnEnter(AppState::Playing),
@@ -385,6 +451,7 @@ impl Plugin for CameraPlugin {
                     angles.0 = vec![ViewAngle::default(); mode.players().max(1)];
                     eyes.follow = vec![GameCam::default(); mode.players().max(1)];
                     eyes.cams = eyes.follow.clone();
+                    eyes.prev = eyes.follow.clone();
                     eyes.tv = false;
                     *tv = TvCamera::default();
                     if mode.is_multiplayer() {
@@ -425,6 +492,7 @@ impl Plugin for CameraPlugin {
                     place_game_camera,
                     place_extra_views,
                     free_controls,
+                    solo_background,
                     layout_views,
                     separators,
                 )
@@ -435,7 +503,7 @@ impl Plugin for CameraPlugin {
 }
 
 fn arg_f32(name: &str) -> Option<f32> {
-    std::env::args()
+    crate::args()
         .skip_while(|a| a != name)
         .nth(1)
         .and_then(|v| v.parse().ok())
@@ -527,7 +595,7 @@ fn spawn_views(commands: &mut Commands, n: usize, primary: Option<Entity>) {
 }
 
 fn spawn_camera(mut commands: Commands) {
-    let free_requested = std::env::args().any(|a| a == "--free");
+    let free_requested = crate::args().any(|a| a == "--free");
     let free = FreeRig {
         focus: Vec3::new(
             arg_f32("--x").unwrap_or(64.0),
@@ -555,7 +623,7 @@ fn spawn_camera(mut commands: Commands) {
 }
 
 fn toggle_mode(keys: Res<ButtonInput<KeyCode>>, mut cam: Single<&mut GameCamera>) {
-    if keys.just_pressed(KeyCode::F2) {
+    if keys.just_pressed(KeyCode::F6) {
         cam.mode = match cam.mode {
             CameraMode::Follow => CameraMode::Free,
             CameraMode::Free => CameraMode::Follow,
@@ -574,33 +642,63 @@ fn follow_tick(
     mut views: ResMut<ViewCams>,
     mut eyes: ResMut<ViewEyes>,
     target: Query<(&Obj, Has<Vehicle>), With<CameraTarget>>,
+    rc: Option<Res<crate::sim::rc_car::RcCars>>,
+    objs: Query<&Obj>,
 ) {
     let n = views.0.len().max(1);
     if eyes.follow.len() != n {
         eyes.follow = vec![GameCam::default(); n];
     }
+    let eyes = &mut *eyes;
+    eyes.prev.clone_from(&eyes.follow);
+    // A player with an RC car out watches it; after it blew up the view
+    // holds still for 60 ticks (Mac `UpdateMapPosition` @ 10068cb0,
+    // `_DAT_1017c484` / `_DAT_1017c364`; `sim::rc_car`).
+    let watched = |obj: &'_ Obj, driving: bool| -> Option<(Obj, Mode)> {
+        let p = obj.player.unwrap_or(0) as usize;
+        let rc = rc.as_deref();
+        if rc.is_some_and(|r| r.holding(p)) {
+            return None;
+        }
+        match rc.and_then(|r| r.follow(p)).and_then(|e| objs.get(e).ok()) {
+            Some(car) => Some((car.clone(), Mode::Rc)),
+            None => Some((obj.clone(), if driving { Mode::Driving } else { Mode::OnFoot })),
+        }
+    };
     if views.0.is_empty() {
         let Ok((obj, driving)) = target.single() else {
             return;
         };
-        follow(&trig, &mut cam, obj, driving, false);
-        follow(&trig, &mut eyes.follow[0], obj, driving, rotating.0);
+        let Some((obj, mode)) = watched(obj, driving) else { return };
+        follow(&trig, &mut cam, &obj, mode, false);
+        follow(&trig, &mut eyes.follow[0], &obj, mode, rotating.0);
         return;
     }
     for (obj, driving) in &target {
         let Some(p) = obj.player.map(|p| p as usize).filter(|&p| p < n) else { continue };
-        follow(&trig, &mut views.0[p], obj, driving, false);
-        follow(&trig, &mut eyes.follow[p], obj, driving, rotating.0);
+        let Some((obj, mode)) = watched(obj, driving) else { continue };
+        follow(&trig, &mut views.0[p], &obj, mode, false);
+        follow(&trig, &mut eyes.follow[p], &obj, mode, rotating.0);
     }
     *cam = views.0[0];
 }
 
-fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool, rotating: bool) {
-    let f = match (driving, rotating) {
-        (false, false) => ON_FOOT,
-        (true, false) => DRIVING,
-        (false, true) => ON_FOOT_ROTATING,
-        (true, true) => DRIVING_ROTATING,
+/// What the camera follows.
+#[derive(Clone, Copy)]
+enum Mode {
+    OnFoot,
+    Driving,
+    /// The player's RC car (`sim::rc_car`).
+    Rc,
+}
+
+fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, mode: Mode, rotating: bool) {
+    let f = match (mode, rotating) {
+        (Mode::OnFoot, false) => ON_FOOT,
+        (Mode::Driving, false) => DRIVING,
+        (Mode::Rc, false) => RC,
+        (Mode::OnFoot, true) => ON_FOOT_ROTATING,
+        (Mode::Driving | Mode::Rc, true) => DRIVING_ROTATING,
     };
     let lead = |v: i32| (v as i64 * f.v).clamp(-LEAD_CAP, LEAD_CAP);
     let tx = obj.pos.x as i64 * 32 + f.k * trig.sin(obj.heading) as i64 + lead(obj.vel.x);
@@ -694,6 +792,18 @@ fn view_transform(pos: Vec3, angle: Option<ViewAngle>) -> Transform {
     Transform::from_translation(pos).looking_to(look, ahead)
 }
 
+/// A camera state `t` of the way from `a` to `b` (smooth motion).
+fn between(a: &GameCam, b: &GameCam, t: f32) -> GameCam {
+    let t = t as f64;
+    let mix = |a: f64, b: f64| (a + (b - a) * t).round();
+    GameCam {
+        x: mix(a.x as f64, b.x as f64) as i64,
+        y: mix(a.y as f64, b.y as f64) as i64,
+        h: mix(a.h as f64, b.h as f64) as i32,
+        initialised: b.initialised,
+    }
+}
+
 /// Render position of a camera state.
 fn eye(game: &GameCam) -> Vec3 {
     Vec3::new(
@@ -745,6 +855,7 @@ fn yaw_towards(dx: f64, dy: f64) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn tv_camera(
     time: Res<Time>,
+    smooth: Res<crate::frame::Smooth>,
     rotating: Res<RotatingView>,
     mode: Res<GameMode>,
     replay: Option<Res<crate::replay::ReplayState>>,
@@ -755,6 +866,14 @@ fn tv_camera(
 ) {
     let eyes = &mut *eyes;
     eyes.cams.clone_from(&eyes.follow);
+    // Smooth motion: between the last two ticks' cameras (`crate::frame`).
+    if smooth.alpha < 1.0 && eyes.prev.len() == eyes.cams.len() {
+        for (c, p) in eyes.cams.iter_mut().zip(&eyes.prev) {
+            if p.initialised {
+                *c = between(p, c, smooth.alpha);
+            }
+        }
+    }
     if eyes.cams.is_empty() {
         eyes.cams.push(GameCam::default());
     }
@@ -855,6 +974,52 @@ fn place_extra_views(
     }
 }
 
+/// The camera behind one player's view when it does not fill the window
+/// (view size below 0x100, the level-start zoom): it clears the window
+/// black and shows the zoom picture (`hud::zoom::LAYER`). The UI stays on
+/// the game camera, laid out in its viewport, so the HUD follows the view
+/// and its subtract panels still act on the view's own target.
+#[derive(Component)]
+struct SoloBackground;
+
+/// Spawn or drop [`SoloBackground`].
+#[allow(clippy::too_many_arguments)]
+fn solo_background(
+    mut commands: Commands,
+    mode: Res<GameMode>,
+    state: Res<State<AppState>>,
+    settings: Option<Res<crate::frontend::progress::Settings>>,
+    zoom: Res<crate::hud::zoom::ZoomIn>,
+    primary: Query<&GameCamera>,
+    existing: Query<Entity, With<SoloBackground>>,
+) {
+    let Ok(game) = primary.single() else { return };
+    let free = game.mode == CameraMode::Free;
+    let want = *state.get() == AppState::Playing
+        && !mode.is_multiplayer()
+        && !free
+        && (view_size(settings.as_deref(), mode.players()) < 0x100 || zoom.zoom.is_some());
+    match (want, existing.single().ok()) {
+        (true, None) => {
+            commands.spawn((
+                Camera2d,
+                Camera {
+                    order: -20,
+                    clear_color: ClearColorConfig::Custom(Color::BLACK),
+                    ..default()
+                },
+                RenderLayers::layer(crate::hud::zoom::LAYER),
+                SoloBackground,
+                LevelEntity,
+            ));
+        }
+        (false, Some(e)) => {
+            commands.entity(e).despawn();
+        }
+        _ => {}
+    }
+}
+
 /// Black window areas between split-screen views (the separators, and the
 /// sides of the centred third view), drawn on the overlay.
 #[derive(Component)]
@@ -866,6 +1031,11 @@ fn gaps(n: usize, w: u32, h: u32) -> Vec<(f32, f32, f32, f32)> {
     if rects.len() < 2 {
         return Vec::new();
     }
+    gaps_around(&rects, w, h)
+}
+
+/// Window areas none of `rects` covers, as fractions (x, y, w, h).
+fn gaps_around(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> Vec<(f32, f32, f32, f32)> {
     let (wf, hf) = (w as f32, h as f32);
     // Scan in bands between the views' edges; anything uncovered is a gap.
     let mut ys: Vec<u32> = rects.iter().flat_map(|r| [r.1, r.1 + r.3]).chain([0, h]).collect();
@@ -900,6 +1070,7 @@ fn layout_views(
     state: Res<State<AppState>>,
     rotating: Res<RotatingView>,
     settings: Option<Res<crate::frontend::progress::Settings>>,
+    zoom: Res<crate::hud::zoom::ZoomIn>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut primary: Query<(&mut Camera, &mut Projection, &GameCamera), Without<ExtraView>>,
     mut extras: Query<(&ExtraView, &mut Camera, &mut Projection), Without<GameCamera>>,
@@ -930,8 +1101,32 @@ fn layout_views(
             ..default()
         })
     };
+    let sized = view_size(settings.as_deref(), mode.players());
+    let zoom_rect = zoom.zoom.as_ref().map(|z| z.view_rect());
     let (order, clear, vp) = if split {
         (-10, ClearColorConfig::Default, viewport(0))
+    } else if let Some(r) = zoom_rect.filter(|_| *state.get() == AppState::Playing && !free) {
+        // The level-start zoom: the view shrunk to the genlocked frame
+        // (`crate::hud::zoom`).
+        let (w, h) = (size.x.max(2) as f32, size.y.max(2) as f32);
+        let x0 = (r.min.x * w).clamp(0.0, w - 1.0);
+        let y0 = (r.min.y * h).clamp(0.0, h - 1.0);
+        let x1 = (r.max.x * w).clamp(x0 + 1.0, w);
+        let y1 = (r.max.y * h).clamp(y0 + 1.0, h);
+        let vp = Viewport {
+            physical_position: UVec2::new(x0 as u32, y0 as u32),
+            physical_size: UVec2::new((x1 - x0) as u32, (y1 - y0) as u32),
+            ..default()
+        };
+        (-10, ClearColorConfig::Default, Some(vp))
+    } else if sized < 0x100 && *state.get() == AppState::Playing && !free {
+        let (x, y, w, h) = sized_view_rect(size.x.max(2), size.y.max(2), sized);
+        let vp = Viewport {
+            physical_position: UVec2::new(x, y),
+            physical_size: UVec2::new(w, h),
+            ..default()
+        };
+        (-10, ClearColorConfig::Default, Some(vp))
     } else {
         (0, ClearColorConfig::Default, None)
     };
@@ -1012,7 +1207,8 @@ fn free_controls(
 }
 
 /// Keep the black separator rectangles in step with the split-screen
-/// layout (none outside multiplayer).
+/// layout (none outside multiplayer; a shrunk single view has the black
+/// [`SoloBackground`] around it).
 fn separators(
     mut commands: Commands,
     mode: Res<GameMode>,
@@ -1023,7 +1219,8 @@ fn separators(
 ) {
     let split = mode.is_multiplayer() && *state.get() == AppState::Playing;
     let size = window.single().map(|w| w.physical_size()).unwrap_or(UVec2::new(1280, 800));
-    let want = if split { gaps(mode.players(), size.x.max(2), size.y.max(2)) } else { Vec::new() };
+    let (w, h) = (size.x.max(2), size.y.max(2));
+    let want = if split { gaps(mode.players(), w, h) } else { Vec::new() };
     if *last == want && existing.iter().count() == want.len() {
         return;
     }

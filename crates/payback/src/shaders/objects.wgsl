@@ -15,7 +15,15 @@
 // Coordinates are clamped to the 256x128 texture like the original.
 
 // Hardware (Warp3D) look, params.x = 1: kind 4 (mode 0x11) adds
-// CloudsReflect ONE/ONE over the opaque face instead of table 9.
+// CloudsReflect ONE/ONE over the opaque face instead of table 9. Every
+// object texture is its own card texture there (filtered bilinearly), so
+// the coordinates are kept half a texel inside their 256x128 atlas slot:
+// the filter never reads the neighbouring texture.
+//
+// params.y = 1 with GAMMA_TARGET (the game's object library in a game
+// view, `crate::camera::postfx::GammaWorld`): the output is the
+// gamma-encoded palette RGB, so additive and 50 % faces blend the palette
+// bytes as the Alpha.256 tables do. The menu models stay linear.
 
 #import bevy_pbr::{
     mesh_functions,
@@ -81,16 +89,40 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+// Exact sRGB transfer functions (the atlas is decoded exactly).
 fn to_srgb(c: vec3<f32>) -> vec3<f32> {
-    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3(0.0031308));
 }
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
-    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+    return select(hi, lo, c <= vec3(0.04045));
+}
+
+// Hardware: `uv` kept half a texel inside its 256x128 slot.
+fn inside_slot(uv: vec2<f32>) -> vec2<f32> {
+    let slot = vec2<f32>(256.0, 128.0);
+    let p = uv * ATLAS;
+    let origin = floor(p / slot) * slot;
+    return clamp(p, origin + vec2(0.5), origin + slot - vec2(0.5)) / ATLAS;
 }
 
 @fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+fn fragment(in_raw: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    var in = in_raw;
+#ifdef VERTEX_UVS_A
+    if params.x > 0.5 {
+        in.uv = inside_slot(in.uv);
+#ifdef VERTEX_UVS_B
+        if in.uv_b.x >= 0.0 {
+            in.uv_b = inside_slot(in.uv_b);
+        }
+#endif
+    }
+#endif
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     var out: FragmentOutput;
@@ -107,6 +139,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         }
         let mixed = clamp(to_srgb(colour.rgb) + to_srgb(s) - bias, vec3<f32>(0.0), vec3<f32>(1.0));
         colour = vec4<f32>(to_linear(mixed), colour.a);
+    }
+#endif
+#ifdef GAMMA_TARGET
+    if params.y > 0.5 {
+        colour = vec4<f32>(to_srgb(colour.rgb), colour.a);
     }
 #endif
     out.color = main_pass_post_lighting_processing(pbr_input, colour);

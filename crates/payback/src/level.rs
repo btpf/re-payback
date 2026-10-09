@@ -178,7 +178,7 @@ pub struct LevelLoad {
     pub progress: Option<Progress>,
     /// Debug (`--load-delay <ms>`): idle time between stages.
     delay: std::time::Duration,
-    wait_until: Option<std::time::Instant>,
+    wait_until: Option<bevy::platform::time::Instant>,
 }
 
 /// Loading stages, in order (see [`LevelLoad::run_stage`]).
@@ -220,12 +220,12 @@ impl LevelLoad {
         if self.done() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = bevy::platform::time::Instant::now();
         if self.wait_until.is_some_and(|t| now < t) {
             return;
         }
         self.wait_until = Some(now + self.delay);
-        let t = std::time::Instant::now();
+        let t = bevy::platform::time::Instant::now();
         self.run_stage(world);
         self.stage += 1;
         if let Some(p) = &mut self.progress {
@@ -284,8 +284,11 @@ impl LevelLoad {
             }
             // Cube texture atlases and the city materials.
             1 => {
+                // Night maps are darkened in the atlas only in software
+                // (`lighting::sync_mode`), so the atlas is built once for
+                // the renderer in use.
                 let night = self.map.as_ref().is_some_and(|m| m.night);
-                let atlases = city::build_cube_atlases(&data, night);
+                let atlases = city::build_cube_atlases(&data, night && !crate::render_mode::is_hardware());
                 let (opaque, keyed, indices, sky) = {
                     let mut images = world.resource_mut::<Assets<Image>>();
                     (
@@ -454,7 +457,7 @@ pub struct Progress {
 
 impl Progress {
     pub fn init(data: &GameData, name: &'static str) -> Progress {
-        let saved = std::fs::read(crate::frontend::progress::saves_dir().join(name)).ok();
+        let saved = crate::frontend::progress::read_file(&crate::frontend::progress::saves_dir().join(name)).ok();
         let unit = saved
             .and_then(|b| be_u32(&b))
             .or_else(|| data.read(format!("General/{name}")).ok().and_then(|b| be_u32(&b)))
@@ -481,8 +484,7 @@ impl Progress {
             return;
         }
         let dir = crate::frontend::progress::saves_dir();
-        let res = std::fs::create_dir_all(&dir)
-            .and_then(|_| std::fs::write(dir.join(self.name), (unit as u32).to_be_bytes()));
+        let res = crate::frontend::progress::write_file(&dir.join(self.name), &(unit as u32).to_be_bytes());
         match res {
             Ok(()) => info!("Wrote updated file sizes ({} = {unit})", self.name),
             Err(e) => warn!("{}: {e}", self.name),

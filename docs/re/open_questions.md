@@ -87,8 +87,8 @@ order). Nothing contradicts §11.
   (`FUN_010bf8bc`, `FUN_010c101c`, `FUN_010c4fec`, `FUN_010c7218`).
 - **`TankBits`** (new): the one object texture exempt from the night `.dark`
   swap/darkening (OS4 `FUN_010bf310`, 68k `FUN_00095efa`). Worth a line in §4 Night.
-- Still OPEN: the unrolled Gouraud copies "whose offsets were not all decoded (INFERRED:
-  the same diagonal)" (§4). Evidence needed: decode the remaining unrolled offsets.
+- Resolved (2026-10-09): the unrolled Gouraud copies walk the same diagonal (Mac
+  `CheckVoxels` @ 100b3960, the only voxel reader of `DoLightSourcing`); see the table.
 
 ### 1.2 `frontend_menus.md`
 
@@ -161,8 +161,9 @@ two open items. Original notes:
 - Check: §7 row 8 says cities 1 and 2 are offered "if the previous city's first level has a
   cup (I)", while §11 (newer text) says a built-in city c+1 is skipped while city c's
   **last** level (`DAT_0117aecc[c*2]`) has no cup (C). One of them should go.
-- Still OPEN: §1 p3 of `FUN_0102ca08` "(I: replay state)" and §9 `FUN_0103da68` "(I: input
-  reset)". Evidence needed: trace `DAT_0114c8a8` writers and the body of `FUN_0103da68`.
+- Resolved (2026-10-09): §1 p3 of `FUN_0102ca08` is "the recorded game had fewer than two
+  players" (high-score entry allowed) and `FUN_0103da68` is the pad reader, used here as an
+  input reset; see the `frontend_menus.md` table below.
 
 ### 1.3 `vehicles.md`
 
@@ -235,7 +236,7 @@ respawn defaults.
 | Header `night` | CONFIRMED, applied | `== 1` → `FUN_0106ecf0` |
 | Flags low bits "probably traffic flow" | CONFIRMED, applied | `FUN_01047af4`, `FUN_010cb7e4` |
 | Flags `0x40` "TBD" | CONFIRMED, applied | roadblock allowed, `FUN_01047134` |
-| Flags `0x80` "TBD" | OPEN | no reader in either build (OS4 `FUN_0105f594` does not decompile; its 68k twin was scanned); 18 squares in map 0; probably an editor leftover. Needs the map editor or a full OS4 disassembly scan. |
+| Flags `0x80` "TBD" | CONFIRMED (unused) | no reader in either game build, and the Mac map editor (`MapEditor (OS X)`, `analysis/ghidra_mapedx`) neither sets nor reads it: its key handler `amiga_handleMessage` toggles only `0x01`..`0x40` (F1-F6, B), its overlays (`amiga_runloop`) and `SaveMinimap` @ 1007df40 (`flags & 0x1f`) test only those, and `LoadMap` @ 1007fe50 / `SaveMap` @ 1007f380 / `Grab` / `Paste` copy the byte whole. The 18 squares in map 0 carry it from an older editor; no effect. |
 | Scenery rotation "(observed)" | CONFIRMED, applied | `SetScenery` writes cell `+0` |
 | Obj header `flag` "TBD" | CONFIRMED, applied | face depth sorting, `FUN_010bf8bc` |
 | Slot mode/param "observed" values | CONFIRMED, applied | mode table, `FUN_010c101c` |
@@ -245,7 +246,7 @@ respawn defaults.
 | `.route` "TBD" | CONFIRMED, applied | `combat_police.md` §1 |
 | `.vehicles` "TBD" | CONFIRMED, applied | `FUN_0106dbbc` |
 | `.textures` "TBD" | CONFIRMED, applied | `FUN_0106e8ec` |
-| `.textures` in-memory `+0x30` | OPEN | never read; needs the map editor to see what it writes |
+| `.textures` in-memory `+0x30` | CONFIRMED (unused) | a "referenced by the loaded map" stamp of the shared `TextureInfo` struct (0x38 bytes): the map editor's `LoadMap` @ 1007fe50 flips a generation flag (`DAT_100c955c = 1 − it`) and `GetCubeTexture` @ 1007dc40 / `ReadCubeTextureList` @ 1007c200 store it at `+0x30`; nothing reads it, and `SaveUserTextures` @ 1007d950 writes only name, `+0x2c` type, `+0x34` Gouraud texture and the pixels. Not in the file. |
 | `.CubeTextureList` flags / RemapList "TBD" | CONFIRMED, applied | `rendering.md` §8, §4 |
 
 (Sound sample rates "TBD" and the mission-script status are covered by the rows of
@@ -256,7 +257,7 @@ respawn defaults.
 | Item | Status | Evidence / where |
 |---|---|---|
 | Inner-side wall culling (§1) | CONFIRMED, merged | `FUN_0107b910`, `FUN_0107bd3c`, `FUN_0107c260`, `FUN_0107d74c` |
-| Unrolled Gouraud copies "same diagonal" (§4) | OPEN | decode the remaining unrolled offsets |
+| Unrolled Gouraud copies "same diagonal" (§4) | CONFIRMED | the Mac `DoLightSourcing` @ 1015b840 has no inline copies: all 14 tests call `CheckVoxels` @ 100b3960, which steps `(x−k, y−k, z+k)` (voxel grid 256×256×10, −0xa00 −10 +1 per step) up to z 9. The OS4 unrolled copies are the same walk. |
 | Off-map colour black (§6) | CONFIRMED, merged | buffers zeroed at level start only |
 | Tick length "not traced here" (§7) | CONFIRMED, merged | `people.md` §1.1 |
 | Mode 3 texel 0 transparent (§10) | CONFIRMED, merged | `FUN_0111e410` |
@@ -292,7 +293,7 @@ respawn defaults.
 |---|---|---|
 | Footstep sound ids [I] (§0) | CONFIRMED, applied | OS4 `FUN_01005864` load order |
 | Route `used` byte value 1 (§1) | INFERRED, kept | getter `FUN_000a43d0` has no callers |
-| Editor's next-hop algorithm (§1) | OPEN | reverse-engineer the map editor; BFS matches 99.98 % |
+| Editor's next-hop algorithm (§1) | CONFIRMED, applied | Mac `MapEditor (OS X)` `CalculateRouting` @ 100776a0 / `CalculateRoute` @ 100775b0 / `CalculateDist` @ 10077480: BFS hop counts with a never-cleared visited-stamp array; reproduces all 31 shipped `.route` tables exactly (`Route::calculate_routing`). |
 | Square test "special&0x7f" (§2.2) | CONFIRMED, merged | top face type, `FUN_000cf5cc` |
 | Tank/heli never random traffic [I] (§2.2) | CONFIRMED, merged | weight `+0x4934` = 0 |
 | Port pursuit note [I] (§2.2) | CONFIRMED, merged | `sim/pursuit.rs` |
@@ -324,8 +325,8 @@ respawn defaults.
 | Model 16 `cross` use | CONFIRMED, merged | Game Over `FUN_01021434` |
 | Screen modes chosen in PaybackSetup (I) | INFERRED, kept | the game only reads the ModeIDs; the setup tool is not decompiled |
 | City row unlock rule (I) vs §11 (C) | CONFIRMED, merged | §7 now follows §11's `DAT_0117aecc[c*2]` rule |
-| Game Menu p3 "(I: replay state)" | OPEN | trace `DAT_0114c8a8` writers |
-| Language select `FUN_0103da68` "(I: input reset)" | OPEN | read `FUN_0103da68` |
+| Game Menu p3 "(I: replay state)" | CONFIRMED | `DAT_0114c8a8` = the recorded game's player count (`FUN_010bba1c` at record start: 1, or `DAT_0114c2e4` in multiplayer; also read from replay files). p3 = count < 2 lets the Game Menu offer the Rampage high-score entry (Mac `DoGameMenu` @ 100a05e0 `(…, GetNumPlayersMovie() < 2)`, `GetNumPlayersMovie` @ 100f99f0). The port matches (`GameMenu::after_rampage` only after a single-player Rampage). |
+| Language select `FUN_0103da68` "(I: input reset)" | CONFIRMED | `FUN_0103da68` is the controller (pad) half of the menu input poll (called by `FUN_0103f3d0` after the keyboard). Called alone it clears the struct's Esc/fire words and sets `DAT_0114c460 = 1`, so the next `FUN_0103f3d0` starts from a zeroed struct: the confirming press is not carried into the next screen. The Mac `DoSetLanguage` @ 1008c2b0 has no such call. No port impact (edge-triggered menus). |
 
 ### `docs/re/frontend_audio.md`
 
@@ -337,9 +338,9 @@ respawn defaults.
 | View intro no-op (§3.3) | CONFIRMED, applied (corrected) | 68k plays it |
 | Config fields (§3.7) | CONFIRMED, applied | see §1.2 |
 | Scripts play Heartbeat etc.? (§4.4) | CONFIRMED, applied | none do; CD command 0x20 |
-| §4.4 "square flags & 0x7F == 4 → water" | OPEN | probably the top face type (cube `+9`); check the reader |
-| §4.4 truck Bus/Bleep/12 (I), deleted-on-release (I) | INFERRED, kept | not investigated in this pass |
-| CD_Audio_Handler format, track list (§4.6) | OPEN | needs the original CD's audio tracks / CD-release handler |
+| §4.4 "square flags & 0x7F == 4 → water" | CONFIRMED | Mac `do_Person` @ 1013fbd0 tests cube `+9 & 0x7f == 4`; Mac `LoadMap` @ 100b3a60 stores the top face's type (bits 12–14) there, with the flip bit as 0x80: a Reflect top. Other steps use the top texture's sound for any cube with a record (`GetSampleNum` @ 100ad3c0, 4 for a 2-byte cube's null texture). |
+| §4.4 truck Bus/Bleep/12 (I), deleted-on-release (I) | CONFIRMED | Mac `InitStructures` @ 1005ffb0: truck engine 0x46 (Bus), reversing 0x17 Bleep, CD track 12, horn left at the default 3 CarHorn; the horn is deleted on release (`DoVehicleFire` @ 10070c20). The port matches (`vehicles.rs` `TYPES[19]`). |
+| CD_Audio_Handler format, track list (§4.6) | CONFIRMED (format); track contents OPEN | protocol decoded from the CD `Payback.exe` (0x7a860–0x7acbe) and the handler: commands 0x3e8 quit, 0x3e9 play, 0x3ea stop, 0x3eb ensure, 0x3ec volume (unused); same track numbers as U7/OS4. The audio itself needs a mixed-mode rip |
 | Pause `FUN_01008cec(0)` (§7) | CONFIRMED, applied | CDDA thread |
 | "MERP" = Adobe Premiere (§5.1) | INFERRED, kept | creator tag only |
 | FLC frame rate "× 0.5" (§5.1) | CONFIRMED, applied (corrected) | `FUN_000106c0`: +0.5 rounding, 66 ms |
@@ -377,7 +378,7 @@ respawn defaults.
 | `SetCube` slope 0 | CONFIRMED, applied | removes the cube |
 | `Dialog_Begin` speaker ids | CONFIRMED, applied | icon only |
 | §7 "2159 View outro is unreferenced (INFERRED: outro unused)" | INFERRED, kept | no reference found; design intent |
-| CD script command codes "not mapped" (§6) | OPEN | map the remaining stubs against `analysis/ghidra_script00/` (legacy only; low value) |
+| CD script command codes "not mapped" (§6) | CONFIRMED, applied | every code mapped through the CD `Payback.exe` dispatcher `DoScript` (0x55e38–0x57f60) and the call sites (`script_api.md` §6) |
 
 ### `docs/re/missions_00.md`
 
@@ -445,15 +446,15 @@ respawn defaults.
 |---|---|---|
 | Q1 weapon 8 | CONFIRMED, applied | remote bomb placed |
 | Q2 M5 boarding over-count | CONFIRMED, applied | no type 9 |
-| Q3 M3 `SetCube` at (56..57,114..115) | INFERRED, kept (removal CONFIRMED, applied) | fence gap: in-game look |
-| Q4 M1 texture 0x1dd ring | OPEN | view texture 0x1dd in `--screenshot` |
+| Q3 M3 `SetCube` at (56..57,114..115) | CONFIRMED (data) | (56,115) cube 1 is a front-fence piece (`Fence2` genlocked south face) right in front of the house's doorway at (56,114) cube 1; removing it opens the fence at the door |
+| Q4 M1 texture 0x1dd ring | CONFIRMED (data) | 0x1dd = `Snow.chunky`; the ring squares carry the block's painted shadow (`Snow.Dark`, `SnowShad1/3`), so the edit removes the demolished block's shadow |
 | Q5 speaker ids | CONFIRMED, applied | icon only |
 | Q6 Kill-frenzy clock vs mission timers | OPEN | run RC bonus during M2/M6 |
 | Q7 helper `default:` branches | INFERRED, kept | design note for the port |
-| Q8 ped skins | CONFIRMED, applied (body parts not checked) | load order `0xd7874` |
+| Q8 ped skins | CONFIRMED, applied | load order `0xd7874`; colours per limb group from the `.Obj` files (`missions_11.md` §8 item 8) |
 | Zone A = hotel (INFERRED) | INFERRED, kept | coordinates |
 | (63,116) door (INFERRED) | INFERRED, kept | map texture match |
-| CD unlock logic not traced | OPEN | CD stub `0x11384` |
+| CD unlock logic not traced | CONFIRMED | 0x11384 is script11's unlock routine, identical to U7 `0xb52c2` / Mac `FinishMission_11`; the other levels' routines match U7 too (00 0x113c0 = 0xb506e, 01 = 0xb5198, 10 0x113c2 = 0xb5230, 21 0x11396 = 0xb538e; 20 has none) |
 | `0xb448e` p4 side (INFERRED) | CONFIRMED, applied | `0xdb196` |
 | Speaker meaning (INFERRED) | CONFIRMED, applied | icon only |
 
@@ -465,7 +466,7 @@ respawn defaults.
 | Q2 `AddSound` 1000000000 | CONFIRMED, applied | loudness, z 19000 |
 | Q3 `Actor_Siren` on the heli | CONFIRMED, applied | `Heli_TakeOff`/`Land` |
 | Q4 `SetAmbience` on respawn | CONFIRMED, applied | not reset; consistent |
-| Q5 boat role, garage 0x40 from a boat | OPEN | in-game test (or trace 0x40's mode check) |
+| Q5 boat role, garage 0x40 from a boat | CONFIRMED (data) | the boat can't get there: boats only move on water (`vehicles.md` §2.8), the boat's water body (1488 squares connected to (47,12)) ends at x = 61, and (107,3) is a flat floor cube 46 squares east. The garage is reached on foot or by car. |
 | Boat = escape option (INFERRED) | INFERRED, kept | no trigger |
 | Ambience default 3 (INFERRED) | CONFIRMED, applied | `0xec686` |
 | Speaker 2 = gang radio (INFERRED) | CONFIRMED, applied | icon Mobile |

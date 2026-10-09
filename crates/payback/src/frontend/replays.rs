@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// map) are accepted; the shipped Amiga ones are version 3, refused as on
 /// OS4.
 pub fn load(cx: &Ctx, path: &std::path::Path) -> Result<Replay, u32> {
-    let b = std::fs::read(path).map_err(|_| 2115u32)?;
+    let b = crate::vfs::read(path).map_err(|_| 2115u32)?;
     let version = b.get(..4).map(|v| i32::from_be_bytes([v[0], v[1], v[2], v[3]]));
     if !matches!(version, Some(10 | 0x3f2 | 0x3f3)) {
         return Err(2116);
@@ -43,10 +43,10 @@ pub fn launch(
 fn scan(cx: &Ctx) -> Vec<(String, PathBuf)> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     for dir in [crate::replay::saves_dir(), cx.data.root.join("Replays")] {
-        let Ok(d) = std::fs::read_dir(&dir) else { continue };
+        let Ok(d) = crate::vfs::read_dir(&dir) else { continue };
         for e in d.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_file() && !files.iter().any(|(n, _)| *n == name) {
+            if e.is_file() && !files.iter().any(|(n, _)| *n == name) {
                 files.push((name, e.path()));
             }
         }

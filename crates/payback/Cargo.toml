@@ -14,6 +14,12 @@ rodio = { version = "0.22", default-features = false }
 # Same winit as Bevy, for the window icon.
 winit = { version = "0.30", default-features = false }
 
+# The web build (docs/web.md): JS glue, the page's URL and localStorage.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.129"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location", "Storage", "Document", "HtmlElement"] }
+
 [build-dependencies]
 payback-formats = { path = "../payback-formats" }
 ico = "0.5"

@@ -161,7 +161,7 @@ impl Source for FilmDecoder {
 /// track decoded up front (72 s, well under 0.1 s of work).
 fn open_film(data: &GameData) -> Option<(Mpeg, Option<FilmAudio>)> {
     let path = data.mac_path(MAC_FILM)?;
-    let bytes: Arc<[u8]> = match std::fs::read(&path) {
+    let bytes: Arc<[u8]> = match crate::vfs::read(&path) {
         Ok(b) => b.into(),
         Err(e) => {
             warn!("intro: {}: {e}", path.display());

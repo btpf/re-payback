@@ -288,7 +288,10 @@ Corrections from the Mac (C, `do_Other` @ 10146280; OS4 main.c 1422/1784):
 - Rocket car (types 24-26): with the throttle forward the model swaps rocketcar/thrust2 → thrust1 → thrust2,
   back to rocketcar otherwise; the box follows the model.
 - A police van with its siren on alternates its model with `policevan_red` (brake 10, grip 20, mass 2000), so its
-  handling alternates; not reproduced by the port.
+  handling alternates (C, Mac `DoVehicleFire` @ 10070c20: `+0x940 >= 5` → `_red`). Port: `driving::light_bar`
+  copies the red frame of `pursuit::Siren` into `Drive::red_frame`; the driving step then uses
+  `vehicles::POLICEVAN_RED` and the contacts its mass 2000 (the blast knock-back in `combat.rs` still reads the
+  van's 2500).
 - Engine pitch (C): on the ground `|ws|·20000/eff + 6000` (tank `·10000 + 4000`) with the damage-capped top speed
   `eff`, and the clonk swap below 50 health; in the air (`PositionAirborneUnit`) the same over the plain maxF; the
   helicopter on the ground with its engine off 4000.
@@ -401,7 +404,10 @@ The CubeTextureList surface flags (C for the codes above; texture lists in `extr
 
 Order per object (C, Mac `object_MainLoop` @ 1014a670): `MoveObject_Vehicle` (lift, gravity, move, cube collision,
 bounce), then `do_Other` (controls, the first sub-step's landing / ground follow, steering, `PositionUnit`,
-`SkidUnit`, the hit speed reset), then the scenery push (`AddCollideObj`). In `MoveObject_Vehicle` the vertical
+`SkidUnit`, the hit speed reset), then the scenery push (`AddCollideObj`). The port runs it in two phases
+(`driving.rs` `drive::<true>` / `drive::<false>`, AI-1) with the vehicle AI (traffic, script orders, pursuit)
+between them, so the AI steers from this tick's position as `do_Other` does; per phase over all vehicles rather
+than per object. In `MoveObject_Vehicle` the vertical
 block below runs only from the second sub-step. Gravity `vz += 0x20; z += vz` runs on every sub-step unless the car
 is both in water and on the ground — on dry ground too, so the walls are tested at `z` after gravity (on flat
 ground alternately the ground and 0xa0 below it, as the follow sets `vz = ground + 0x80 − z`); the drawn z is the
@@ -490,8 +496,11 @@ Levels: `+0x8b0` = the highest cube level of the 9 points (the surface, the scen
 centre's (water, crates, pickups). Nothing outside the collision code writes `+0x8f0`; contact pushes keep it.
 
 Port (`collide.rs` `box_points` / `vehicle_walls`, `driving.rs`): as above (one sub-step per tick), including the
-speed reset (until 2026-10-08 it halved the speed). Left: glass is removed at the end of the tick, not at the
-moment it breaks. Until 2026-10 the port tested a cross of half-size 256 and
+speed reset (until 2026-10-08 it halved the speed). Glass goes the moment it breaks (`GetCollideInfo` @ 100af0e0
+clears `cube + 8`, C): `collide::crossing` treats a cube smashed earlier in the tick as gone (all its faces), and
+`collide::remove_glass_now` takes it out of the map right after that vehicle's wall test, so the ground, later
+vehicles and people of the same tick no longer meet it; the sound, trigger 0x2a and the render edit still follow
+after the loop (`smash_glass`). Until 2026-10 the port tested a cross of half-size 256 and
 restored the previous position: corners of the box (half-width and front/rear are larger than 256) could get into a
 building or through a fence, and the 9 height samples then read a roof (`GetCubeInfo2` of a building square has only
 the roof), rolling the car up to 90° beside walls and jittering as the contact came and went.
@@ -593,6 +602,31 @@ See §3 (damage and collisions). Object contacts (Mac `CheckForCollisions` @ 100
 `analysis/mac/driving_review.md` (items 34-42: speed damping `(8s + s·m_self/(mi+mj))/9` per touching pair, z push,
 integer distance, live positions, the RC car excluded, sparks per touching circle pair between two vehicles,
 vehicle-vehicle Thud/Thud2 for both, run-over blood with droplets); the port follows them (`sim/contact.rs`).
+
+Also in `CheckForCollisions` (C, Mac @ 1006a150), now in the port:
+
+- **Touch flag** `+0x98c = 1` on both objects of any touching pair with a vehicle in it. Only walkers read it
+  (the walk-to-door re-plan); the port sets `boarding::Touched` on every walker touching a vehicle (it was
+  players only). The port's AI never walks to a car, so only the player's boarding reads it.
+- **Shunt counter** `+0x944 += 1` on both of two touching vehicles, every touching tick (before the Thuds). The
+  player's car carries the player's counters (copied in and out by `GetInOutVehicles` @ 10066140, Mac l.24152 /
+  24677 / 24933), so the "shunt 'n bump" count of the crime summary (`+0x944`, Mac ~29642) grows per contact
+  tick with the player's car; port: `police::Crimes::shunt += 1` per player vehicle in the pair (the `Hurt`
+  path's +1 for a damaged car stays, as `CheckHitObject` has it).
+- **Props** (class 2, the special-object table `_DAT_1017c5f8` = `toc[-0x1b92]`: 0 barrier, 1 cone, 2 dummy,
+  3 bullet): only the barrier, cone and dummy (and two weapon models) exchange pushes. The **dummy** takes no
+  push and its partner takes all of it, unscaled (`±p` instead of `±p·min(m)/m`). After the damage, if i (the
+  current object) is a barrier or cone: `v_i −= p/4` (C division), HitScenery (30, 2e6 @ 8500) at i and roll
+  `[3] = 0x5a0` (knocked over); a dummy i only makes the sound. Then the same for j with `v_j += p/4` (the
+  sound still at i, and the dummy test reads i again). Port: `contact.rs` (`vehicles::Prop` marks the props).
+- **Prop motion** (C): class 2 objects move with `MoveObject_General` @ 1006e4f0 (on/below the floor: z = floor,
+  vz = 0x20; then vz += 0x20, z += vz; x, y += v; the class 1/2 wall test with the model radius), then
+  `do_Weapon` @ 1013e390: barrier/cone bounce off walls (`v = ±|v|` away from it; sound 5 at 12000 for the
+  barrier, 30 at 8500 for the cone, 2e6), on the floor with no wall hit `vz = −|vz >> 3|`, the same sound if vz
+  > 500, and v → 0 by 32 per tick, else by 1; the dummy never moves sideways (vx = vy = 0) and lands with vz = 0;
+  the bullet prop sits on the floor. Port: `sim/props.rs` (`move_props`, after the driving step; `sync_props`
+  draws position, heading, pitch and roll). Until 2026-10 props never moved or turned (a push only shifted their
+  hidden position).
 
 ---
 
@@ -754,7 +788,7 @@ The same code serves the player (C, Mac `do_Other` @ 10146280 and `DoVehicleFire
   model goes back to the plain one, and `if (+0x918 >= 0) { DeleteSound(+0x918); +0x918 = −1 }`.
 - `DoVehicleFire` by type: tank (`+0x8164`) fires its gun (BigGunFire 0x1c, 15e6 @ 9000, a missile, 4×2
   dust puffs); a type with a linked model `+0x815c` (bomb truck) launches its RC car if the player has
-  none out (port: not implemented); otherwise the horn: `+0x918 < 0` → `AddSound(+0x8178, loop, 20e6,
+  none out (§6.5); otherwise the horn: `+0x918 < 0` → `AddSound(+0x8178, loop, 20e6,
   clamp(16e6 / +0x8148 mass, 3000, 20000))`, police (`+0x8166 == 1`) `25e6 @ 10000`; else
   `ModifySound(+0x918, pos)`. Police also flash: `+0x940 += ticks`, mod 10; < 5 → the `_blue` model,
   else `_red`; `AddLighting(x, y, z − 500)` with (20e6, 20e6, 200e6) for blue, (200e6, 20e6, 20e6) for red.
@@ -766,6 +800,37 @@ The same code serves the player (C, Mac `do_Other` @ 10146280 and `DoVehicleFire
 Port: `driving::horns` (player, and deleting every horn not sounded this tick), `vehicle_ai::horn`
 (slot `Drive::horn`), police via `pursuit::sirens` (also during pursuit) with the light glow in
 `lighting::collect_lights`.
+
+### 6.5 The RC car (bomb truck)
+
+C, Mac `DoVehicleFire` @ 10070c20 (`+0x815c` branch), `do_Other` @ 10146280 (`+0x8160` branch at the top),
+`DoCollideStuff` @ 10067b50, `GetInOutVehicles` @ 10066140, `UpdateMapPosition` @ 10068cb0; per-player slots
+`_DAT_1017c484` (the RC car's object index, −1 none), `_DAT_1017c364` (camera hold), `_DAT_1017c32c` (fire held
+last frame, copied from the fire keys at the end of `MainLoop` @ 1014a920).
+
+- **Launch**: in the bomb truck (state 2, slot −1, fire pressed and not held last frame) `NewObj(+0x815c, truck
+  x, y, heading)`: last clear position `+0x8f0/4` = the truck's x, y; z, level `+0x8b0`, speed `+0x890` and
+  velocity copied; `+0x8f8` = z; engine `+0x8180` looped at 10e6 @ 20000 (z + 100) into `+0x914`, sound 2 looped
+  at volume 0 into `+0x91c`; owner side `+0x824 = 1`, player `+0x998` = the truck's `+0x994`; slot = the new
+  object. `CreateObject` leaves state 4.
+- **Driving it**: while the slot points at it, the RC car's update takes the player's keys (`+0x998`):
+  accelerate → throttle −1 and `PlAccelerate` @ 100f71a0 (fires trigger 0x42), reverse → +1, brake against the
+  motion, left/right → steer; a fire press (fire held last frame clear) sets health −71 and marks fire held.
+  Then the normal vehicle step (state not checked). The truck (state 2, slot set) gets no throttle, steering
+  or fire.
+- **End**: `DoCollideStuff` on health < −70 with `+0x8160`: slot = −1, camera hold = 60, then `ObjectDead` and
+  `Detonate(i, 0)` (`Shockwave` from the RC car: owner side 1 pays the player, `+0x998` gets the credit).
+  Getting out of the truck and the player dying set the RC car's health to −71 and the slot to −1.
+- **Camera**: with the slot set the player's view follows the RC car (top-down: lead `v·150`, `sin·225`, height
+  `clamp(|3·speed| + 800 − z/16, 1, 3000)`; rotating: `v·200`, `sin·225`, `min(|2·speed| + 1000 − z/16, 3000) −
+  600`); while the hold counts down (1 per tick) the view does not move.
+- The RC car takes no part in object contacts, dies on splashing into water and has a larger scenery footprint
+  (above).
+
+Port: `sim/rc_car.rs` (`rc_controls` before the driving step, `rc_launch` after it, `RcCars` slots),
+`contact.rs` `vehicle_damage` (the end), `camera.rs` `follow_tick` (the view). The RC car is spawned by a queued
+world command, so it first moves the tick after the launch (the original's object loop reaches the new object
+in the same frame).
 
 ### 6.3 Port deviations
 
