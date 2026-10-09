@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn hardware_skips_gouraud() {
-        let mut s = Settings::default();
+        let mut s = Settings { hardware: false, ..Settings::default() };
         assert_eq!(first_item(&s), 0);
         s.hardware = true;
         assert_eq!(first_item(&s), 1);

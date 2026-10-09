@@ -436,7 +436,7 @@ pub struct Settings {
     /// is not changed, so turning it off restores the original gating.
     pub unlock_all: bool,
     /// Fixed original framing (HFOV ~64 deg, the 320x256 look on 4:3);
-    /// false = widen with the window aspect.
+    /// false (the default) = widen with the window aspect.
     pub original_aspect: bool,
     /// "Smooth motion" (port-added, default on): objects and cameras drawn
     /// between the last two game ticks (`crate::frame`); off = the
@@ -523,7 +523,8 @@ impl Default for Settings {
             gouraud: true,
             rotating_view: false,
             minimap_3d: false,
-            hardware: false,
+            // Port default (user choice); the original starts in software.
+            hardware: true,
             resolution: None,
             window_mode: default(),
             // Radio, the Mac default; 3 (Disabled) is forced while no music
@@ -542,7 +543,8 @@ impl Default for Settings {
             variants: default(),
             hires_hud: true,
             unlock_all: false,
-            original_aspect: true,
+            // Port default (user choice): widen with the window.
+            original_aspect: false,
             smooth_motion: true,
             vsync: true,
             frame_limit: 0,
