@@ -264,7 +264,7 @@ fn read_devices(
                 let t = &controls.pads[n as usize % 4];
                 let pad = axes.state(e, g);
                 let held = |a: usize| pad_held(&pad, t[a]);
-                let [l, r, u, d] = controls.opts.pad_directions(g);
+                let [l, r, u, d] = pad.directions();
                 input.left = l || held(b::LEFT);
                 input.right = r || held(b::RIGHT);
                 input.accel = u || held(b::ACCELERATE);

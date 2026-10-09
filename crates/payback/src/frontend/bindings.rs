@@ -188,20 +188,26 @@ impl PadOptions {
     }
 
     /// The fixed joystick directions (left, right, up, down): the left
-    /// stick past the deadzone, or the d-pad.
+    /// stick past the deadzone, or the d-pad. Opposite directions held
+    /// together cancel (a d-pad can't press both; seen when a release
+    /// event is lost, docs/controls.md).
     pub fn directions(&self, stick: Vec2, dpad: Vec2) -> [bool; 4] {
         let t = self.stick();
-        [
+        let [l, r, u, d] = [
             stick.x <= -t || dpad.x < 0.0,
             stick.x >= t || dpad.x > 0.0,
             stick.y >= t || dpad.y > 0.0,
             stick.y <= -t || dpad.y < 0.0,
-        ]
+        ];
+        [l && !r, r && !l, u && !d, d && !u]
     }
 
-    /// [`Self::directions`] of a gamepad.
+    /// [`Self::directions`] of a gamepad's left stick and d-pad buttons
+    /// (opposite d-pad buttons cancel before the stick is added).
     pub fn pad_directions(&self, g: &Gamepad) -> [bool; 4] {
-        self.directions(g.left_stick(), g.dpad())
+        use GamepadButton::*;
+        let b = |n, p| g.pressed(p) as i32 as f32 - g.pressed(n) as i32 as f32;
+        self.directions(g.left_stick(), Vec2::new(b(DPadLeft, DPadRight), b(DPadDown, DPadUp)))
     }
 }
 
@@ -240,28 +246,79 @@ fn axis_bit(axis: GamepadAxis, positive: bool) -> Option<u16> {
     AXES.iter().position(|&a| a == axis).map(|i| 1 << (2 * i + positive as usize))
 }
 
-/// Every gamepad's axis ends pressed this frame and the frame before, so
-/// that axis bindings have presses (edges) like buttons.
+/// Bit of the joystick direction `i` (left, right, up, down) in
+/// [`PadTrack::armed`], after the axis-end bits.
+const DIR_BITS: u32 = 2 * AXES.len() as u32;
+
+/// Frames after a pad connects in which whatever is held is taken as its
+/// rest state (about half a second).
+const GRACE_FRAMES: u32 = 30;
+
+/// One gamepad's tracked state ([`track_pad_axes`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct PadTrack {
+    /// Axis ends pressed the frame before and this frame (bits of
+    /// [`axis_bit`]), already guarded.
+    prev: u16,
+    now: u16,
+    /// The joystick directions (left, right, up, down), guarded.
+    dirs: [bool; 4],
+    /// Axis ends and directions seen released since the pad connected:
+    /// one held from the start (a stick resting off centre, a trigger
+    /// resting at -1, a button reported held; anything held during the
+    /// first [`GRACE_FRAMES`] frames, when the platform reports the
+    /// initial state) counts only once it has been let go.
+    armed: u32,
+    /// Frames since the pad connected, up to [`GRACE_FRAMES`].
+    frames: u32,
+    /// LeftZ / RightZ seen below zero: a trigger reported on the full
+    /// -1..1 range (rest at -1), read as (v + 1) / 2.
+    signed: [bool; 2],
+}
+
+/// Every gamepad's axis ends and joystick directions, this frame and the
+/// frame before, so that axis bindings have presses (edges) like buttons;
+/// with the guards against pads that misreport their rest
+/// ([`PadTrack`], docs/controls.md).
 #[derive(Resource, Default)]
-pub struct PadAxes(bevy::platform::collections::HashMap<Entity, (u16, u16)>);
+pub struct PadAxes(bevy::platform::collections::HashMap<Entity, PadTrack>);
 
 impl PadAxes {
-    /// The axis ends newly pushed on gamepad `e` this frame.
-    pub fn just_pressed(&self, e: Entity) -> Vec<PadInput> {
-        let (prev, now) = self.0.get(&e).copied().unwrap_or_default();
-        let new = now & !prev;
+    /// The axis ends newly pushed on gamepad `e` this frame. A trigger
+    /// that reports as a button as well as a Z axis gives its button only
+    /// (the redefine prompt takes the button).
+    pub fn just_pressed(&self, e: Entity, g: &Gamepad) -> Vec<PadInput> {
+        let t = self.0.get(&e).copied().unwrap_or_default();
+        let new = t.now & !t.prev;
+        let has_button = |a| match a {
+            GamepadAxis::LeftZ => g.get(GamepadButton::LeftTrigger2).is_some_and(|v| v > 0.0),
+            GamepadAxis::RightZ => g.get(GamepadButton::RightTrigger2).is_some_and(|v| v > 0.0),
+            _ => false,
+        };
         AXES.iter()
             .flat_map(|&a| [(a, false), (a, true)])
-            .filter(|&(a, p)| axis_bit(a, p).is_some_and(|b| new & b != 0))
+            .filter(|&(a, p)| axis_bit(a, p).is_some_and(|b| new & b != 0) && !has_button(a))
             .map(|(a, p)| PadInput::Axis(a, p))
             .collect()
     }
 
-    /// Gamepad `e` with its axis edges.
+    /// Gamepad `e` with its axis edges and directions.
     pub fn state<'a>(&self, e: Entity, g: &'a Gamepad) -> PadState<'a> {
-        let (prev, now) = self.0.get(&e).copied().unwrap_or_default();
-        PadState { g, prev, now }
+        let t = self.0.get(&e).copied().unwrap_or_default();
+        PadState { g, prev: t.prev, now: t.now, dirs: t.dirs }
     }
+}
+
+/// An axis value as the bindings read it: triggers reported on -1..1
+/// moved to 0..1 (`signed` remembers the range once seen).
+fn axis_value(a: GamepadAxis, v: f32, signed: &mut [bool; 2]) -> f32 {
+    let i = match a {
+        GamepadAxis::LeftZ => 0,
+        GamepadAxis::RightZ => 1,
+        _ => return v,
+    };
+    signed[i] |= v < -0.05;
+    if signed[i] { (v + 1.0) / 2.0 } else { v }
 }
 
 /// Update [`PadAxes`] (`PreUpdate`, after the gamepad input).
@@ -273,19 +330,31 @@ pub fn track_pad_axes(
     let opts = settings.map(|s| s.controls.opts).unwrap_or_default();
     axes.0.retain(|e, _| pads.contains(*e));
     for (e, g) in &pads {
-        let mut now = 0;
+        let t = axes.0.entry(e).or_default();
+        let mut raw = 0u32;
         for (i, &a) in AXES.iter().enumerate() {
-            let v = g.get(a).unwrap_or(0.0);
-            let t = opts.axis_threshold(a);
-            if v <= -t {
-                now |= 1 << (2 * i);
+            let v = axis_value(a, g.get(a).unwrap_or(0.0), &mut t.signed);
+            let th = opts.axis_threshold(a);
+            if v <= -th {
+                raw |= 1 << (2 * i);
             }
-            if v >= t {
-                now |= 1 << (2 * i + 1);
+            if v >= th {
+                raw |= 1 << (2 * i + 1);
             }
         }
-        let entry = axes.0.entry(e).or_default();
-        *entry = (entry.1, now);
+        for (i, d) in opts.pad_directions(g).into_iter().enumerate() {
+            raw |= (d as u32) << (DIR_BITS + i as u32);
+        }
+        if t.frames < GRACE_FRAMES {
+            t.frames += 1;
+            t.armed = !raw;
+        } else {
+            t.armed |= !raw;
+        }
+        let held = raw & t.armed;
+        t.prev = t.now;
+        t.now = held as u16;
+        t.dirs = std::array::from_fn(|i| held & (1 << (DIR_BITS + i as u32)) != 0);
     }
 }
 
@@ -294,6 +363,16 @@ pub struct PadState<'a> {
     pub g: &'a Gamepad,
     prev: u16,
     now: u16,
+    dirs: [bool; 4],
+}
+
+impl PadState<'_> {
+    /// The joystick directions (left, right, up, down): left stick past
+    /// the deadzone or d-pad, opposite directions cancelling, a direction
+    /// held since the pad connected ignored until released.
+    pub fn directions(&self) -> [bool; 4] {
+        self.dirs
+    }
 }
 
 /// Columns of the control setup screen.
@@ -760,12 +839,39 @@ pub const REPEAT_RATE: f32 = 0.1;
 pub struct NavRepeat {
     dir: IVec2,
     next: f32,
+    /// Components held when the menu opened (or the pad came): ignored
+    /// until released, so a direction stuck on can't run the menu away.
+    block: IVec2,
+    /// Last menu frame, to notice a menu that opens again.
+    last: f32,
 }
 
+/// A menu not read for this long has closed and opened again.
+const NAV_GAP: f32 = 0.5;
+
 impl NavRepeat {
+    /// A new entry at time `now` with `dir` held: that direction is
+    /// blocked until released.
+    pub fn opened(dir: IVec2, now: f32) -> Self {
+        NavRepeat { dir: IVec2::ZERO, next: now, block: dir, last: now }
+    }
+
     /// The directions pressed at time `now` with `dir` held: newly pushed
     /// components at once, the whole direction again while held.
     pub fn step(&mut self, dir: IVec2, now: f32) -> IVec2 {
+        if now - self.last > NAV_GAP {
+            *self = Self::opened(dir, now);
+        }
+        self.last = now;
+        // A blocked component frees once it goes back to centre (or flips).
+        self.block = IVec2::new(
+            if dir.x == self.block.x { self.block.x } else { 0 },
+            if dir.y == self.block.y { self.block.y } else { 0 },
+        );
+        let dir = IVec2::new(
+            if self.block.x != 0 { 0 } else { dir.x },
+            if self.block.y != 0 { 0 } else { dir.y },
+        );
         let new = IVec2::new(
             if dir.x != self.dir.x { dir.x } else { 0 },
             if dir.y != self.dir.y { dir.y } else { 0 },
@@ -784,12 +890,13 @@ impl NavRepeat {
 }
 
 /// Every connected pad into the menu keys: d-pad or left stick (past the
-/// deadzone, auto-repeating), A (South) or Start = fire, B (East) = back,
+/// deadzone, auto-repeating; [`PadState::directions`], so a direction
+/// held since the pad came is ignored until released, and one held when
+/// the menu opens too, [`NavRepeat`]), A (South) or Start = fire, B (East) = back,
 /// Start also sets `start` (the pause menu resumes on it).
 pub fn pad_menu_input<'a>(
     pads: impl Iterator<Item = (Entity, &'a Gamepad)>,
     axes: &PadAxes,
-    opts: &PadOptions,
     nav: &mut Vec<(Entity, NavRepeat)>,
     now: f32,
     input: &mut super::ui::Input,
@@ -797,16 +904,23 @@ pub fn pad_menu_input<'a>(
     let mut seen = Vec::new();
     for (e, pad) in pads {
         input.pad.extend(pad.get_just_pressed().copied());
-        input.pad_axes.extend(axes.just_pressed(e));
+        input.pad_axes.extend(axes.just_pressed(e, pad));
         let ok = pad.any_just_pressed([GamepadButton::South, GamepadButton::Start]);
         input.fire |= ok;
         input.enter |= ok;
         input.back |= pad.just_pressed(GamepadButton::East);
         input.start |= pad.just_pressed(GamepadButton::Start);
-        let [l, r, u, d] = opts.pad_directions(pad);
+        let [l, r, u, d] = axes.state(e, pad).directions();
         let dir = IVec2::new(r as i32 - l as i32, u as i32 - d as i32);
-        let mut rep = nav.iter().find(|p| p.0 == e).map_or_else(NavRepeat::default, |p| p.1);
+        let mut rep = nav.iter().find(|p| p.0 == e).map_or_else(|| NavRepeat::opened(dir, now), |p| p.1);
         let press = rep.step(dir, now);
+        if press != IVec2::ZERO {
+            pad_log(format_args!(
+                "menu nav {press} from pad {e}: left stick {:.3?}, d-pad {:.3?}",
+                pad.left_stick(),
+                pad.dpad()
+            ));
+        }
         input.left |= press.x < 0;
         input.right |= press.x > 0;
         input.up |= press.y > 0;
@@ -879,6 +993,129 @@ pub fn simulate_pad(
                 raw.write(RawGamepadEvent::Axis(RawGamepadAxisChangedEvent::new(*e, a, v)));
             }
         }
+    }
+}
+
+/// Gamepad diagnostics (port addition, docs/controls.md): on with
+/// `--pad-debug`, `PAYBACK_PAD_DEBUG=1`, or a file named `pad-debug` next
+/// to the exe (for launches without a console, such as a Steam shortcut).
+/// Logs to `payback.log` next to the exe (the previous run's log is kept
+/// as `payback.log.1`) and to the console: every gamepad connection (name,
+/// USB vendor / product id), every raw button and axis change as the
+/// platform reports it, keyboard keys, mouse wheel and motion (a remapper
+/// such as Steam Input's desktop layout may turn a pad into keys and
+/// mouse), every menu navigation step with its source, and once a second
+/// each pad's controls that are away from rest.
+pub fn pad_debug_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::args().any(|a| a == "--pad-debug")
+            || std::env::var("PAYBACK_PAD_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+            || exe_dir().is_some_and(|d| d.join("pad-debug").exists())
+    })
+}
+
+fn exe_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_arch = "wasm32")]
+    return None;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::env::current_exe().ok()?.parent().map(|d| d.to_path_buf())
+}
+
+/// One [`pad_debug_enabled`] line: console and `payback.log`.
+pub fn pad_log(msg: std::fmt::Arguments) {
+    use std::io::Write;
+    static FILE: std::sync::Mutex<Option<Option<std::fs::File>>> = std::sync::Mutex::new(None);
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    if !pad_debug_enabled() {
+        return;
+    }
+    let t = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f32();
+    info!("pad-debug {t:9.3}s {msg}");
+    let Ok(mut f) = FILE.lock() else { return };
+    let f = f.get_or_insert_with(|| {
+        let path = exe_dir()?.join("payback.log");
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        let mut f = std::fs::File::create(&path).ok()?;
+        let _ = writeln!(f, "Payback pad diagnostics, {}", std::env::args().collect::<Vec<_>>().join(" "));
+        Some(f)
+    });
+    if let Some(f) = f {
+        let _ = writeln!(f, "{t:9.3}s {msg}");
+    }
+}
+
+/// [`pad_debug_enabled`] logging (`PreUpdate`, after the input systems).
+#[allow(clippy::too_many_arguments)]
+pub fn pad_debug(
+    mut raw: MessageReader<RawGamepadEvent>,
+    mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut buttons: MessageReader<bevy::input::mouse::MouseButtonInput>,
+    mut motion: MessageReader<bevy::input::mouse::MouseMotion>,
+    time: Res<Time<Real>>,
+    pads: Query<(Entity, &Gamepad, Option<&Name>)>,
+    mut last: Local<(f32, Vec2, u32)>,
+) {
+    if !pad_debug_enabled() {
+        raw.clear();
+        keys.clear();
+        wheel.clear();
+        buttons.clear();
+        motion.clear();
+        return;
+    }
+    for ev in raw.read() {
+        match ev {
+            RawGamepadEvent::Connection(c) => pad_log(format_args!("pad {}: {:?}", c.gamepad, c.connection)),
+            RawGamepadEvent::Button(b) => pad_log(format_args!("pad {}: button {:?} = {:.3}", b.gamepad, b.button, b.value)),
+            RawGamepadEvent::Axis(a) => pad_log(format_args!("pad {}: axis {:?} = {:.3}", a.gamepad, a.axis, a.value)),
+        }
+    }
+    for k in keys.read() {
+        if !k.repeat {
+            pad_log(format_args!("keyboard {:?} {:?}", k.key_code, k.state));
+        }
+    }
+    for w in wheel.read() {
+        pad_log(format_args!("mouse wheel {:.2},{:.2} ({:?})", w.x, w.y, w.unit));
+    }
+    for b in buttons.read() {
+        pad_log(format_args!("mouse button {:?} {:?}", b.button, b.state));
+    }
+    for m in motion.read() {
+        last.1 += m.delta;
+        last.2 += 1;
+    }
+    let t = time.elapsed_secs();
+    if t - last.0 < 1.0 {
+        return;
+    }
+    last.0 = t;
+    if last.2 > 0 {
+        pad_log(format_args!("mouse motion in the last second: {} events, total {:.1},{:.1}", last.2, last.1.x, last.1.y));
+        last.1 = Vec2::ZERO;
+        last.2 = 0;
+    }
+    if pads.is_empty() {
+        pad_log(format_args!("no gamepads connected"));
+    }
+    for (e, g, name) in &pads {
+        let axes: Vec<String> = g
+            .analog()
+            .all_axes_and_values()
+            .filter(|(i, v)| matches!(i, bevy::input::gamepad::GamepadInput::Axis(_)) && *v != 0.0)
+            .map(|(i, v)| format!("{i:?}={v:.3}"))
+            .collect();
+        let pressed: Vec<String> = g.get_pressed().map(|b| format!("{b:?}")).collect();
+        pad_log(format_args!(
+            "pad {e} {:?} (vendor {:04x?}, product {:04x?}): axes off rest [{}], pressed [{}]",
+            name.map(|n| n.as_str()),
+            g.vendor_id(),
+            g.product_id(),
+            axes.join(", "),
+            pressed.join(", ")
+        ));
     }
 }
 
@@ -1274,7 +1511,7 @@ mod tests {
         fn read(pads: Query<(Entity, &Gamepad)>, axes: Res<PadAxes>, mut m: ResMut<Menu>) {
             let m = &mut *m;
             let mut input = Input::default();
-            pad_menu_input(pads.iter(), &axes, &PadOptions::default(), &mut m.nav, m.now, &mut input);
+            pad_menu_input(pads.iter(), &axes, &mut m.nav, m.now, &mut input);
             m.input = input;
         }
         let mut app = App::new();
@@ -1289,7 +1526,9 @@ mod tests {
             pad,
             GamepadConnection::Connected { name: "Test pad".into(), vendor_id: Some(0x054c), product_id: Some(1) },
         ));
-        app.update();
+        for _ in 0..GRACE_FRAMES {
+            app.update();
+        }
         assert_eq!(app.world().resource::<PadSlots>().first(), Some(pad));
         let frame = |app: &mut App, now: f32, ev: Option<RawGamepadEvent>| -> Input {
             app.world_mut().resource_mut::<Menu>().now = now;
@@ -1300,6 +1539,7 @@ mod tests {
             app.world().resource::<Menu>().input.clone()
         };
         let button = |b, v| Some(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(pad, b, v)));
+        frame(&mut app, 0.9, None);
         let i = frame(&mut app, 1.0, button(GamepadButton::DPadDown, 1.0));
         assert!(i.down && !i.up && !i.fire);
         assert!(!frame(&mut app, 1.1, None).down, "held: no repeat yet");
@@ -1328,5 +1568,198 @@ mod tests {
         assert_eq!(slots.first(), None);
         assert!(slots.take_lost());
         assert!(!slots.take_lost());
+    }
+
+    /// A headless App with Bevy's gamepad input, the pad trackers and a
+    /// menu reader, and one pad connected.
+    mod rig {
+        use super::super::*;
+        use crate::frontend::ui::Input;
+        use bevy::input::gamepad::{GamepadConnection, RawGamepadAxisChangedEvent, RawGamepadButtonChangedEvent};
+
+        #[derive(Resource, Default)]
+        pub struct Menu {
+            pub now: f32,
+            pub nav: Vec<(Entity, NavRepeat)>,
+            pub input: Input,
+            /// The single-player directions (as `sim::people` reads them).
+            pub steer: [bool; 4],
+        }
+
+        fn read(pads: Query<(Entity, &Gamepad)>, axes: Res<PadAxes>, mut m: ResMut<Menu>) {
+            let m = &mut *m;
+            let mut input = Input::default();
+            pad_menu_input(pads.iter(), &axes, &mut m.nav, m.now, &mut input);
+            m.input = input;
+            m.steer = pads.iter().next().map_or([false; 4], |(e, g)| axes.state(e, g).directions());
+        }
+
+        pub fn app() -> (App, Entity) {
+            app_with(|_| Vec::new())
+        }
+
+        /// [`app`], with events the pad reports as it connects.
+        pub fn app_with(initial: impl Fn(Entity) -> Vec<RawGamepadEvent>) -> (App, Entity) {
+            let mut app = App::new();
+            app.add_plugins(bevy::input::InputPlugin)
+                .init_resource::<PadSlots>()
+                .init_resource::<PadAxes>()
+                .init_resource::<Menu>()
+                .add_systems(PreUpdate, (assign_pads, track_pad_axes, apply_pad_options).after(bevy::input::InputSystems))
+                .add_systems(Update, read);
+            let pad = app.world_mut().spawn_empty().id();
+            app.world_mut().write_message(GamepadConnectionEvent::new(
+                pad,
+                GamepadConnection::Connected {
+                    name: "Xbox 360 Controller for Windows".into(),
+                    vendor_id: Some(0x28de),
+                    product_id: Some(0x11ff),
+                },
+            ));
+            app.update();
+            for ev in initial(pad) {
+                app.world_mut().write_message(ev);
+            }
+            for _ in 0..GRACE_FRAMES {
+                app.update();
+            }
+            (app, pad)
+        }
+
+        pub fn frame(app: &mut App, now: f32, evs: &[RawGamepadEvent]) -> Input {
+            app.world_mut().resource_mut::<Menu>().now = now;
+            for ev in evs {
+                app.world_mut().write_message(ev.clone());
+            }
+            app.update();
+            app.world().resource::<Menu>().input.clone()
+        }
+
+        pub fn steer(app: &App) -> [bool; 4] {
+            app.world().resource::<Menu>().steer
+        }
+
+        pub fn axis(pad: Entity, a: GamepadAxis, v: f32) -> RawGamepadEvent {
+            RawGamepadEvent::Axis(RawGamepadAxisChangedEvent::new(pad, a, v))
+        }
+
+        pub fn button(pad: Entity, b: GamepadButton, v: f32) -> RawGamepadEvent {
+            RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(pad, b, v))
+        }
+
+        pub fn moved(i: &Input) -> bool {
+            i.up || i.down || i.left || i.right
+        }
+
+        pub fn held(app: &App, pad: Entity, b: PadInput) -> bool {
+            let g = app.world().get::<Gamepad>(pad).unwrap();
+            pad_held(&app.world().resource::<PadAxes>().state(pad, g), Some(b))
+        }
+    }
+
+    /// A pad whose triggers rest at -1 (reported as LeftZ / RightZ on the
+    /// full range) and whose sticks drift a little: the menu stays put
+    /// for 10 s, the player doesn't steer, the redefine prompt sees
+    /// nothing; real pushes still navigate and the triggers still pull.
+    #[test]
+    fn resting_triggers_and_drift_dont_navigate() {
+        use rig::*;
+        let (mut app, pad) = app();
+        let rest = [
+            axis(pad, GamepadAxis::LeftZ, -1.0),
+            axis(pad, GamepadAxis::RightZ, -1.0),
+            axis(pad, GamepadAxis::LeftStickX, 0.09),
+            axis(pad, GamepadAxis::LeftStickY, -0.12),
+            axis(pad, GamepadAxis::RightStickY, 0.2),
+        ];
+        let mut t = 0.0;
+        let mut first = true;
+        while t < 10.0 {
+            // The drift wobbles a little, as a real stick does.
+            let wobble = [axis(pad, GamepadAxis::LeftStickX, 0.09 + 0.02 * (t * 7.0f32).sin())];
+            let i = frame(&mut app, t, if first { &rest } else { &wobble });
+            first = false;
+            assert!(!moved(&i) && i.pad_axes.is_empty() && i.pad.is_empty(), "at rest at {t}: {i:?}");
+            assert_eq!(steer(&app), [false; 4]);
+            t += 0.05;
+        }
+        // The triggers read 0..1: neither end of the axis is held.
+        assert!(!held(&app, pad, PadInput::Axis(GamepadAxis::RightZ, true)));
+        assert!(!held(&app, pad, PadInput::Axis(GamepadAxis::RightZ, false)));
+        assert!(!held(&app, pad, PadInput::Axis(GamepadAxis::LeftZ, false)));
+        // A real push still navigates, at once and with repeat.
+        let i = frame(&mut app, 10.0, &[axis(pad, GamepadAxis::LeftStickY, -0.9)]);
+        assert!(i.down && !i.up);
+        assert_eq!(steer(&app), [false, false, false, true]);
+        assert!(frame(&mut app, 10.45, &[]).down, "held: repeats");
+        assert!(!moved(&frame(&mut app, 10.5, &[axis(pad, GamepadAxis::LeftStickY, -0.1)])));
+        assert!(frame(&mut app, 10.6, &[button(pad, GamepadButton::DPadRight, 1.0)]).right);
+        frame(&mut app, 10.7, &[button(pad, GamepadButton::DPadRight, 0.0)]);
+        // Pulling a -1..1 trigger all the way counts (an Axis(RightZ+) binding).
+        let i = frame(&mut app, 10.8, &[axis(pad, GamepadAxis::RightZ, 1.0)]);
+        assert_eq!(i.pad_axes, vec![PadInput::Axis(GamepadAxis::RightZ, true)]);
+        assert!(!moved(&i), "triggers never move the menu");
+        assert!(held(&app, pad, PadInput::Axis(GamepadAxis::RightZ, true)));
+    }
+
+    /// A trigger reported as a button and as a Z axis: the redefine prompt
+    /// gets the button only.
+    #[test]
+    fn trigger_button_and_axis_counted_once() {
+        use rig::*;
+        let (mut app, pad) = app();
+        frame(&mut app, 0.0, &[]);
+        let i = frame(
+            &mut app,
+            0.05,
+            &[button(pad, GamepadButton::RightTrigger2, 1.0), axis(pad, GamepadAxis::RightZ, 1.0)],
+        );
+        assert_eq!(i.pad, vec![GamepadButton::RightTrigger2]);
+        assert!(i.pad_axes.is_empty());
+    }
+
+    /// A stick resting far off centre from the start, and d-pad buttons
+    /// stuck on (lost release events, as with Steam Input): no runaway.
+    #[test]
+    fn stuck_directions_dont_navigate() {
+        use rig::*;
+        // Off centre since the pad came: ignored until let go.
+        let (mut app, pad) = app_with(|pad| vec![axis(pad, GamepadAxis::LeftStickX, 0.8)]);
+        for k in 1..100 {
+            assert!(!moved(&frame(&mut app, k as f32 * 0.05, &[])));
+            assert_eq!(steer(&app), [false; 4]);
+        }
+        frame(&mut app, 5.0, &[axis(pad, GamepadAxis::LeftStickX, 0.0)]);
+        assert!(frame(&mut app, 5.05, &[axis(pad, GamepadAxis::LeftStickX, 0.8)]).right, "once released, it works");
+        frame(&mut app, 5.1, &[axis(pad, GamepadAxis::LeftStickX, 0.0)]);
+        // Left and right both reported held (the releases never came).
+        frame(&mut app, 5.2, &[button(pad, GamepadButton::DPadRight, 1.0)]);
+        frame(&mut app, 5.25, &[button(pad, GamepadButton::DPadLeft, 1.0)]);
+        for k in 0..100 {
+            let i = frame(&mut app, 5.3 + k as f32 * 0.05, &[]);
+            assert!(!i.left && !i.right, "opposite directions cancel ({k})");
+            assert_eq!(steer(&app), [false; 4]);
+        }
+        // The other axis still works meanwhile.
+        assert!(frame(&mut app, 10.4, &[button(pad, GamepadButton::DPadUp, 1.0)]).up);
+    }
+
+    /// A direction held when the menu opens moves nothing until it is let
+    /// go (a stuck or still-held direction can't run the menu away).
+    #[test]
+    fn held_when_menu_opens_is_ignored() {
+        use rig::*;
+        let (mut app, pad) = app();
+        frame(&mut app, 0.0, &[]);
+        assert!(frame(&mut app, 0.05, &[button(pad, GamepadButton::DPadDown, 1.0)]).down);
+        frame(&mut app, 0.1, &[]);
+        // The menu closes (a level runs) and opens again with Down still held.
+        for k in 0..60 {
+            assert!(!frame(&mut app, 5.0 + k as f32 * 0.05, &[]).down, "held since the menu opened ({k})");
+        }
+        // In game, the held direction still steers.
+        assert_eq!(steer(&app), [false, false, false, true]);
+        frame(&mut app, 8.0, &[button(pad, GamepadButton::DPadDown, 0.0)]);
+        assert!(frame(&mut app, 8.05, &[button(pad, GamepadButton::DPadDown, 1.0)]).down);
     }
 }

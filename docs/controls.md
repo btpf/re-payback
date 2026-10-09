@@ -42,7 +42,11 @@ Every front-end screen, the pause menu, the cheat menu and the graphics
 options take the pad: d-pad or left stick moves (held directions repeat
 after 0.4 s, every 0.1 s), A / Cross (or Start) confirms, B / Circle goes
 back. In a level, Start opens the pause menu and Start or B resumes.
-The keyboard keeps its original behaviour (no auto-repeat).
+The keyboard keeps its original behaviour (no auto-repeat). Triggers,
+the right stick and other axes never move the menus, and neither does
+the mouse (the original menus were keyboard / joystick only). A
+direction already held when a menu opens is ignored until it is let go
+(`bindings::NavRepeat`), so a stuck direction can't run a menu away.
 
 ## Thresholds (the game is digital)
 
@@ -56,6 +60,49 @@ The original polled switches; the sim takes on/off controls per tick
 
 The Mac counted an axis as pressed about 60 % of the way out
 (`IsHIDControlPressed` @ 10158300).
+
+## Misbehaving pads (guards)
+
+Real pads don't all rest at zero, and some events get lost; the
+guards (`bindings::track_pad_axes`, `PadState::directions`, used by
+the menus, single player and multiplayer alike):
+
+- Whatever is held during the first 30 frames after a pad connects
+  (when the platform reports its initial state) is taken as rest: that
+  axis end or direction counts only once it has been let go. A stick
+  resting off centre or a button reported held from the start can't
+  steer or navigate.
+- Triggers reported as `LeftZ` / `RightZ` on the full -1..1 range (rest
+  at -1, seen once a value below zero arrives) are read as (v + 1) / 2.
+- Opposite directions held together (d-pad Left + Right, Up + Down)
+  cancel: a d-pad can't press both, but a pad whose release events are
+  lost reports exactly that.
+- Small stick drift stays inside the deadzone (10 % minimum).
+- A trigger that reports as a button and as a Z axis is bound as the
+  button (the redefine prompt doesn't see the axis while the button
+  moves).
+
+### Lost button releases (Steam Controller, Steam Input)
+
+The first real-hardware test, a Steam Controller launched through Steam
+(Steam Input presents it as "Xbox 360 Controller for Windows", vendor
+28de product 11ff), ran the menus away: `payback.log` showed
+`DPadRight = 1` and then `DPadLeft = 1` with no release for either, after
+which Bevy kept both pressed for good; a release of A was missing too.
+Bevy reads pads through gilrs, which on Windows polls
+Windows.Gaming.Input and turns differences between readings into
+events, and those events were incomplete for this pad (Bevy itself
+follows the events faithfully). On Windows the port therefore cross-checks
+XInput-style pads (vendor 045e / 28de, or "Xbox" / "XInput" in the name)
+against XInput's polled state every frame (`frontend/xinput.rs`): with one
+such pad and one XInput slot in use, its buttons and LT / RT follow the
+slot (a lost press or release is put right, logged as `xinput: ... (the
+event was lost)`); with several, a button held on no XInput slot is
+released. The `--pad-sim` pad is left alone.
+
+Steam's desktop layout (used when the game is not launched through Steam)
+sends keys and the mouse instead: arrow keys and Enter move the menus as
+the keyboard does, the mouse is ignored.
 
 ## Control setup (in game)
 
@@ -109,6 +156,18 @@ Pads are read in the same per-frame input systems as the keyboard into
 `PlayerInputs`, with the per-tick latch (PL-9); replays record and replay
 those, so thresholds and bindings never reach the sim directly.
 
+## Diagnostics
+
+`--pad-debug`, `PAYBACK_PAD_DEBUG=1`, or a file named `pad-debug` next to
+the exe (for launches without a console, such as a Steam shortcut) log
+to `payback.log` next to the exe (the previous run's is kept as
+`payback.log.1`) and to the console: pad connections (name, vendor /
+product id), every raw button and axis change, keyboard keys, mouse
+wheel / buttons and motion (summed per second), XInput slots and
+corrections, every menu navigation step with its source (keyboard, or
+the pad with its stick and d-pad values), and once a second each pad's
+axes away from rest and buttons held (`bindings::pad_debug`).
+
 ## Testing without a pad
 
 `--pad-sim "<secs>:<control>[/<hold>],..."` connects a virtual pad and
@@ -116,3 +175,5 @@ presses controls at real-time offsets (`DPadDown`, `South`, `LeftStickY-`,
 `disconnect`, `connect`); `--pad-sim-name`, `--pad-sim-vendor 054c` change
 what it reports. `--frontend-screen controls-pad` / `controls-pad-options`
 open the control setup on gamepad 1's column / the options page.
+`--screenshot-delay <secs>` takes the `--screenshot` later (e.g. a menu
+after 10 s idle with `--pad-sim "1.5:DPadLeft/100,1.5:DPadRight/100"`).

@@ -435,7 +435,7 @@ fn read_keyboard(
     let pad = slots.first().and_then(|e| pads.get(e).ok()).map(|(e, g)| axes.state(e, g));
     let pad = pad.as_ref();
     // Left stick (past the deadzone) and d-pad: left, right, up, down.
-    let [sl, sr, su, sd] = pad.map_or([false; 4], |p| controls.opts.pad_directions(p.g));
+    let [sl, sr, su, sd] = pad.map_or([false; 4], |p| p.directions());
     let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
     let just = |a: usize| key_just(&keys, k[a], true) || pad.is_some_and(|g| pad_just(g, p[a]));
     let input = &mut inputs.0[0];

@@ -158,13 +158,15 @@ fn run_game() -> AppExit {
 }
 
 /// With `--screenshot <path>`, capture a frame once rendering has settled
-/// and exit. Used for automated visual checks.
+/// (6 s, or `--screenshot-delay <secs>`) and exit. Used for automated visual checks.
 fn screenshot_and_exit(mut commands: Commands, time: Res<Time<Real>>, mut taken: Local<bool>) {
     let Some(path) = arg("--screenshot") else {
         return;
     };
-    // Render pipelines compile asynchronously; give them time to be ready.
-    if !*taken && time.elapsed_secs() > 6.0 {
+    // Render pipelines compile asynchronously; give them time to be ready
+    // (`--screenshot-delay <secs>` waits longer).
+    let delay = arg("--screenshot-delay").and_then(|s| s.parse::<f32>().ok()).unwrap_or(6.0);
+    if !*taken && time.elapsed_secs() > delay {
         *taken = true;
         commands
             .spawn(Screenshot::primary_window())

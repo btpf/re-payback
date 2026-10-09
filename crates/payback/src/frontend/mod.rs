@@ -39,6 +39,8 @@ mod rampage;
 mod replays;
 pub mod ui;
 pub mod usermaps;
+#[cfg(all(windows, not(target_arch = "wasm32")))]
+mod xinput;
 
 use crate::audio::{FxVolume, Sound};
 use crate::camera::GameCamera;
@@ -191,10 +193,23 @@ impl Plugin for FrontendPlugin {
             .init_resource::<bindings::PadAxes>()
             .add_systems(
                 PreUpdate,
-                (bindings::assign_pads, bindings::track_pad_axes, bindings::learn_key_labels, bindings::apply_pad_options)
+                (
+                    bindings::assign_pads,
+                    bindings::track_pad_axes,
+                    bindings::learn_key_labels,
+                    bindings::apply_pad_options,
+                    bindings::pad_debug,
+                )
                     .after(bevy::input::InputSystems),
             )
             .add_systems(PreUpdate, bindings::simulate_pad.before(bevy::input::InputSystems))
+            .add_systems(
+                PreUpdate,
+                #[cfg(all(windows, not(target_arch = "wasm32")))]
+                xinput::sync_buttons.after(bevy::input::InputSystems).before(bindings::track_pad_axes),
+                #[cfg(not(all(windows, not(target_arch = "wasm32"))))]
+                (),
+            )
             .add_systems(Startup, bindings::upgrade_pad_layout)
             .add_plugins(display::DisplayPlugin)
             .add_systems(Startup, setup)
@@ -517,17 +532,21 @@ fn gather_input(
     typed: &mut MessageReader<KeyboardInput>,
     pads: &Query<(Entity, &Gamepad)>,
     pad_axes: &bindings::PadAxes,
-    opts: &bindings::PadOptions,
     nav: &mut Vec<(Entity, bindings::NavRepeat)>,
     now: f32,
     input: &mut Input,
 ) {
     input.keys.extend(keys.get_just_pressed().copied());
-    bindings::pad_menu_input(pads.iter(), pad_axes, opts, nav, now, input);
+    bindings::pad_menu_input(pads.iter(), pad_axes, nav, now, input);
     input.left |= keys.just_pressed(KeyCode::ArrowLeft);
     input.right |= keys.just_pressed(KeyCode::ArrowRight);
     input.up |= keys.just_pressed(KeyCode::ArrowUp);
     input.down |= keys.just_pressed(KeyCode::ArrowDown);
+    for k in [KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp, KeyCode::ArrowDown] {
+        if keys.just_pressed(k) {
+            bindings::pad_log(format_args!("menu nav from keyboard {k:?}"));
+        }
+    }
     let enter = keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]);
     input.enter |= enter;
     input.fire |= enter || keys.just_pressed(KeyCode::Space);
@@ -740,8 +759,8 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     }
 
     let mut pending = std::mem::take(&mut fe.pending);
-    let (opts, now) = (cx.settings.controls.opts, env.time.elapsed_secs());
-    gather_input(&env.keys, &mut env.typed, &env.pads, &env.pad_axes, &opts, &mut fe.nav, now, &mut pending);
+    let now = env.time.elapsed_secs();
+    gather_input(&env.keys, &mut env.typed, &env.pads, &env.pad_axes, &mut fe.nav, now, &mut pending);
 
     // Ticks at 30 Hz of real time (virtual time is paused in the pause
     // menu).
