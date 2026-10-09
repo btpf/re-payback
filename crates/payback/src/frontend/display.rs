@@ -239,7 +239,7 @@ impl Item {
         match self {
             Item::Gouraud => format!("{}{}", cx.g(1601), on_off(s.gouraud)),
             Item::Rotating => format!("{}{}", cx.g(1602), on_off(s.rotating_view)),
-            Item::Minimap3d => format!("3D minimap: {}", on_off(s.minimap_3d)),
+            Item::Minimap3d => format!("3D minimap: {}", on_off(s.minimap_3d_on())),
             Item::Hardware => format!("{}{}", cx.g(1603), on_off(s.hardware)),
             Item::Resolution => {
                 let (w, h) = cx.display.shown(s);
@@ -356,6 +356,8 @@ impl Item {
             // Motion blur too (`FUN_0101a7dc` case 3 refuses it).
             Item::Gouraud | Item::MotionBlur => s.hardware,
             Item::Resolution => s.window_mode == WindowChoice::Borderless,
+            // Forced on by the rotating view (`Settings::minimap_3d_on`).
+            Item::Minimap3d => s.rotating_view,
             _ => false,
         }
     }

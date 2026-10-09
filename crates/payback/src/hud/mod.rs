@@ -988,11 +988,12 @@ fn draw(
     // effect). The map itself is not doubled in software hi-res; hardware
     // draws it ×2 and plots at >> 11. The original draws it tilted and
     // turned with the camera in the rotating view ([`minimap_3d`]); the port
-    // ties that to `Settings::minimap_3d` instead (on by default), turned
+    // also offers it without the rotating view (`Settings::minimap_3d_on`,
+    // off by default unless the view rotates), turned
     // by the rotating view's yaw, or by the yaw the rotating view would
     // have when the view does not rotate (`camera::MinimapYaw`).
     if let Some(mm) = &minimap
-        && settings.as_ref().is_none_or(|s| s.minimap_3d)
+        && settings.as_ref().is_some_and(|s| s.minimap_3d_on())
     {
         let yaw = minimap_yaw.0 as i32;
         minimap_3d(&mut pen, mm, w as i32, h as i32, yaw, &hud, blink);

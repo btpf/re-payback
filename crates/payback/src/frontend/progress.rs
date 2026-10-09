@@ -23,7 +23,7 @@
 //! | `volume` | sound volume 0..100 |
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
-//! | `minimap_3d` | 0 / 1: the rotating view's tilted minimap, also without the rotating view (port-added, default 1) |
+//! | `minimap_3d` | 0 / 1: the rotating view's tilted minimap, also without the rotating view (port-added, default 0; forced on by the rotating view) |
 //! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
 //! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
 //! | `window_mode` | `windowed`, `borderless` (borderless fullscreen) or `fullscreen` (exclusive, video mode of `resolution`) |
@@ -311,8 +311,10 @@ pub struct Settings {
     pub motion_blur: bool,
     pub gouraud: bool,
     pub rotating_view: bool,
-    /// "3D minimap" (port-added, default on): the rotating view's tilted
-    /// minimap, drawn whether or not the view rotates (`hud::minimap_3d`).
+    /// "3D minimap" (port-added, default off): the rotating view's tilted
+    /// minimap, also without the rotating view (`hud::minimap_3d`). The
+    /// rotating view always uses it, as in the original; see
+    /// [`Settings::minimap_3d_on`].
     pub minimap_3d: bool,
     /// Hardware (Warp3D) rendering, config field 19 (`DAT_0114c7d8`).
     pub hardware: bool,
@@ -414,7 +416,7 @@ impl Default for Settings {
             motion_blur: false,
             gouraud: true,
             rotating_view: false,
-            minimap_3d: true,
+            minimap_3d: false,
             hardware: false,
             resolution: None,
             window_mode: default(),
@@ -506,6 +508,13 @@ impl Settings {
             self.gouraud = true;
             self.motion_blur = false;
         }
+    }
+
+    /// The 3D minimap is drawn: chosen, or forced by the rotating view (the
+    /// original draws the tilted minimap whenever the view rotates,
+    /// `DisplayMinimap` @ 10091630).
+    pub fn minimap_3d_on(&self) -> bool {
+        self.minimap_3d || self.rotating_view
     }
 
     pub fn save(&self) {

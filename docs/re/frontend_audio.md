@@ -273,8 +273,9 @@ The money display *is* the score (player +0x384).
     `textured_triangle_bilinear` (hardware) in `hud/paint.rs`; xs/ys from the HUD canvas
     (so a widescreen canvas stretches the map horizontally, as the formula would on such a
     screen). Departure: the original ties the tilted minimap to the rotating view; the port
-    makes it a separate setting, `Settings::minimap_3d` ("3D minimap", Graphics options),
-    **on by default** at the user's request: drawn at the rotating view's position and size
+    also offers it without the rotating view as a setting, `Settings::minimap_3d` ("3D
+    minimap", Graphics options, **off by default**; the rotating view always forces it on and
+    dims the item, `Settings::minimap_3d_on`), at the user's request: drawn at the rotating view's position and size
     whenever it is on, turned by the view's yaw in the rotating view and otherwise by the yaw
     the rotating view would have (the followed object's heading, eased as `turn_views` does;
     `camera::MinimapYaw`), the top-down camera itself unchanged; off gives the flat,
