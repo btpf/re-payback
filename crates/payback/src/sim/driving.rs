@@ -949,12 +949,37 @@ fn sinking(fx: &mut Fx, trig: &Trig, obj: &mut Obj, hw: i32, front: i32, rear: i
         return true;
     }
     obj.pos.z += 32;
+    box_bubbles(fx.effects, fx.rng, trig, obj, obj.pos, hw, front, rear);
+    false
+}
+
+/// The sinking bubbles of `do_Other` @ 10146280 and `do_Person` @ 1013fbd0
+/// (identical loops; 68k `FUN_000e3a58` ~122510 and ~125766): for each of
+/// the 9 box points (lateral `i·hw`, longitudinal front / 0 / −rear, turned
+/// by roll, pitch and heading) with chance `random(5) == 1`,
+/// `AddEffect(5, Bubble, p + random(500)−250 per axis, (random(10)−5,
+/// random(10)−5, random(100)−300), 100 + random(150), level + 1, 0)`, all
+/// from the gameplay `random`. `hw`, `front`, `rear` are the model's
+/// `+0x8120/+0x8124/+0x8128` (the per-object dispatcher after `do_Other`
+/// loads them for every object); `pos` is the position after this tick's
+/// sink step.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn box_bubbles(
+    effects: &mut Effects,
+    rng: &mut Rng,
+    trig: &Trig,
+    obj: &Obj,
+    pos: IVec3,
+    hw: i32,
+    front: i32,
+    rear: i32,
+) {
     let (sr, cr) = (trig.sin(obj.roll), trig.cos(obj.roll));
     let (sp, cp) = (trig.sin(obj.pitch), trig.cos(obj.pitch));
     let (sh, ch) = (trig.sin(obj.heading), trig.cos(obj.heading));
     for i in -1..=1 {
         for j in -1..=1 {
-            if fx.rng.rand(5) != 1 {
+            if rng.rand(5) != 1 {
                 continue;
             }
             let lat = cr * i * hw >> 8;
@@ -965,21 +990,22 @@ fn sinking(fx: &mut Fx, trig: &Trig, obj: &mut Obj, hw: i32, front: i32, rear: i
                 _ => 0,
             };
             let fwd = cp * l - up * sp >> 8;
-            let z = obj.pos.z + (up * cp + sp * l >> 8);
-            let y = obj.pos.y + (fwd * ch - lat * sh >> 8);
-            let x = obj.pos.x + (lat * ch + fwd * sh >> 8);
-            let size = 100 + fx.rng.rand(150);
-            let vz = fx.rng.rand(100) - 300;
-            let vy = fx.rng.rand(10) - 5;
-            let vx = fx.rng.rand(10) - 5;
-            let rz = fx.rng.rand(500);
-            let ry = fx.rng.rand(500);
-            let rx = fx.rng.rand(500);
+            let z = pos.z + (up * cp + sp * l >> 8);
+            let y = pos.y + (fwd * ch - lat * sh >> 8);
+            let x = pos.x + (lat * ch + fwd * sh >> 8);
+            let size = 100 + rng.rand(150);
+            let vz = rng.rand(100) - 300;
+            let vy = rng.rand(10) - 5;
+            let vx = rng.rand(10) - 5;
+            let rz = rng.rand(500);
+            let ry = rng.rand(500);
+            let rx = rng.rand(500);
             let p = IVec3::new(x + rx - 250, y + ry - 250, z + rz - 250);
-            fx.add(5, Tex::Bubble, p, IVec3::new(vx, vy, vz), size, obj.level + 1, Blend::Add);
+            let v = IVec3::new(vx, vy, vz);
+            let layer = (obj.level + 1) as u8;
+            effects.add(5, Tex::Bubble, p.as_vec3(), v.as_vec3(), size as f32, layer, Blend::Add);
         }
     }
-    false
 }
 
 /// `SkidUnit` @ 10081830 (OS4 `FUN_010cc288` + `FUN_010cc010`, 68k

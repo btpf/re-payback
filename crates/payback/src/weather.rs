@@ -60,7 +60,12 @@ impl Plugin for WeatherPlugin {
             .add_systems(OnExit(AppState::Playing), |mut w: ResMut<Weather>| {
                 *w = Weather::default()
             })
-            .add_systems(FixedUpdate, tick.run_if(in_state(AppState::Playing)))
+            // Draws from the game Rng (a raindrop's y): pinned before the
+            // people systems so the sequence never depends on schedule order.
+            .add_systems(
+                FixedUpdate,
+                tick.before(crate::sim::people::PeopleThink).run_if(in_state(AppState::Playing)),
+            )
             .add_systems(Update, rain_volume.run_if(in_state(AppState::Playing)));
     }
 }

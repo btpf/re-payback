@@ -203,6 +203,7 @@ impl Plugin for PeoplePlugin {
                         .chain()
                         .in_set(PeopleThink),
                     (
+                        swim_test.run_if(|| std::env::args().any(|a| a == "--swim-test")),
                         move_people,
                         animate_people,
                         regen_and_respawn,
@@ -642,6 +643,8 @@ fn move_people(
     city: Option<Res<City>>,
     trig: Res<Trig>,
     library: Option<Res<crate::objects::ObjectLibrary>>,
+    mut rng: ResMut<Rng>,
+    mut effects: ResMut<crate::effects::Effects>,
     mut q: Query<(Entity, &mut Obj, &mut Person, &Stick)>,
 ) {
     let Some(city) = city else { return };
@@ -723,10 +726,17 @@ fn move_people(
             }
         }
 
-        // Swimming and drowning.
+        // Swimming and drowning: sink 24 per tick with bubbles at the box
+        // points (Mac `do_Person` @ 1013fbd0, the same loop as a sinking
+        // vehicle's; 68k `FUN_000e3a58` ~122510).
         if obj.in_water && next.z >= obj.floor_z {
             if next.z < DROWN_Z {
                 next.z += 24;
+                if let Some(library) = &library {
+                    let info = &library.model(obj.model).info;
+                    let (hw, front, rear) = (info.radius.max(1), info.max_y, info.min_y);
+                    super::driving::box_bubbles(&mut effects, &mut rng, &trig, &obj, next, hw, front, rear);
+                }
             } else if obj.state != State::Dead {
                 if obj.player.is_some() {
                     // A drowned player stays (hidden) as a corpse so the
@@ -808,6 +818,48 @@ fn move_people(
             obj.state = State::Dead;
         }
     }
+}
+
+/// `--swim-test [ticks]`: once, after `ticks` (default 0), put the on-foot
+/// player on the water surface of the nearest water square, to watch them
+/// sink and drown (debug only).
+fn swim_test(
+    city: Option<Res<City>>,
+    mut q: Query<&mut Obj, (With<Person>, With<CameraTarget>)>,
+    mut done: Local<bool>,
+    mut ticks: Local<u32>,
+) {
+    let Some(city) = city else { return };
+    if *done {
+        return;
+    }
+    *ticks += 1;
+    if *ticks <= crate::arg("--swim-test").and_then(|v| v.parse().ok()).unwrap_or(0) {
+        return;
+    }
+    let Some(mut obj) = q.iter_mut().find(|o| o.state == State::Player) else { return };
+    let (cx, cy) = (obj.pos.x >> 11, obj.pos.y >> 11);
+    let mut best: Option<(i32, IVec3, usize)> = None;
+    for y in 0..MAP_SIZE as i32 {
+        for x in 0..MAP_SIZE as i32 {
+            let (wx, wy) = (x * 2048 + 1024, y * 2048 + 1024);
+            let Some((fz, level, true)) = collide::floor(&city, wx, wy, collide::PLANE * 16) else { continue };
+            let d = (x - cx).pow(2) + (y - cy).pow(2);
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, IVec3::new(wx, wy, fz), level));
+            }
+        }
+    }
+    *done = true;
+    let Some((_, pos, level)) = best else { return };
+    info!("swim-test: player to {pos}");
+    obj.pos = pos;
+    obj.prev_pos = pos;
+    obj.floor_z = pos.z;
+    obj.level = level;
+    obj.in_water = true;
+    obj.on_ground = true;
+    obj.vel = IVec3::ZERO;
 }
 
 /// Walk-cycle frame advance and footsteps (people.md §3.4).

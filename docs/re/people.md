@@ -472,12 +472,24 @@ You are **in water** (68k +0x338 / OS4 +0x33a) when the top face of the cube you
 ```
 if z < 27000:
     z += 24·ticks                                   // sinking
-    1-in-5 chance per corner of a bubble effect
+    bubbles: the vehicle loop (vehicles.md, sinking branch)
 else:                                               // drowned
     if player and respawn timer idle: respawn timer = 80 ticks; message 2018 "Drowned!"
     state = 6 (removed)
 ```
 
+- **Bubbles** (CONFIRMED: Mac `do_Person` @ 1013fbd0, the branch after `ObjectSunk`; 68k `FUN_000e3a58` ~122510):
+  the same loop as a sinking vehicle (`do_Other` @ 10146280), after the z step. For each of the 9 box points
+  (i, j ∈ {−1, 0, 1}: lateral `i·hw`, longitudinal front / 0 / −rear, turned by roll, pitch, heading) with
+  `random(5) == 1`: `AddEffect(5, Bubble, p + (random(500)−250) per axis, v = (random(10)−5, random(10)−5,
+  random(100)−300), size 100 + random(150), level + 1, blend 0 = additive)`. All draws are the **gameplay**
+  `random` (Mac `_random`, 68k `FUN_0003fc8c`), arguments drawn last first (size, vz, vy, vx, dz, dy, dx).
+  `hw`/front/rear are the model's `+0x8120/+0x8124/+0x8128` (Amiga `+0x48c4/+0x48c8/+0x48cc`): the
+  per-object dispatcher after `do_Other` loads them for every object, so for people hw = 192 and front/rear the
+  model's near-ground Y extents. The pitch is last tick's (0x5a0 standing, 0 dead or stunned), so a standing
+  person's front/rear spread vertically. The bubbles (velocity /3 on entry, so they rise 67–100 per tick, no size
+  change) are removed at z ≤ 23000 (`UpdateEffects` @ 100aa1f0), i.e. 1000 above a map-0 river surface (24000).
+  Port: `sim::people::move_people` → `sim::driving::box_bubbles`.
 - From a map-0 river surface (z 24000) you drown in (27000−24000)/24 = **125 ticks** (5 s at 25 Hz, 4.2 s at 30 Hz).
 - Climbing out is only possible while the bank top is within the 64 h-unit step of your z (§5.1). In practice you
   cannot climb back out of the rivers (I).

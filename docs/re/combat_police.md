@@ -770,7 +770,7 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 | 2 | −3 | vz += 17; may spawn type 4 (rand(5) < ticks) | burning debris from explosions |
 | 3 | −57 | – | dust cloud (crate / wall) |
 | 4 | −23 | at size 100..250, may spawn type 1 smoke (Dust2) | flame turning into smoke; burning vehicles |
-| 5 | 0 | removed when z ≤ 23000 | bubble (never spawned) |
+| 5 | 0 | removed when z ≤ 23000 | bubble: sinking vehicles (`do_Other` @ 10146280) and drowning people (`do_Person` @ 1013fbd0) |
 | 6 | −13 | – | dark smoke (Dust2, subtractive): damaged cars, exhaust, chimneys |
 | 7 | −66 | like type 4, smoke size 350+rand150 | explosion fireball (Flame.N) |
 | 8 | −1 | – | ground decal: blood pool (Blood, 0x30000), scorch (Dust2, 0x10000), skid marks |
@@ -781,7 +781,7 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
 | 15 | −2 | may spawn type 4 flames; loops Flames | fire source (script only) |
 
 **Textures** (`effecttextures/`, 64×64): Dust, Dust2 (alpha variant), Flare, Flame.1..4, Blood
-(the gore option swaps in Blood.dark), Gas, Bubble (unused), Shad (shadows), DirtSkidmark, Dirt.
+(the gore option swaps in Blood.dark), Gas, Bubble (types 5), Shad (shadows), DirtSkidmark, Dirt.
 
 **Blend.** The blend field selects a 64 KiB table in `General/Alpha.256`:
 - 0 = additive (default);
