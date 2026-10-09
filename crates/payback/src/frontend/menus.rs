@@ -675,18 +675,13 @@ impl Screen for PauseMenu {
     }
 
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
-        if cx.hardware {
-            // Hardware clears the screen every frame: no game picture.
-            for yy in 0..H {
-                for x in 0..ui.w {
-                    ui.back.put_rgb(x, yy, [0, 0, 0]);
-                }
-            }
-        } else {
-            // FadeDarken3 over the box 50..269 × 26..229 (virtual).
-            let (x0, x1) = (ui.vx(50), ui.vx(269));
-            ui.back.darken(x0, 26, x1, 229);
-        }
+        // FadeDarken3 over the box 50..269 × 26..229 (virtual), as a
+        // translucent panel over the frozen game picture. Also under
+        // hardware rendering, where the original (`FUN_0101a7dc`) clears
+        // the screen every frame instead: a departure at the user's
+        // request (docs/re/frontend_menus.md).
+        let (x0, x1) = (ui.vx(50), ui.vx(269));
+        ui.back.darken(x0, 26, x1, 229);
         let y = ui.hy(0x50);
         if self.sel == 3 && cx.hardware {
             // `FUN_0100cc78` under hardware.

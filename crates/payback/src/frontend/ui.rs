@@ -128,7 +128,7 @@ pub struct Ctx<'a> {
     /// User maps, cities 3.. (`DAT_01170808`).
     pub user_maps: &'a [super::usermaps::UserMap],
     /// Hardware (Warp3D) rendering is active (`DAT_0114c7d8`,
-    /// `RenderMode`): black pause background, full-brightness title.
+    /// `RenderMode`): full-brightness title, Motion blur refused.
     pub hardware: bool,
     /// The window's monitor and size (graphics options).
     pub display: &'a super::display::Display,

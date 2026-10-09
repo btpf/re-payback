@@ -446,7 +446,7 @@ pub fn first_item(s: &Settings) -> usize {
 /// returns.
 ///
 /// In a level it is drawn like the pause menu: over the frozen game
-/// picture, darkened (FadeDarken3; black under hardware rendering), with
+/// picture, darkened (FadeDarken3, also under hardware rendering), with
 /// `options.obj` turning behind, and the music kept going. Settings apply
 /// live; [`Item::next_level`] ones read "(next level)".
 pub struct GraphicsSetup {
@@ -550,15 +550,9 @@ impl super::ui::Screen for GraphicsSetup {
     fn draw(&self, ui: &mut super::ui::Ui, cx: &Ctx) {
         if !self.in_game {
             ui.picture(0, true);
-        } else if cx.hardware {
-            // As the pause menu: hardware clears the screen every frame.
-            for y in 0..super::ui::H {
-                for x in 0..ui.w {
-                    ui.back.put_rgb(x, y, [0, 0, 0]);
-                }
-            }
         } else {
-            // The pause menu's FadeDarken3 panel, widened for the list.
+            // The pause menu's FadeDarken3 panel, widened for the list
+            // (under hardware rendering too, as the pause menu).
             let (x0, x1) = (ui.vx(20), ui.vx(299));
             ui.back.darken(x0, 2, x1, 229);
         }
