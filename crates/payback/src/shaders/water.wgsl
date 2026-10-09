@@ -59,7 +59,11 @@ struct Vertex {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) uv_b: vec2<f32>,
+    // The tile origin is the same on all four corners: flat, so it is
+    // never interpolated (a perspective-interpolated 101984 lands on
+    // 101983.99 near the quad edges, which picked the neighbouring atlas
+    // tile's texel there and drew a seam along every square).
+    @location(1) @interpolate(flat) uv_b: vec2<f32>,
     @location(2) st: vec2<f32>,
     // Hardware: per corner the vertex colour (rgb) and the wobble k (w).
     @location(3) @interpolate(flat) c0: vec4<f32>,
@@ -168,7 +172,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (params.z > 0.5) {
         return fragment_hw(in);
     }
-    var tile = in.uv_b;
+    var tile = round(in.uv_b);
     var scroll = 0;
     if (tile.x >= SCROLL_FLAG) {
         tile.x -= SCROLL_FLAG;
