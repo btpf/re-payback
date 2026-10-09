@@ -27,7 +27,9 @@
 <canvas id="payback" tabindex="0"></canvas>
 <div id="status"><div id="msg">Loading...</div><div id="bar"><div id="fill"></div></div></div>
 <script type="module">
-import init, { vfs_load, start } from "./payback.js";
+// __BUILD__ / __DATA__ are replaced by tools/build_web.sh with content
+// hashes, so a browser never pairs a cached payback.js with a new .wasm.
+import init, { vfs_load, start } from "./payback.js?v=__BUILD__";
 
 const msg = document.getElementById("msg");
 const fill = document.getElementById("fill");
@@ -61,9 +63,9 @@ async function fetchBytes(url, label) {
 
 try {
   msg.textContent = "Loading the game...";
-  await init();
-  const manifest = await (await fetch("data/payback.json")).text();
-  const pak = await fetchBytes("data/payback.pak", "Loading the game data");
+  await init({ module_or_path: "./payback_bg.wasm?v=__BUILD__" });
+  const manifest = await (await fetch("data/payback.json?v=__DATA__")).text();
+  const pak = await fetchBytes("data/payback.pak?v=__DATA__", "Loading the game data");
   vfs_load(manifest, pak);
   const go = () => {
     status.remove();

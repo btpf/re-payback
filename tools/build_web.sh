@@ -64,12 +64,18 @@ if command -v wasm-opt > /dev/null && [ $profile = web ]; then
         --enable-mutable-globals --enable-reference-types --enable-multivalue -o $out/payback_bg.opt.wasm $out/payback_bg.wasm
     mv $out/payback_bg.opt.wasm $out/payback_bg.wasm
 fi
-cp web/index.html $out/
 
 if [ $data = 1 ]; then
     python tools/pack_web_data.py --out $out/data $pack_args \
         ${PAYBACK_DATA:+--game "$PAYBACK_DATA"} ${PAYBACK_MAC_DATA:+--mac "$PAYBACK_MAC_DATA"}
 fi
+
+# Cache-busting: version the module, the .wasm and the data by content hash
+# so a browser never runs a cached payback.js against a newer .wasm (the
+# wasm-bindgen glue names change on every build).
+build=$(cat $out/payback.js $out/payback_bg.wasm | sha1sum | cut -c1-12)
+datav=$( (cat $out/data/payback.json 2>/dev/null || echo none) | sha1sum | cut -c1-12)
+sed -e "s/__BUILD__/$build/g" -e "s/__DATA__/$datav/g" web/index.html > $out/index.html
 
 ls -l $out/payback_bg.wasm
 echo "Built $out. Serve it with: python -m http.server -d $out 8080  (then open http://localhost:8080/)"
