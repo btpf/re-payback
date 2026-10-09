@@ -191,9 +191,6 @@ pub enum Item {
     Scenery,
     /// "German gas: " on / off (`Variants::gas`).
     Gas,
-    /// "Unlock all levels: " on / off (`Settings::unlock_all`, port-added;
-    /// no phrase): every story level and city selectable.
-    UnlockAll,
     /// "Smooth motion: " on / off (`Settings::smooth_motion`, port-added;
     /// `crate::frame`).
     SmoothMotion,
@@ -218,8 +215,9 @@ pub const MORE: &str = "More graphics options";
 
 /// The front end's Graphics options screen: the Mac setup dialog's
 /// controls in its order (display, then rendering), then the HUD and
-/// framing, then the Mac/Amiga content choices, then "Unlock all levels".
-pub const SETUP_ITEMS: [Item; 22] = [
+/// framing, then the Mac/Amiga content choices. ("Unlock all levels" is
+/// on the main menu, `menus::MainMenu`.)
+pub const SETUP_ITEMS: [Item; 21] = [
     Item::Resolution,
     Item::WindowMode,
     Item::Vsync,
@@ -241,7 +239,6 @@ pub const SETUP_ITEMS: [Item; 22] = [
     Item::Title,
     Item::Intro,
     Item::Gas,
-    Item::UnlockAll,
 ];
 
 /// The Mac intro film (`GetPaybackMovie` @ 100fcbc0, played by
@@ -268,7 +265,6 @@ impl Item {
             Item::HiresHud => format!("HUD: {}", if s.hires_hud { "Hi-res" } else { "Lo-res" }),
             Item::Aspect => format!("Aspect: {}", if s.original_aspect { "Original" } else { "Free" }),
             Item::Gas => format!("German gas: {}", on_off(s.variants.gas)),
-            Item::UnlockAll => format!("Unlock all levels: {}", on_off(s.unlock_all)),
             Item::SmoothMotion => format!("Smooth motion: {}", on_off(s.smooth_motion)),
             Item::Vsync => format!("Vsync: {}", on_off(s.vsync)),
             Item::ZoomInMap => format!("Zoom-in map: {}", on_off(s.zoom_in_map && !s.hardware)),
@@ -366,7 +362,6 @@ impl Item {
             "intro" => Item::Intro,
             "scenery" => Item::Scenery,
             "gas" => Item::Gas,
-            "unlock_all" => Item::UnlockAll,
             "smooth_motion" | "smooth" => Item::SmoothMotion,
             "vsync" => Item::Vsync,
             "zoom_in_map" | "zoom" => Item::ZoomInMap,
@@ -452,10 +447,6 @@ impl Item {
             }
             Item::Aspect => {
                 s.original_aspect = !s.original_aspect;
-                true
-            }
-            Item::UnlockAll => {
-                s.unlock_all = !s.unlock_all;
                 true
             }
             Item::SmoothMotion => {

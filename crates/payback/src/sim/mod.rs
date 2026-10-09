@@ -211,9 +211,11 @@ pub struct ModelInfo {
     pub code: u8,
     /// +0x490a: police model.
     pub police: bool,
-    /// +0x4910/+0x4914: mean X/Y of ground vertices (scenery collision).
+    /// +0x4910/+0x4914: mean X/Y of the ground vertices (all vertices if
+    /// none touch the ground): the scenery circle's centre.
     pub mean: IVec2,
-    /// +0x4918: scenery collision size, at least 0x80.
+    /// +0x4918: scenery circle diameter, (max Y − min X) of the same
+    /// vertices / 2, at least 0x80.
     pub size: i32,
 }
 
@@ -224,16 +226,23 @@ impl ModelInfo {
         let near: Vec<_> = v.iter().filter(|p| p.z * 16 > -0x29).collect();
         let max_y = near.iter().map(|p| p.y * 16).max().unwrap_or(0);
         let min_y = near.iter().map(|p| p.y * 16).min().unwrap_or(0).abs();
+        // Scenery circle (Mac `LoadStructure` @ 10074630, Mac 9 the same,
+        // OS4 `FUN_010bf8bc`; CONFIRMED in all three): the ground vertices
+        // (z = 0), or every vertex when there are none, give the mean and
+        // the size. The size is (max Y − min X) / 2, at least 0x80: the
+        // original keeps only min X and max Y of the four extents (two
+        // compilers agree, OS4 drops the dead pair), so a lamp post's base
+        // of 8 × 8 at Y 48..56 gives (896 + 64) / 2 = 480, radius 240.
         let ground: Vec<_> = v.iter().filter(|p| p.z == 0).collect();
+        let ground = if ground.is_empty() { v.iter().collect() } else { ground };
         let n = ground.len().max(1) as i32;
         let mean = IVec2::new(
             ground.iter().map(|p| p.x * 16).sum::<i32>() / n,
             ground.iter().map(|p| p.y * 16).sum::<i32>() / n,
         );
-        let xs = v.iter().map(|p| p.x * 16);
-        let ys = v.iter().map(|p| p.y * 16);
-        let x_range = xs.clone().max().unwrap_or(0) - xs.min().unwrap_or(0);
-        let y_range = ys.clone().max().unwrap_or(0) - ys.min().unwrap_or(0);
+        let min_x = ground.iter().map(|p| p.x * 16).min().unwrap_or(0);
+        let top_y = ground.iter().map(|p| p.y * 16).max().unwrap_or(0);
+        let extent = top_y - min_x;
         ModelInfo {
             path: path.to_string(),
             radius,
@@ -243,7 +252,7 @@ impl ModelInfo {
             code: 0xff,
             police: false,
             mean,
-            size: (x_range.min(y_range) / 2).max(0x80),
+            size: if extent < 0x100 { 0x80 } else { extent >> 1 },
         }
     }
 }
@@ -324,7 +333,8 @@ pub struct Obj {
     pub side: i32,
     /// God mode (port addition, `crate::cheats`): the player's object
     /// takes no damage. Set at the start of every tick for the objects
-    /// with a `player`, while the cheat is on.
+    /// with a `player` while god mode is on, and for those that are
+    /// vehicles while vehicle god mode is on.
     pub god: bool,
 }
 
@@ -502,5 +512,27 @@ mod tests {
         assert_eq!(heading_of(100, 0), 0x5a0);
         assert_eq!(angle_diff(100, TURN - 100), -200);
         assert_eq!(angle_diff(TURN - 100, 100), 200);
+    }
+
+    /// Scenery circle (`LoadStructure` @ 10074630): mean and (max Y − min
+    /// X)/2 of the ground vertices only, so a lamp post's overhanging arm
+    /// and light do not count.
+    #[test]
+    fn scenery_size_from_the_ground_vertices() {
+        let vertex = |x, y, z| payback_formats::obj::Vertex { x, y, z, limb: 0 };
+        let mut vertices: Vec<_> = [(-4, 48), (4, 48), (-4, 56), (4, 56)]
+            .into_iter()
+            .map(|(x, y)| vertex(x, y, 0))
+            .collect();
+        // The arm and a wide light halo up top.
+        vertices.extend([vertex(-2, -248, -248), vertex(120, 82, -252), vertex(-120, -150, -200)]);
+        let obj = payback_formats::Obj { flag: 0, vertices, faces: Vec::new() };
+        let info = ModelInfo::from_obj("lamppost", &obj);
+        assert_eq!(info.mean, IVec2::new(0, 52 * 16));
+        assert_eq!(info.size, (56 * 16 + 4 * 16) >> 1);
+        // No ground vertices: all of them; below 0x100 the floor of 0x80.
+        let obj = payback_formats::Obj { flag: 0, vertices: vec![vertex(-2, 2, -5), vertex(2, 4, -9)], faces: Vec::new() };
+        let info = ModelInfo::from_obj("small", &obj);
+        assert_eq!((info.mean, info.size), (IVec2::new(0, 48), 0x80));
     }
 }

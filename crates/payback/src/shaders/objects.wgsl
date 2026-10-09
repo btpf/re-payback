@@ -29,6 +29,7 @@
     mesh_functions,
     forward_io::{Vertex, VertexOutput, FragmentOutput},
     view_transformations::position_world_to_clip,
+    mesh_view_bindings::view,
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
     pbr_fragment::pbr_input_from_standard_material,
 }
@@ -46,6 +47,22 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     var out: VertexOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
+#ifdef VERTEX_UVS_B
+    // The night headlight beam (`uv_b` = (-2, -2), objects.rs
+    // `headlight_polygon`): the original has no z-buffer, so the beam on
+    // the model's ground plane is drawn whole however the body pitches and
+    // rolls. Its points that sink below the horizontal plane of the model's
+    // origin slide along the view ray up to that plane: the same pixels,
+    // with the depth of the road under the car, so the road does not cut it.
+    if vertex.uv_b.x < -1.5 {
+        let floor = world_from_local[3].y;
+        let p = out.world_position.xyz;
+        let to_eye = view.world_position - p;
+        if p.y < floor && to_eye.y > floor - p.y {
+            out.world_position = vec4<f32>(p + to_eye * ((floor - p.y) / to_eye.y), 1.0);
+        }
+    }
+#endif
     out.position = position_world_to_clip(out.world_position.xyz);
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);

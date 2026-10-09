@@ -384,6 +384,8 @@ fn contacts(
                 // min(6000, v² >> 9)` with v the larger of |px|, |py| ·
                 // min(m)/m_victim, and `CheckHitObject(victim, 0)` whatever
                 // the damage (CB-3, CB-4). Props (class 2) take no part.
+                // A surviving vehicle counts as a crime only when the
+                // player's own object is a vehicle (`police::crimes`).
                 let check = other.side != -1 && victim.side == -1 && victim.prop.is_none();
                 if check {
                     let m = a.mass.min(b.mass) as i64;

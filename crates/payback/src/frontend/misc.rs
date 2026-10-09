@@ -6,7 +6,7 @@
 use super::bindings::{self, COLUMNS, Controls, Table};
 use super::progress::{self, Profile, SLOTS};
 use super::ui::*;
-use bevy::prelude::{GamepadAxis, GamepadButton, KeyCode};
+use bevy::prelude::{GamepadButton, KeyCode};
 use crate::hud::paint::text_len;
 
 /// Characters accepted by text entry: letters, digits, space and
@@ -483,46 +483,27 @@ pub fn key_name(cx: &Ctx, key: Option<KeyCode>) -> String {
     cx.g(phrase)
 }
 
-/// Gamepad control name (phrases 1500–1505 for Select, Start, L1/R1/L2/R2;
-/// axes as "LX+", "RY-", "LZ+" ...).
+/// Gamepad control name in the label style of the settings and the first
+/// connected pad ("A", "RT", "LS Left"; "Cross", "R2"; "B", "ZR" ...,
+/// `bindings::pad_label`). The original named PSX/CD32 buttons through
+/// phrases 1500–1505 (Select, Start, L1, R1, L2, R2); today's pads print
+/// their own names, so the port uses those.
 pub fn pad_name(cx: &Ctx, b: Option<bindings::PadInput>) -> String {
-    use GamepadButton::*;
-    let b = match b {
-        None => return "-?-".into(),
-        Some(bindings::PadInput::Axis(a, p)) => {
-            let name = match a {
-                GamepadAxis::LeftStickX => "LX",
-                GamepadAxis::LeftStickY => "LY",
-                GamepadAxis::RightStickX => "RX",
-                GamepadAxis::RightStickY => "RY",
-                GamepadAxis::LeftZ => "LZ",
-                GamepadAxis::RightZ => "RZ",
-                _ => "Axis",
-            };
-            return format!("{name}{}", if p { '+' } else { '-' });
-        }
-        Some(bindings::PadInput::Button(b)) => b,
-    };
-    let phrase = match b {
-        Select => 1500,
-        Start => 1501,
-        LeftTrigger => 1502,
-        RightTrigger => 1503,
-        LeftTrigger2 => 1504,
-        RightTrigger2 => 1505,
-        South => return "A".into(),
-        East => return "B".into(),
-        West => return "X".into(),
-        North => return "Y".into(),
-        LeftThumb => return "L3".into(),
-        RightThumb => return "R3".into(),
-        DPadUp => return "Up".into(),
-        DPadDown => return "Down".into(),
-        DPadLeft => return "Left".into(),
-        DPadRight => return "Right".into(),
-        b => return bindings::pad_id(bindings::PadInput::Button(b)),
-    };
-    cx.g(phrase)
+    let first = (0..4).find_map(bindings::pad_info);
+    let style = cx.settings.controls.opts.labels.resolve(first.as_ref().map(|(n, v)| (n.as_str(), *v)));
+    pad_name_in(style, b)
+}
+
+/// [`pad_name`] in a resolved label style; "-?-" when unbound.
+pub fn pad_name_in(style: bindings::LabelStyle, b: Option<bindings::PadInput>) -> String {
+    b.map_or_else(|| "-?-".into(), |b| bindings::pad_label(b, style))
+}
+
+/// The label style for gamepad number `n` (its own pad, else the first
+/// connected one).
+fn pad_style(c: &Controls, n: usize) -> bindings::LabelStyle {
+    let info = bindings::pad_info(n).or_else(|| (0..4).find_map(bindings::pad_info));
+    c.opts.labels.resolve(info.as_ref().map(|(name, v)| (name.as_str(), *v)))
 }
 
 /// Control setup (`FUN_0102e75c`): one column of 11 bindings per device
@@ -536,10 +517,17 @@ pub fn pad_name(cx: &Ctx, b: Option<bindings::PadInput>) -> String {
 /// action shows the redefine prompt (2468, 2119) and waits for a key
 /// (`FUN_01040790`): Esc cancels, 0 disables, the digits, `-`, `=` and
 /// F1 are refused (Mac; the Amiga refused `P` instead); pad columns take
-/// a gamepad button. Edits go to a copy that Done stores (and saves);
-/// Cancel drops them. The Mac (`DoControlSetup` @ 100a1f80) has 5 columns
-/// (keyboard, devices 1..4) and spins the `controlsetup` model behind
-/// the screen.
+/// a gamepad button, trigger or stick end. Edits go to a copy that Done
+/// stores (and saves); Cancel drops them. The Mac (`DoControlSetup`
+/// @ 100a1f80) has 5 columns (keyboard, devices 1..4) and spins the
+/// `controlsetup` model behind the screen.
+///
+/// Port additions for gamepads (docs/controls.md): a "Gamepad options"
+/// line between the last row and Done opens [`PAD_ITEMS`] (stick
+/// deadzone, trigger threshold, button labels, reset to defaults, the
+/// connected pads); a pad's Start cancels the redefine prompt (so Start
+/// cannot be bound: it pauses), X / Square (West) or Backspace clears the
+/// selected binding; pad bindings show the pad's own button names.
 pub struct ControlSetup {
     sel: usize,
     controls: Controls,
@@ -551,11 +539,24 @@ pub struct ControlSetup {
     flash: u32,
     /// The Mac's spinning `controlsetup` model.
     obj: Bobbing,
+    /// The gamepad options page is up, on this item.
+    pad_page: Option<usize>,
 }
 
 const ROWS: usize = 11;
-const DONE: usize = COLUMNS * ROWS;
+/// "Gamepad options" (port addition), between the last row and Done.
+const PAD_OPTIONS: usize = COLUMNS * ROWS;
+const DONE: usize = PAD_OPTIONS + 1;
 const CANCEL: usize = DONE + 1;
+
+/// The gamepad options page.
+const PAD_ITEMS: usize = 6;
+const PAD_DEADZONE: usize = 0;
+const PAD_TRIGGER: usize = 1;
+const PAD_LABELS: usize = 2;
+const PAD_RESET: usize = 3;
+const PAD_RESET_KEYS: usize = 4;
+const PAD_BACK: usize = 5;
 
 impl ControlSetup {
     pub fn new(cx: &Ctx) -> ControlSetup {
@@ -566,6 +567,7 @@ impl ControlSetup {
             waiting: false,
             flash: 0,
             obj: Bobbing::new("options/controlsetup.obj"),
+            pad_page: None,
         }
     }
 
@@ -580,6 +582,18 @@ impl ControlSetup {
         }
     }
 
+    /// `--frontend-screen controls-pad`: gamepad 1's column, on "shoot";
+    /// `controls-pad-options`: the gamepad options page.
+    pub fn debug(cx: &Ctx, options: bool) -> ControlSetup {
+        let sel = Controls::pad_column(0) * ROWS + bindings::SHOOT;
+        ControlSetup {
+            sel: if options { PAD_OPTIONS } else { sel },
+            scroll: if options { 0 } else { -100 * Controls::pad_column(0) as i32 },
+            pad_page: options.then_some(PAD_DEADZONE),
+            ..ControlSetup::new(cx)
+        }
+    }
+
     fn column(&self) -> usize {
         self.sel / ROWS
     }
@@ -588,6 +602,11 @@ impl ControlSetup {
     fn redefine(&mut self, cx: &mut Ctx, input: &Input) {
         let (col, action) = (self.column(), self.sel % ROWS);
         let keyboard = Controls::is_keyboard(col);
+        if input.pad.contains(&GamepadButton::Start) {
+            cx.sound(Sfx::Select);
+            self.waiting = false;
+            return;
+        }
         for &k in &input.keys {
             if k == KeyCode::Escape {
                 cx.sound(Sfx::Select);
@@ -618,26 +637,117 @@ impl ControlSetup {
             }
         }
     }
+
+    /// The gamepad options page.
+    fn pad_tick(&mut self, item: usize, cx: &mut Ctx, input: &Input) -> Option<usize> {
+        if input.back {
+            cx.sound(Sfx::Select);
+            return None;
+        }
+        if input.up || input.down {
+            cx.sound(Sfx::Move);
+            let d = if input.down { 1 } else { PAD_ITEMS - 1 };
+            return Some((item + d) % PAD_ITEMS);
+        }
+        let o = &mut self.controls.opts;
+        let step = if input.right || (input.fire && item <= PAD_LABELS) {
+            1
+        } else if input.left {
+            -1
+        } else {
+            0
+        };
+        if step != 0 {
+            let wrap = input.fire && !input.right;
+            let adjust = |v: u8, (lo, hi): (u8, u8)| -> u8 {
+                let n = v as i32 + 5 * step;
+                if wrap && n > hi as i32 { lo } else { n.clamp(lo as i32, hi as i32) as u8 }
+            };
+            match item {
+                PAD_DEADZONE => o.deadzone = adjust(o.deadzone, bindings::DEADZONE_RANGE),
+                PAD_TRIGGER => o.trigger = adjust(o.trigger, bindings::TRIGGER_RANGE),
+                PAD_LABELS => {
+                    let all = bindings::LabelStyle::ALL;
+                    let i = all.iter().position(|l| *l == o.labels).unwrap_or(0) as i32;
+                    o.labels = all[(i + step).rem_euclid(all.len() as i32) as usize];
+                }
+                _ => {}
+            }
+            if item <= PAD_LABELS {
+                cx.sound(Sfx::Move);
+                return Some(item);
+            }
+        }
+        if input.fire {
+            cx.sound(Sfx::Select);
+            match item {
+                PAD_RESET => self.controls.reset_pads(),
+                PAD_RESET_KEYS => self.controls.reset_keys(),
+                PAD_BACK => return None,
+                _ => {}
+            }
+        }
+        Some(item)
+    }
+
+    fn pad_draw(&self, item: usize, ui: &mut Ui, lit: bool) {
+        ui.title("Gamepad options");
+        let o = &self.controls.opts;
+        let lines = [
+            format!("Stick deadzone: {} percent", o.deadzone),
+            format!("Trigger threshold: {} percent", o.trigger),
+            format!("Button labels: {}", o.labels.name()),
+            "Reset gamepad buttons".to_string(),
+            "Reset keyboard keys".to_string(),
+            "Back".to_string(),
+        ];
+        for (i, l) in lines.iter().enumerate() {
+            let colour = if i == item && lit { 2 } else { 1 };
+            ui.centred(l, ui.hy(48 + 12 * i as i32), colour);
+        }
+        let mut y = ui.hy(128);
+        for n in 0..4 {
+            let name = match bindings::pad_info(n) {
+                Some((name, _)) => name.chars().take(30).collect::<String>(),
+                None => "-".into(),
+            };
+            ui.centred_dim(&format!("Gamepad {}: {name}", n + 1), y, 1);
+            y += ui.hy(10);
+        }
+        // How to drive it with a pad, in the first pad's names.
+        let s = pad_style(&self.controls, 0);
+        let b = |b: GamepadButton| bindings::pad_label(bindings::PadInput::Button(b), s);
+        let hint = format!("{}: change   {}: back", b(GamepadButton::South), b(GamepadButton::East));
+        ui.centred_dim(&hint, ui.hy(184), 1);
+    }
 }
 
 impl Screen for ControlSetup {
     fn tick(&mut self, cx: &mut Ctx, input: &Input) -> Step {
         self.flash = (self.flash + 1) % 4;
         self.obj.tick();
-        let target = if self.sel >= DONE { 0 } else { -100 * self.column() as i32 };
+        let target = if self.sel >= PAD_OPTIONS { 0 } else { -100 * self.column() as i32 };
         self.scroll = (7 * self.scroll + target) >> 3;
         if self.waiting {
             self.redefine(cx, input);
+            return Step::Stay;
+        }
+        if let Some(item) = self.pad_page {
+            self.pad_page = self.pad_tick(item, cx, input);
             return Step::Stay;
         }
         if input.back {
             cx.sound(Sfx::Select);
             return Step::Pop(Outcome::Cancel);
         }
+        // Clear the selected binding (port addition: a pad's X / Square,
+        // or Backspace).
+        let clear = input.erase || input.pad.contains(&GamepadButton::West);
         if input.up {
             cx.sound(Sfx::Select);
             self.sel = match self.sel {
-                DONE => ROWS - 1,
+                PAD_OPTIONS => ROWS - 1,
+                DONE => PAD_OPTIONS,
                 CANCEL => DONE,
                 s if s % ROWS == 0 => CANCEL,
                 s => s - 1,
@@ -645,18 +755,25 @@ impl Screen for ControlSetup {
         } else if input.down {
             cx.sound(Sfx::Select);
             self.sel = match self.sel {
+                PAD_OPTIONS => DONE,
                 DONE => CANCEL,
                 CANCEL => 0,
-                s if s % ROWS == ROWS - 1 => DONE,
+                s if s % ROWS == ROWS - 1 => PAD_OPTIONS,
                 s => s + 1,
             };
-        } else if (input.left || input.right) && self.sel < DONE {
+        } else if (input.left || input.right) && self.sel < PAD_OPTIONS {
             cx.sound(Sfx::Select);
-            let d = if input.right { ROWS } else { DONE - ROWS };
-            self.sel = (self.sel + d) % DONE;
+            let d = if input.right { ROWS } else { PAD_OPTIONS - ROWS };
+            self.sel = (self.sel + d) % PAD_OPTIONS;
+        } else if clear && self.sel < PAD_OPTIONS {
+            cx.sound(Sfx::Select);
+            let (col, action) = (self.column(), self.sel % ROWS);
+            self.controls.set_key(col, action, None);
+            self.controls.set_pad(col, action, None);
         } else if input.fire {
             cx.sound(Sfx::Select);
             match self.sel {
+                PAD_OPTIONS => self.pad_page = Some(PAD_DEADZONE),
                 DONE => {
                     cx.settings.controls = self.controls.clone();
                     cx.settings.save();
@@ -671,13 +788,20 @@ impl Screen for ControlSetup {
 
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
+        let lit = self.flash < 2;
         if self.waiting {
             ui.wrapped(&cx.g(2468), ui.hy(80), 2);
             ui.centred(&cx.g(2119), ui.hy(110) - 5, 2);
+            if !Controls::is_keyboard(self.column()) {
+                ui.centred("(Start cancels, 0 clears.)", ui.hy(122) - 5, 2);
+            }
+            return;
+        }
+        if let Some(item) = self.pad_page {
+            self.pad_draw(item, ui, lit);
             return;
         }
         ui.title(&cx.g(2469));
-        let lit = self.flash < 2;
         // Action names right-aligned at x = 130.
         let label_x = ui.vx(130);
         for i in 0..ROWS {
@@ -709,15 +833,28 @@ impl Screen for ControlSetup {
             for i in 0..ROWS {
                 let name = match self.controls.column(col) {
                     Table::Keys(t) => key_name(cx, t[i]),
-                    Table::Pad(t) => pad_name(cx, t[i]),
+                    Table::Pad(t) => pad_name_in(pad_style(&self.controls, col - 1), t[i]),
                 };
                 let colour = if self.sel == col * ROWS + i && lit { 2 } else { 1 };
                 put(ui, &name, ui.hy(50 + 10 * i as i32), colour);
             }
         }
-        for (item, phrase, y) in [(DONE, 2148, 170), (CANCEL, 2192, 180)] {
+        let items = [(PAD_OPTIONS, "Gamepad options".to_string(), 160), (DONE, cx.g(2148), 170), (CANCEL, cx.g(2192), 180)];
+        for (item, text, y) in items {
             let colour = if self.sel == item && lit { 2 } else { 1 };
-            ui.centred(&cx.g(phrase), ui.hy(y), colour);
+            ui.centred(&text, ui.hy(y), colour);
+        }
+        // With a pad connected: how to drive the screen with it.
+        if cx.pads > 0 {
+            let s = pad_style(&self.controls, 0);
+            let b = |b: GamepadButton| bindings::pad_label(bindings::PadInput::Button(b), s);
+            let hint = format!(
+                "{}: change   {}: clear   {}: back",
+                b(GamepadButton::South),
+                b(GamepadButton::West),
+                b(GamepadButton::East)
+            );
+            ui.centred_dim(&hint, ui.hy(191), 1);
         }
     }
 
@@ -826,5 +963,100 @@ impl Screen for CdSetup {
 
     fn model(&self) -> Option<ModelView> {
         Some(self.obj.view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::progress::{self, Settings, testing};
+    use super::*;
+    use bevy::prelude::GamepadAxis;
+    use bindings::PadInput;
+
+    fn pad(b: GamepadButton) -> Input {
+        let mut i = Input { pad: vec![b], ..Default::default() };
+        // As `bindings::pad_menu_input` maps them.
+        match b {
+            GamepadButton::South => (i.fire, i.enter) = (true, true),
+            GamepadButton::Start => (i.fire, i.enter, i.start) = (true, true, true),
+            GamepadButton::East => i.back = true,
+            GamepadButton::DPadUp => i.up = true,
+            GamepadButton::DPadDown => i.down = true,
+            GamepadButton::DPadLeft => i.left = true,
+            GamepadButton::DPadRight => i.right = true,
+            _ => {}
+        }
+        i
+    }
+
+    /// Drive the control setup with a pad only: rebind, clear, cancel a
+    /// prompt with Start, change the gamepad options, Done; the saved
+    /// Payback.cfg loads back the same controls.
+    #[test]
+    fn control_setup_by_pad() {
+        use GamepadButton::*;
+        let dir = testing::scratch("pad_setup");
+        progress::with_saves_dir(&dir, || {
+            let mut env = testing::Env::new();
+            let mut cx = env.cx();
+            let mut s = ControlSetup::new(&cx);
+            let press = |s: &mut ControlSetup, cx: &mut Ctx, b| s.tick(cx, &pad(b));
+            // Cancel -> first row, right to gamepad 1's column, down to shoot.
+            press(&mut s, &mut cx, DPadDown);
+            press(&mut s, &mut cx, DPadRight);
+            for _ in 0..bindings::SHOOT {
+                press(&mut s, &mut cx, DPadDown);
+            }
+            assert_eq!(s.sel, Controls::pad_column(0) * ROWS + bindings::SHOOT);
+            // A opens the prompt; RB binds.
+            press(&mut s, &mut cx, South);
+            assert!(s.waiting);
+            press(&mut s, &mut cx, RightTrigger);
+            assert!(!s.waiting);
+            assert_eq!(s.controls.pads[0][bindings::SHOOT], Some(PadInput::Button(RightTrigger)));
+            // A stick end binds too; Start cancels the prompt.
+            press(&mut s, &mut cx, South);
+            s.tick(&mut cx, &Input { pad_axes: vec![PadInput::Axis(GamepadAxis::RightStickX, true)], ..Default::default() });
+            assert_eq!(s.controls.pads[0][bindings::SHOOT], Some(PadInput::Axis(GamepadAxis::RightStickX, true)));
+            press(&mut s, &mut cx, South);
+            press(&mut s, &mut cx, Start);
+            assert!(!s.waiting);
+            assert_eq!(s.controls.pads[0][bindings::SHOOT], Some(PadInput::Axis(GamepadAxis::RightStickX, true)));
+            // X clears the next row.
+            press(&mut s, &mut cx, DPadDown);
+            press(&mut s, &mut cx, West);
+            assert_eq!(s.controls.pads[0][bindings::SHOOT_ALT], None);
+            // Down to "Gamepad options": deadzone -5, trigger +5, labels.
+            while s.sel != PAD_OPTIONS {
+                press(&mut s, &mut cx, DPadDown);
+            }
+            press(&mut s, &mut cx, South);
+            assert_eq!(s.pad_page, Some(PAD_DEADZONE));
+            press(&mut s, &mut cx, DPadLeft);
+            press(&mut s, &mut cx, DPadDown);
+            press(&mut s, &mut cx, DPadRight);
+            press(&mut s, &mut cx, DPadDown);
+            press(&mut s, &mut cx, DPadRight);
+            press(&mut s, &mut cx, East);
+            assert_eq!(s.pad_page, None);
+            let o = s.controls.opts;
+            assert_eq!((o.deadzone, o.trigger, o.labels), (45, 35, bindings::LabelStyle::Xbox));
+            // B on the bindings page would cancel; Done keeps and saves.
+            press(&mut s, &mut cx, DPadDown);
+            assert_eq!(s.sel, DONE);
+            assert!(matches!(press(&mut s, &mut cx, South), Step::Pop(Outcome::Done)));
+            let saved = cx.settings.controls.clone();
+            assert_eq!(saved.pads[0][bindings::SHOOT], Some(PadInput::Axis(GamepadAxis::RightStickX, true)));
+            assert_eq!(Settings::load().controls, saved);
+            // Reset gamepad buttons from the options page.
+            let mut s = ControlSetup::debug(&cx, true);
+            for _ in 0..PAD_RESET {
+                press(&mut s, &mut cx, DPadDown);
+            }
+            press(&mut s, &mut cx, South);
+            assert_eq!(s.controls.pads, Controls::default().pads);
+            assert_eq!(s.controls.opts, saved.opts, "options kept");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

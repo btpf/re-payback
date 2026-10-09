@@ -264,11 +264,11 @@ fn read_devices(
                 let t = &controls.pads[n as usize % 4];
                 let pad = axes.state(e, g);
                 let held = |a: usize| pad_held(&pad, t[a]);
-                let s = g.left_stick() + g.dpad();
-                input.left = s.x < -0.5 || held(b::LEFT);
-                input.right = s.x > 0.5 || held(b::RIGHT);
-                input.accel = s.y > 0.5 || held(b::ACCELERATE);
-                input.reverse = s.y < -0.5 || held(b::REVERSE);
+                let [l, r, u, d] = controls.opts.pad_directions(g);
+                input.left = l || held(b::LEFT);
+                input.right = r || held(b::RIGHT);
+                input.accel = u || held(b::ACCELERATE);
+                input.reverse = d || held(b::REVERSE);
                 input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
                 input.brake = held(b::BRAKE);
                 input.use_pressed |= pad_just(&pad, t[b::IN_OUT]);

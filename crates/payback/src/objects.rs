@@ -1102,6 +1102,12 @@ pub fn static_vertex(p: &Vertex) -> [f32; 3] {
     [p.x as f32 * sh, -p.z as f32 * sv, p.y as f32 * sh]
 }
 
+/// `uv_b` of the headlight beam's vertices: `objects.wgsl` gives the
+/// points below the model's origin plane the depth of that plane (the
+/// original has no z-buffer, so the beam is never cut by the road when the
+/// body leans in a turn or dips under the throttle).
+const BEAM_ENV: [f32; 2] = [-2.0, -2.0];
+
 /// The night headlight polygon (`FUN_010bf070`): a rectangle on the
 /// model's ground plane (z = 0) from `y0 = max_y − r/2` to `y1 = max_y +
 /// 10r`, `x = ±2r` (r = `+0x48c4`, max |x|; `max_y` = `+0x48c8`), as two
@@ -1126,7 +1132,8 @@ fn headlight_polygon(out: &mut Tris, info: &ModelInfo, tex: u32) {
             out.positions.push(p);
             // Rows are file units / 2.
             out.uvs.push(ObjectLibrary::atlas_uv(tex, u, v * 2, false));
-            out.env.push([-1.0; 2]);
+            // Marks the beam for the shader's depth (`objects.wgsl`).
+            out.env.push(BEAM_ENV);
             out.normals.push([0.0, 1.0, 0.0]);
         }
     }

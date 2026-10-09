@@ -121,7 +121,7 @@ fn crimes(
     mut record: ResMut<Crimes>,
     library: Option<Res<ObjectLibrary>>,
     mut triggers: ResMut<Triggers>,
-    mut player: Query<&mut Obj, With<CameraTarget>>,
+    mut player: Query<(&mut Obj, Has<Vehicle>), With<CameraTarget>>,
     victims: Query<
         (&Obj, Has<Person>, Option<&Vehicle>, Option<&CrimeCounted>),
         Without<CameraTarget>,
@@ -131,7 +131,7 @@ fn crimes(
         hurt.clear();
         return;
     };
-    let Ok(mut p) = player.single_mut() else {
+    let Ok((mut p, driving)) = player.single_mut() else {
         hurt.clear();
         return;
     };
@@ -143,10 +143,20 @@ fn crimes(
         if !h.by_player {
             continue;
         }
-        triggers.report_actor(kind::ACTOR_ATTACKED, h.victim);
         let Ok((v, is_person, veh, counted)) = victims.get(h.victim) else {
+            triggers.report_actor(kind::ACTOR_ATTACKED, h.victim);
             continue;
         };
+        // A vehicle that survives a contact (`byWeapon` 0) counts only when
+        // the player's own object is a vehicle (Mac `CheckHitObject` @
+        // 100542d0: `objects[player].model+0x8165 == 0 || param_2 != 0`
+        // guards the whole injured branch, `ObjectDamaged` included, so no
+        // ACTOR_ATTACKED either): a player on foot walking into a parked or
+        // moving car is no crime. A destroyed vehicle has no such test.
+        if veh.is_some() && v.health > 0 && !h.by_weapon && !driving {
+            continue;
+        }
+        triggers.report_actor(kind::ACTOR_ATTACKED, h.victim);
         let counted = fresh
             .iter()
             .rev()
@@ -183,9 +193,6 @@ fn crimes(
                 mark(true, counted.1, &mut commands);
             }
         } else if veh.is_some() {
-            if !h.by_weapon && p.speed == 0 {
-                continue;
-            }
             let driven = v.state != State::Parked;
             if dead && !counted.1 {
                 record.criminal_damage += 1;

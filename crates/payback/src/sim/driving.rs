@@ -205,10 +205,12 @@ fn player_vehicle_stick(
     }
 }
 
-/// `--drive-test x,y,heading[,kind[,steer[,ticks]]]` (world units, angle
-/// units): once the player is on foot, put them in a new vehicle of `kind`
-/// (default 0) there, on the ground, and hold the accelerator (and the
-/// steering, −1/0/1) for `ticks` (default: always), then brake to a stop.
+/// `--drive-test x,y,heading[,kind[,steer[,ticks[,steer_from[,freeze]]]]]`
+/// (world units, angle units; `0,0` = where the player stands): once the
+/// player is on foot, put them in a new vehicle of `kind` (default 0) there,
+/// on the ground, and hold the accelerator for `ticks` (default: always) and
+/// the steering (−1/0/1) from tick `steer_from` (default 0) on, then brake
+/// to a stop. `freeze` pauses the game at that tick (for screenshots).
 /// For checking acceleration, top speed, braking, turning, walls, kerbs,
 /// slopes and crates; every tick is logged.
 fn drive_test_setup(world: &mut World, mut done: Local<bool>) {
@@ -222,8 +224,9 @@ fn drive_test_setup(world: &mut World, mut done: Local<bool>) {
         .query_filtered::<(Entity, &Obj), (With<CameraTarget>, With<super::people::Person>)>()
         .iter(world)
         .next()
-        .map(|(e, o)| (e, o.player));
-    let Some((pe, pl)) = player else { return };
+        .map(|(e, o)| (e, o.player, o.pos));
+    let Some((pe, pl, at)) = player else { return };
+    let (x, y) = if (x, y) == (0, 0) { (at.x, at.y) } else { (x, y) };
     let Some(z) = world
         .get_resource::<City>()
         .and_then(|c| collide::floor(c, x, y, collide::PLANE * 16))
@@ -249,18 +252,22 @@ fn drive_test_setup(world: &mut World, mut done: Local<bool>) {
 fn drive_test_stick(
     mut q: Query<(&Obj, &Drive, &mut Stick), (With<CameraTarget>, With<Vehicle>)>,
     mut ticks: Local<i32>,
+    mut time: ResMut<Time<Virtual>>,
 ) {
     let field = |n: usize| {
         crate::arg("--drive-test").and_then(|s| s.split(',').nth(n).and_then(|k| k.trim().parse::<i32>().ok()))
     };
-    let (steer, limit) = (field(4).unwrap_or(0), field(5).unwrap_or(i32::MAX));
+    let (steer, limit, from) = (field(4).unwrap_or(0), field(5).unwrap_or(i32::MAX), field(6).unwrap_or(0));
     for (o, d, mut stick) in &mut q {
         if o.state == State::Player {
             *ticks += 1;
+            if field(7) == Some(*ticks) {
+                time.pause();
+            }
             let on = *ticks <= limit;
             // Then brake (reverse throttle) to a stop.
             stick.throttle = if on { -1 } else if o.speed > 0 { 1 } else { 0 };
-            stick.steer = if on { steer } else { 0 };
+            stick.steer = if on && *ticks > from { steer } else { 0 };
             info!(
                 "drive-test: t {} pos {} {} {} vel {} {} {} roll {} pitch {} heading {:#x} speed {} yaw {} slip {} health {} air {}",
                 *ticks,

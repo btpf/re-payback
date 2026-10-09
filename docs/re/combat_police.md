@@ -282,7 +282,14 @@ Each victim counts once for injury (+0x478) and once for death (+0x474). [C]
 | carjack police car (also a parked roadblock car) | door fully open | max(w, 3) | carjacking | 1500 |
 
 Notes:
-- When the player is on foot, `byWeapon == 0` bumps into vehicles are ignored. [C]
+- When the player is on foot, `byWeapon == 0` bumps into vehicles are ignored. [C] Mac `CheckHitObject` @ 100542d0:
+  the surviving-vehicle branch (wanted, shunt / criminal damage, `ObjectDamaged` and so ACTOR_ATTACKED, the
+  `+0x964` flag) runs only if `objects[player].model+0x8165 == 0` (the player's own object is a vehicle) or
+  `param_2 != 0` (weapon, shockwave). `CheckForCollisions` @ 1006a150 calls `CheckHitObject(victim, 0)` for every
+  touching player-side/NPC pair whatever the speed or damage (a vehicle victim has no speed gate), so on foot that
+  call does nothing for a car, parked or moving; from a car it counts even at zero damage and even when the
+  player's car stands still and is the one hit. The destroyed-vehicle branch has no such test. (The port's older
+  `player speed == 0` gate was not the original's.)
 - A hurt civilian in state 3 flees: state 0x12, timer 100, target = player. [C]
 - **Firing** a weapon only increments the firearms counter and makes peds flee (§3.2). **It never
   raises the wanted level**, even next to police. [C]

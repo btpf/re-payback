@@ -48,9 +48,9 @@ SUITE = {
     "rampage": (800, ["--map", "1", "--rampage", "3", "--seed", "77"]),
     # Split-screen deathmatch: one input word per player per tick.
     "multiplayer": (600, ["--map", "2", "--multiplayer", "3", "--kills", "5", "--seed", "5"]),
-    # Cheats are replay events (`cheats.rs`): god mode, weapons, a vehicle.
+    # Cheats are replay events (`cheats.rs`): god modes, weapons, a vehicle.
     "cheats": (600, ["--map", "0", "--seed", "99",
-                     "--cheat-script", "100:god,200:weapons,300:vehicle=5,450:nogod"]),
+                     "--cheat-script", "100:god,150:vgod,200:weapons,300:vehicle=5,450:nogod,500:novgod"]),
 }
 
 HASH = re.compile(r"replay hash: (.*)$")

@@ -5,9 +5,9 @@
 //! (`FUN_0101182c` load, `FUN_01011a70` save; the Mac's `ReadSaveGame` @
 //! 1008b560 / `WriteSaveGame` @ 1008b7e0 write the same bytes) as
 //! `<saves>/PaybackSlot<n>.save`, n = 1..14, where `<saves>` is
-//! [`saves_dir`]: `PAYBACK_SAVES`, else the per-user data directory
-//! (`%APPDATA%\Payback` on Windows; an old `./Saves` is copied there on
-//! first use).
+//! [`saves_dir`]: `PAYBACK_SAVES`, else `Saves` next to the executable
+//! (saves from the per-user data directory, `%APPDATA%\Payback` on
+//! Windows, or an old `./Saves` are copied there on first use).
 //!
 //! A slot holds only the description, the player's name, and the best time
 //! and cup of each of the six levels: no money, score, current level or
@@ -16,7 +16,7 @@
 //! there and keep the rest of the old profile).
 //!
 //! Settings replace `S:Payback.config` (whose layout is PaybackSetup's
-//! and mostly screen modes) with a text file, `Saves/Payback.cfg`:
+//! and mostly screen modes) with a text file, `<saves>/Payback.cfg`:
 //! one `key = value` per line, `#` comments, unknown keys ignored.
 //!
 //! | key | value |
@@ -208,10 +208,13 @@ pub fn with_saves_dir<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
 }
 
 /// Where saves, settings, scores and replays live: `PAYBACK_SAVES` if
-/// set, else the per-user data directory ([`user_data_dir`]), else
-/// `Saves` in the working directory. The original kept them next to the
-/// game (`PROGDIR:Saves`, `S:Payback.config`); a per-user directory works
-/// from any working directory and in read-only install folders.
+/// set, else `Saves` next to the executable, as the original kept them
+/// next to the game (`PROGDIR:Saves`; `S:Payback.config`). If that folder
+/// can't be created (a read-only install folder), the per-user data
+/// directory ([`user_data_dir`]), else `Saves` in the working directory.
+/// The first time the folder next to the executable is missing or empty,
+/// the saves of an earlier build are copied into it
+/// ([`migrate_legacy_saves`]).
 pub fn saves_dir() -> PathBuf {
     #[cfg(test)]
     if let Some(d) = TEST_SAVES.with(|t| t.borrow().clone()) {
@@ -227,12 +230,16 @@ pub fn saves_dir() -> PathBuf {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        DIR.get_or_init(|| match user_data_dir() {
-            Some(d) => {
+        DIR.get_or_init(|| {
+            let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("Saves")));
+            if let Some(d) = exe {
                 migrate_legacy_saves(&d);
-                d
+                match std::fs::create_dir_all(&d) {
+                    Ok(()) => return d,
+                    Err(e) => eprintln!("saves: can't create {}: {e}", d.display()),
+                }
             }
-            None => PathBuf::from("Saves"),
+            user_data_dir().filter(|d| std::fs::create_dir_all(d).is_ok()).unwrap_or_else(|| PathBuf::from("Saves"))
         })
         .clone()
     }
@@ -241,6 +248,8 @@ pub fn saves_dir() -> PathBuf {
 /// The per-user data directory: `%APPDATA%\Payback` on Windows,
 /// `~/Library/Application Support/Payback` on macOS,
 /// `$XDG_DATA_HOME/payback` (default `~/.local/share/payback`) elsewhere.
+/// Earlier builds kept the saves there; now only a fallback and a
+/// migration source.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn user_data_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -255,23 +264,41 @@ pub fn user_data_dir() -> Option<PathBuf> {
     }
 }
 
-/// First run with the per-user directory: copy what an older version saved
-/// in `Saves` (the working directory's, else the one next to the
-/// executable) into it, unless it already holds something. The old files
-/// are left in place.
+/// A directory with something in it.
+#[cfg(not(target_arch = "wasm32"))]
+fn has_files(d: &std::path::Path) -> bool {
+    std::fs::read_dir(d).is_ok_and(|mut d| d.next().is_some())
+}
+
+/// First run with the saves next to the executable (`to` missing or
+/// empty): copy in what an earlier build saved, from the per-user data
+/// directory ([`user_data_dir`], where the previous builds kept them) or
+/// else `Saves` in the working directory (older builds). Only the first of
+/// these that holds anything is copied; the originals are left in place.
 #[cfg(not(target_arch = "wasm32"))]
 fn migrate_legacy_saves(to: &std::path::Path) {
-    if std::fs::read_dir(to).is_ok_and(|mut d| d.next().is_some()) {
+    if has_files(to) {
         return;
     }
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("Saves")));
-    let Some(from) = [Some(PathBuf::from("Saves")), exe_dir].into_iter().flatten().find(|d| d.is_dir()) else {
+    let same = |a: &std::path::Path| match (std::fs::canonicalize(a), std::fs::canonicalize(to)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    let Some(from) = [user_data_dir(), Some(PathBuf::from("Saves"))]
+        .into_iter()
+        .flatten()
+        .find(|d| has_files(d) && !same(d))
+    else {
         return;
     };
-    match copy_tree(&from, to) {
-        Ok(n) => info!("saves: copied {n} files from {} to {}", from.display(), to.display()),
-        Err(e) => warn!("saves: copying {} to {}: {e}", from.display(), to.display()),
-    }
+    // Usually runs before the log is set up (the settings load at
+    // startup), so it goes to stderr as well.
+    let msg = match copy_tree(&from, to) {
+        Ok(n) => format!("saves: migrated {n} files from {} to {}", from.display(), to.display()),
+        Err(e) => format!("saves: copying {} to {}: {e}", from.display(), to.display()),
+    };
+    eprintln!("{msg}");
+    info!("{msg}");
 }
 
 #[cfg(not(target_arch = "wasm32"))]

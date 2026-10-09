@@ -21,8 +21,8 @@ pub const TURN: i32 = 0x1680;
 
 /// Menu keys pressed since the last tick (`FUN_0103f3d0`: left, right,
 /// up, down, fire, Esc), plus typed characters for text entry. A gamepad
-/// drives the same keys: d-pad or left stick, A (South) or Start = fire,
-/// B (East) = back.
+/// drives the same keys: d-pad or left stick (auto-repeating while held),
+/// A (South) or Start = fire, B (East) = back (`bindings::pad_menu_input`).
 #[derive(Default, Clone, Debug)]
 pub struct Input {
     pub left: bool,
@@ -34,6 +34,8 @@ pub struct Input {
     /// Enter alone (text entry, where Space is typed).
     pub enter: bool,
     pub back: bool,
+    /// A gamepad's Start (also `fire`): the pause menu resumes on it.
+    pub start: bool,
     pub typed: Vec<char>,
     pub erase: bool,
     /// Every key and gamepad button pressed (the control setup's

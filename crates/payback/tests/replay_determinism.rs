@@ -25,7 +25,7 @@ const CASES: &[(&str, u32, &[&str])] = &[
     (
         "cheats",
         600,
-        &["--map", "0", "--seed", "99", "--cheat-script", "100:god,200:weapons,300:vehicle=5,450:nogod"],
+        &["--map", "0", "--seed", "99", "--cheat-script", "100:god,150:vgod,200:weapons,300:vehicle=5,450:nogod,500:novgod"],
     ),
 ];
 

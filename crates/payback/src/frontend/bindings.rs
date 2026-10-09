@@ -28,7 +28,19 @@
 //! Ctrl, Shift and Enter bindings accept either key of the pair
 //! (left/right, main/numpad), so the defaults behave exactly as the
 //! hard-wired keys did before.
+//!
+//! Modern gamepads (port addition, docs/controls.md): the default pad
+//! table ([`PAD`]) follows today's Xbox / PlayStation / Switch layouts
+//! (positional, as Bevy names the buttons: `South` is A / Cross / B).
+//! The game's input is digital (the original polled switches), so
+//! analogue controls count as pressed past a threshold: the stick
+//! deadzone ([`PadOptions::deadzone`]: the left stick, stick-end bindings
+//! and menu navigation) and the trigger threshold ([`PadOptions::trigger`]:
+//! LT/RT, whether they report as buttons or as Z axes). Start pauses
+//! (fixed, like Esc). Pads are read into the same per-tick `PlayerInput`
+//! as the keyboard, so replays are unaffected.
 
+use bevy::input::gamepad::{ButtonSettings, GamepadConnectionEvent, RawGamepadEvent};
 use bevy::prelude::*;
 
 /// Actions in phrase order 2457..2467.
@@ -65,15 +77,153 @@ pub type PadTable = [Option<PadInput>; 11];
 /// one end (`positive`). The Mac binds any HID element, axes included, and
 /// an axis counts as pressed near its recorded extreme (`IsHIDControlPressed`
 /// @ 10158300: within ±50 of it on the scaled range, about 60 % of the way
-/// out; [`AXIS_PRESS`]).
+/// out). Here the stick deadzone / trigger threshold decide ([`PadOptions`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PadInput {
     Button(GamepadButton),
     Axis(GamepadAxis, bool),
 }
 
-/// How far out an axis counts as pressed.
-pub const AXIS_PRESS: f32 = 0.6;
+/// Button names shown in the control setup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LabelStyle {
+    /// From the pad's USB vendor / name (Sony: PlayStation, Nintendo:
+    /// Switch, anything else: Xbox).
+    #[default]
+    Auto,
+    Xbox,
+    PlayStation,
+    Nintendo,
+}
+
+impl LabelStyle {
+    pub const ALL: [LabelStyle; 4] = [LabelStyle::Auto, LabelStyle::Xbox, LabelStyle::PlayStation, LabelStyle::Nintendo];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            LabelStyle::Auto => "auto",
+            LabelStyle::Xbox => "xbox",
+            LabelStyle::PlayStation => "playstation",
+            LabelStyle::Nintendo => "nintendo",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LabelStyle::Auto => "Auto",
+            LabelStyle::Xbox => "Xbox",
+            LabelStyle::PlayStation => "PlayStation",
+            LabelStyle::Nintendo => "Switch",
+        }
+    }
+
+    fn parse(s: &str) -> Option<LabelStyle> {
+        LabelStyle::ALL.into_iter().find(|l| l.id() == s)
+    }
+
+    /// The style for a pad (`name`, USB vendor id), Auto resolved.
+    pub fn resolve(self, pad: Option<(&str, Option<u16>)>) -> LabelStyle {
+        if self != LabelStyle::Auto {
+            return self;
+        }
+        let Some((name, vendor)) = pad else {
+            return LabelStyle::Xbox;
+        };
+        let n = name.to_ascii_lowercase();
+        let has = |keys: &[&str]| keys.iter().any(|k| n.contains(k));
+        if vendor == Some(0x054c) || has(&["dualsense", "dualshock", "ps3", "ps4", "ps5", "playstation"]) {
+            LabelStyle::PlayStation
+        } else if vendor == Some(0x057e) || has(&["nintendo", "switch", "joy-con", "pro controller"]) {
+            LabelStyle::Nintendo
+        } else {
+            LabelStyle::Xbox
+        }
+    }
+}
+
+/// Gamepad options (port addition), shared by every pad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PadOptions {
+    /// Stick deadzone in percent: how far the left stick (or a bound
+    /// stick end) must be pushed to count.
+    pub deadzone: u8,
+    /// Trigger threshold in percent: how far LT/RT must be pulled to count.
+    pub trigger: u8,
+    pub labels: LabelStyle,
+    /// Settings-file layout of the pad tables: 1 = files from before the
+    /// modern defaults (no `pad.layout`), [`PAD_LAYOUT`] = now.
+    pub layout: u8,
+}
+
+/// Current pad-table layout (`pad.layout`).
+pub const PAD_LAYOUT: u8 = 2;
+
+pub const DEADZONE_RANGE: (u8, u8) = (10, 90);
+pub const TRIGGER_RANGE: (u8, u8) = (5, 90);
+
+impl Default for PadOptions {
+    fn default() -> Self {
+        PadOptions {
+            deadzone: 50,
+            trigger: 30,
+            labels: LabelStyle::Auto,
+            layout: PAD_LAYOUT,
+        }
+    }
+}
+
+impl PadOptions {
+    pub fn stick(&self) -> f32 {
+        self.deadzone.clamp(DEADZONE_RANGE.0, DEADZONE_RANGE.1) as f32 / 100.0
+    }
+
+    pub fn trigger(&self) -> f32 {
+        self.trigger.clamp(TRIGGER_RANGE.0, TRIGGER_RANGE.1) as f32 / 100.0
+    }
+
+    /// Threshold of an axis end: the triggers' Z axes use the trigger
+    /// threshold, the sticks the deadzone.
+    pub fn axis_threshold(&self, a: GamepadAxis) -> f32 {
+        if matches!(a, GamepadAxis::LeftZ | GamepadAxis::RightZ) { self.trigger() } else { self.stick() }
+    }
+
+    /// The fixed joystick directions (left, right, up, down): the left
+    /// stick past the deadzone, or the d-pad.
+    pub fn directions(&self, stick: Vec2, dpad: Vec2) -> [bool; 4] {
+        let t = self.stick();
+        [
+            stick.x <= -t || dpad.x < 0.0,
+            stick.x >= t || dpad.x > 0.0,
+            stick.y >= t || dpad.y > 0.0,
+            stick.y <= -t || dpad.y < 0.0,
+        ]
+    }
+
+    /// [`Self::directions`] of a gamepad.
+    pub fn pad_directions(&self, g: &Gamepad) -> [bool; 4] {
+        self.directions(g.left_stick(), g.dpad())
+    }
+}
+
+/// Apply the trigger threshold to every pad's LT/RT buttons (Bevy's
+/// default press point is 75 %), so `Gamepad::pressed` and the bindings
+/// agree with the option.
+pub fn apply_pad_options(
+    settings: Option<Res<super::progress::Settings>>,
+    mut pads: Query<&mut GamepadSettings, With<Gamepad>>,
+) {
+    let t = settings.map(|s| s.controls.opts).unwrap_or_default().trigger();
+    for mut gs in &mut pads {
+        for b in [GamepadButton::LeftTrigger2, GamepadButton::RightTrigger2] {
+            if gs.get_button_settings(b).press_threshold() != t {
+                let release = (t - 0.05).max(0.01);
+                if let Ok(bs) = ButtonSettings::new(t, release) {
+                    gs.button_settings.insert(b, bs);
+                }
+            }
+        }
+    }
+}
 
 /// The axes a binding can use, in bit order for [`PadAxes`].
 pub const AXES: [GamepadAxis; 6] = [
@@ -115,16 +265,22 @@ impl PadAxes {
 }
 
 /// Update [`PadAxes`] (`PreUpdate`, after the gamepad input).
-pub fn track_pad_axes(mut axes: ResMut<PadAxes>, pads: Query<(Entity, &Gamepad)>) {
+pub fn track_pad_axes(
+    mut axes: ResMut<PadAxes>,
+    pads: Query<(Entity, &Gamepad)>,
+    settings: Option<Res<super::progress::Settings>>,
+) {
+    let opts = settings.map(|s| s.controls.opts).unwrap_or_default();
     axes.0.retain(|e, _| pads.contains(*e));
     for (e, g) in &pads {
         let mut now = 0;
         for (i, &a) in AXES.iter().enumerate() {
             let v = g.get(a).unwrap_or(0.0);
-            if v <= -AXIS_PRESS {
+            let t = opts.axis_threshold(a);
+            if v <= -t {
                 now |= 1 << (2 * i);
             }
-            if v >= AXIS_PRESS {
+            if v >= t {
                 now |= 1 << (2 * i + 1);
             }
         }
@@ -173,8 +329,12 @@ pub const NEXT_WEAPON_ALIASES: [KeyCode; 3] = [KeyCode::F3, KeyCode::F10, KeyCod
 /// Fixed previous-weapon keys (Forward-Delete, F2, F9, keypad −).
 pub const PREV_WEAPON_ALIASES: [KeyCode; 4] = [KeyCode::Delete, KeyCode::F2, KeyCode::F9, KeyCode::NumpadSubtract];
 
-/// A gamepad: up/down/left/right also come from the stick and d-pad.
-const PAD: PadTable = {
+/// A gamepad (layout 2, docs/controls.md); up/down/left/right also come
+/// from the left stick and d-pad. RT accelerate, LT reverse, A fire (X
+/// too), Y in/out, B brake, RB/LB next/previous weapon, Back repeats the
+/// last message (Xbox names; PlayStation R2 L2 Cross Square Triangle
+/// Circle R1 L1 Share, Switch ZR ZL B Y X A R L −).
+pub const PAD: PadTable = {
     use GamepadButton::*;
     use PadInput::Button as B;
     [
@@ -183,13 +343,22 @@ const PAD: PadTable = {
         Some(B(DPadLeft)),
         Some(B(DPadRight)),
         Some(B(South)),
-        None,
+        Some(B(West)),
         Some(B(North)),
         Some(B(East)),
         Some(B(RightTrigger)),
         Some(B(LeftTrigger)),
-        None,
+        Some(B(Select)),
     ]
+};
+
+/// The pad default before layout 2 (no shoot-alt or repeat-message
+/// button); tables still equal to it move to [`PAD`].
+const PAD_V1: PadTable = {
+    let mut t = PAD;
+    t[SHOOT_ALT] = None;
+    t[REPEAT_MESSAGE] = None;
+    t
 };
 
 /// Multiplayer keyboard key sets, so that up to four players can share a
@@ -259,6 +428,7 @@ pub struct Controls {
     /// Gamepad n's buttons (the Mac's device tables 1..4).
     pub pads: [PadTable; 4],
     pub mp_keys: [KeyTable; 4],
+    pub opts: PadOptions,
 }
 
 impl Default for Controls {
@@ -267,6 +437,7 @@ impl Default for Controls {
             keys: SP_KEYS,
             pads: [PAD; 4],
             mp_keys: MP_KEYS,
+            opts: PadOptions::default(),
         }
     }
 }
@@ -316,6 +487,30 @@ impl Controls {
         }
     }
 
+    /// Every gamepad table back to the default (options kept).
+    pub fn reset_pads(&mut self) {
+        self.pads = [PAD; 4];
+    }
+
+    /// Every keyboard table back to the default.
+    pub fn reset_keys(&mut self) {
+        self.keys = SP_KEYS;
+        self.mp_keys = MP_KEYS;
+    }
+
+    /// Settings files from before layout 2: pad tables still on the old
+    /// default take the new one (edited tables are kept).
+    pub fn upgrade(&mut self) {
+        if self.opts.layout < PAD_LAYOUT {
+            for t in &mut self.pads {
+                if *t == PAD_V1 {
+                    *t = PAD;
+                }
+            }
+            self.opts.layout = PAD_LAYOUT;
+        }
+    }
+
     /// Settings-file lines (`key.<action>`, `pad.<action>` = gamepad 1,
     /// `pad<n>.<action>` = gamepad n, `mp<n>.key.<action>` = key set n).
     pub fn write(&self, t: &mut String) {
@@ -332,10 +527,34 @@ impl Controls {
         for p in 0..4 {
             table(&format!("mp{}.key.", p + 1), self.mp_keys[p].map(|k| k.map(key_id).unwrap_or_default()));
         }
+        // After the pad tables: `pad.layout` marks a file as current.
+        let o = &self.opts;
+        t.push_str(&format!("pad.deadzone = {}\npad.trigger = {}\n", o.deadzone, o.trigger));
+        t.push_str(&format!("pad.labels = {}\npad.layout = {}\n", o.labels.id(), o.layout.max(PAD_LAYOUT)));
     }
 
     /// One settings-file line; false if the key is not a binding.
     pub fn read(&mut self, k: &str, v: &str) -> bool {
+        let o = &mut self.opts;
+        match k {
+            "pad.deadzone" => {
+                o.deadzone = v.parse::<u8>().map_or(o.deadzone, |n| n.clamp(DEADZONE_RANGE.0, DEADZONE_RANGE.1));
+                return true;
+            }
+            "pad.trigger" => {
+                o.trigger = v.parse::<u8>().map_or(o.trigger, |n| n.clamp(TRIGGER_RANGE.0, TRIGGER_RANGE.1));
+                return true;
+            }
+            "pad.labels" => {
+                o.labels = LabelStyle::parse(v).unwrap_or_default();
+                return true;
+            }
+            "pad.layout" => {
+                o.layout = v.parse().unwrap_or(1);
+                return true;
+            }
+            _ => {}
+        }
         let (player, rest) = match k.strip_prefix("mp").and_then(|r| r.split_once('.')) {
             Some((n, rest)) => match n.parse::<usize>() {
                 Ok(n @ 1..=4) => (Some(n - 1), rest),
@@ -360,7 +579,11 @@ impl Controls {
         match (kind, player, pad) {
             ("key", None, _) => self.keys[a] = parse_key(v),
             ("key", Some(p), _) => self.mp_keys[p][a] = parse_key(v),
-            (_, None, Some(n)) => self.pads[n][a] = parse_pad(v),
+            (_, None, Some(n)) => {
+                self.pads[n][a] = parse_pad(v);
+                // Written before `pad.layout`: a file without that is older.
+                self.opts.layout = 1;
+            }
             // Older files: per-player multiplayer pads, now per gamepad.
             (_, Some(_), Some(0)) => {}
             _ => return false,
@@ -385,13 +608,32 @@ struct PadSlot {
 /// that is unplugged keeps its number free until it (or the same model)
 /// comes back, instead of the others moving up. A new pad takes the first
 /// number never used, else the first one whose pad is gone.
+///
+/// Hot-plugging (port addition): a pad that disconnects while connected
+/// sets [`PadSlots::lost`], which pauses a running level
+/// (`frontend::run_menus`), and single player moves on to the next
+/// connected pad.
 #[derive(Resource, Default, Debug)]
-pub struct PadSlots([Option<PadSlot>; 4]);
+pub struct PadSlots {
+    slots: [Option<PadSlot>; 4],
+    /// A connected pad went away (cleared by [`PadSlots::take_lost`]).
+    lost: bool,
+}
+
+/// Name and USB vendor of the pad on each number, for the control setup
+/// (button label style, the connected-pads list).
+static PAD_INFO: std::sync::Mutex<[Option<(String, Option<u16>)>; 4]> =
+    std::sync::Mutex::new([None, None, None, None]);
+
+/// The connected pad on number `n` (0..3): name and USB vendor.
+pub fn pad_info(n: usize) -> Option<(String, Option<u16>)> {
+    PAD_INFO.lock().ok()?.get(n)?.clone()
+}
 
 impl PadSlots {
     /// Gamepad number `n`'s entity, while it is connected.
     pub fn get(&self, n: usize) -> Option<Entity> {
-        self.0.get(n)?.as_ref().filter(|s| s.connected).map(|s| s.entity)
+        self.slots.get(n)?.as_ref().filter(|s| s.connected).map(|s| s.entity)
     }
 
     /// The lowest-numbered connected gamepad (single player).
@@ -399,22 +641,39 @@ impl PadSlots {
         (0..4).find_map(|n| self.get(n))
     }
 
+    /// A connected pad was unplugged since the last call.
+    pub fn take_lost(&mut self) -> bool {
+        std::mem::take(&mut self.lost)
+    }
+
     /// Number the connected pads (`(entity, name, vendor, product)`, in
     /// spawn order, the order Bevy saw them connect).
     fn update(&mut self, mut pads: Vec<(Entity, (String, Option<u16>, Option<u16>))>) {
         pads.sort_by_key(|p| p.0.index_u32());
-        for s in self.0.iter_mut().flatten() {
-            s.connected = pads.iter().any(|p| p.0 == s.entity);
+        for (n, s) in self.slots.iter_mut().enumerate() {
+            let Some(s) = s else { continue };
+            let now = pads.iter().any(|p| p.0 == s.entity);
+            if s.connected && !now {
+                info!("Gamepad {} disconnected: {}", n + 1, s.id.0);
+                self.lost = true;
+            }
+            s.connected = now;
         }
         for (e, id) in pads {
-            if self.0.iter().flatten().any(|s| s.entity == e) {
+            if self.slots.iter().flatten().any(|s| s.entity == e) {
                 continue;
             }
-            let back = self.0.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected && s.id == id));
-            let fresh = || self.0.iter().position(Option::is_none);
-            let stale = || self.0.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected));
+            let back = self.slots.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected && s.id == id));
+            let fresh = || self.slots.iter().position(Option::is_none);
+            let stale = || self.slots.iter().position(|s| s.as_ref().is_some_and(|s| !s.connected));
             if let Some(n) = back.or_else(fresh).or_else(stale) {
-                self.0[n] = Some(PadSlot { entity: e, id, connected: true });
+                info!("Gamepad {} connected: {} (vendor {:04x?}, product {:04x?})", n + 1, id.0, id.1, id.2);
+                self.slots[n] = Some(PadSlot { entity: e, id, connected: true });
+            }
+        }
+        if let Ok(mut info) = PAD_INFO.lock() {
+            for (i, s) in self.slots.iter().enumerate() {
+                info[i] = s.as_ref().filter(|s| s.connected).map(|s| (s.id.0.clone(), s.id.1));
             }
         }
     }
@@ -426,10 +685,200 @@ pub fn assign_pads(mut slots: ResMut<PadSlots>, pads: Query<(Entity, &Gamepad, O
         .iter()
         .map(|(e, g, n)| (e, (n.map_or_else(String::new, |n| n.as_str().to_string()), g.vendor_id(), g.product_id())))
         .collect();
-    let changed = list.len() != slots.0.iter().flatten().filter(|s| s.connected).count()
-        || list.iter().any(|(e, _)| !slots.0.iter().flatten().any(|s| s.connected && s.entity == *e));
+    let changed = list.len() != slots.slots.iter().flatten().filter(|s| s.connected).count()
+        || list.iter().any(|(e, _)| !slots.slots.iter().flatten().any(|s| s.connected && s.entity == *e));
     if changed {
         slots.update(list);
+    }
+}
+
+/// Settings files from before the modern pad defaults: untouched pad
+/// tables take them (`Startup`; [`Controls::upgrade`]).
+pub fn upgrade_pad_layout(mut settings: ResMut<super::progress::Settings>) {
+    if settings.controls.opts.layout < PAD_LAYOUT {
+        settings.controls.upgrade();
+    }
+}
+
+/// Name of a gamepad control in a label style (resolved, not Auto), as
+/// printed on today's pads: "A", "RT", "LS Left", "Cross", "ZR" ...
+pub fn pad_label(b: PadInput, style: LabelStyle) -> String {
+    use GamepadButton::*;
+    use LabelStyle::*;
+    let pick = |x: &str, p: &str, n: &str| -> String {
+        match style {
+            PlayStation => p,
+            Nintendo => n,
+            _ => x,
+        }
+        .to_string()
+    };
+    match b {
+        PadInput::Button(b) => match b {
+            South => pick("A", "Cross", "B"),
+            East => pick("B", "Circle", "A"),
+            West => pick("X", "Square", "Y"),
+            North => pick("Y", "Triangle", "X"),
+            LeftTrigger => pick("LB", "L1", "L"),
+            RightTrigger => pick("RB", "R1", "R"),
+            LeftTrigger2 => pick("LT", "L2", "ZL"),
+            RightTrigger2 => pick("RT", "R2", "ZR"),
+            Select => pick("Back", "Share", "Minus"),
+            Start => pick("Start", "Options", "Plus"),
+            Mode => pick("Guide", "PS", "Home"),
+            LeftThumb => pick("LS Click", "L3", "LS Click"),
+            RightThumb => pick("RS Click", "R3", "RS Click"),
+            DPadUp => "D-pad Up".into(),
+            DPadDown => "D-pad Down".into(),
+            DPadLeft => "D-pad Left".into(),
+            DPadRight => "D-pad Right".into(),
+            b => pad_id(PadInput::Button(b)),
+        },
+        PadInput::Axis(a, p) => {
+            let stick = |s: &str, neg: &str, pos: &str| format!("{s} {}", if p { pos } else { neg });
+            match a {
+                GamepadAxis::LeftStickX => stick("LS", "Left", "Right"),
+                GamepadAxis::LeftStickY => stick("LS", "Down", "Up"),
+                GamepadAxis::RightStickX => stick("RS", "Left", "Right"),
+                GamepadAxis::RightStickY => stick("RS", "Down", "Up"),
+                GamepadAxis::LeftZ if p => pick("LT", "L2", "ZL"),
+                GamepadAxis::RightZ if p => pick("RT", "R2", "ZR"),
+                a => pad_id(PadInput::Axis(a, p)),
+            }
+        }
+    }
+}
+
+/// Menu auto-repeat of a held direction: the first repeat after
+/// [`REPEAT_DELAY`] s, then every [`REPEAT_RATE`] s (port addition; the
+/// original's menus step once per press).
+pub const REPEAT_DELAY: f32 = 0.4;
+pub const REPEAT_RATE: f32 = 0.1;
+
+/// A pad's held menu direction (x: −1 left, +1 right; y: +1 up).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NavRepeat {
+    dir: IVec2,
+    next: f32,
+}
+
+impl NavRepeat {
+    /// The directions pressed at time `now` with `dir` held: newly pushed
+    /// components at once, the whole direction again while held.
+    pub fn step(&mut self, dir: IVec2, now: f32) -> IVec2 {
+        let new = IVec2::new(
+            if dir.x != self.dir.x { dir.x } else { 0 },
+            if dir.y != self.dir.y { dir.y } else { 0 },
+        );
+        self.dir = dir;
+        if new != IVec2::ZERO {
+            self.next = now + REPEAT_DELAY;
+            new
+        } else if dir != IVec2::ZERO && now >= self.next {
+            self.next = now + REPEAT_RATE;
+            dir
+        } else {
+            IVec2::ZERO
+        }
+    }
+}
+
+/// Every connected pad into the menu keys: d-pad or left stick (past the
+/// deadzone, auto-repeating), A (South) or Start = fire, B (East) = back,
+/// Start also sets `start` (the pause menu resumes on it).
+pub fn pad_menu_input<'a>(
+    pads: impl Iterator<Item = (Entity, &'a Gamepad)>,
+    axes: &PadAxes,
+    opts: &PadOptions,
+    nav: &mut Vec<(Entity, NavRepeat)>,
+    now: f32,
+    input: &mut super::ui::Input,
+) {
+    let mut seen = Vec::new();
+    for (e, pad) in pads {
+        input.pad.extend(pad.get_just_pressed().copied());
+        input.pad_axes.extend(axes.just_pressed(e));
+        let ok = pad.any_just_pressed([GamepadButton::South, GamepadButton::Start]);
+        input.fire |= ok;
+        input.enter |= ok;
+        input.back |= pad.just_pressed(GamepadButton::East);
+        input.start |= pad.just_pressed(GamepadButton::Start);
+        let [l, r, u, d] = opts.pad_directions(pad);
+        let dir = IVec2::new(r as i32 - l as i32, u as i32 - d as i32);
+        let mut rep = nav.iter().find(|p| p.0 == e).map_or_else(NavRepeat::default, |p| p.1);
+        let press = rep.step(dir, now);
+        input.left |= press.x < 0;
+        input.right |= press.x > 0;
+        input.up |= press.y > 0;
+        input.down |= press.y < 0;
+        seen.push((e, rep));
+    }
+    *nav = seen;
+}
+
+/// `--pad-sim "<secs>:<control>[/<hold secs>],..."` (debug): a virtual
+/// gamepad that connects at start and presses each control (a
+/// [`pad_id`] name such as `DPadDown`, `South`, `LeftStickY-`; or
+/// `disconnect` / `connect`) at the given real time for 0.15 s or the
+/// hold time. `--pad-sim-name` names it (default "Xbox Controller
+/// (virtual)"), `--pad-sim-vendor <hex>` sets its USB vendor id.
+/// `PreUpdate`, before the input systems.
+pub fn simulate_pad(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut state: Local<Option<(Entity, Vec<(f32, Option<PadInput>, bool)>)>>,
+    mut connect: MessageWriter<GamepadConnectionEvent>,
+    mut raw: MessageWriter<RawGamepadEvent>,
+) {
+    use bevy::input::gamepad::{GamepadConnection, RawGamepadAxisChangedEvent, RawGamepadButtonChangedEvent};
+    let Some(script) = crate::arg("--pad-sim") else { return };
+    let connection = || GamepadConnection::Connected {
+        name: crate::arg("--pad-sim-name").unwrap_or_else(|| "Xbox Controller (virtual)".into()),
+        vendor_id: crate::arg("--pad-sim-vendor").and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok()),
+        product_id: Some(1),
+    };
+    let (e, events) = state.get_or_insert_with(|| {
+        let e = commands.spawn_empty().id();
+        connect.write(GamepadConnectionEvent::new(e, connection()));
+        let mut events = Vec::new();
+        for item in script.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((t, what)) = item.split_once(':') else { continue };
+            let (what, hold) = what.split_once('/').unwrap_or((what, "0.15"));
+            let (Ok(t), Ok(hold)) = (t.parse::<f32>(), hold.parse::<f32>()) else { continue };
+            match what {
+                "disconnect" => events.push((t, None, false)),
+                "connect" => events.push((t, None, true)),
+                w => {
+                    if let Some(b) = parse_pad(w) {
+                        events.push((t, Some(b), true));
+                        events.push((t + hold, Some(b), false));
+                    } else {
+                        warn!("--pad-sim: unknown control {w}");
+                    }
+                }
+            }
+        }
+        events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        (e, events)
+    });
+    let now = time.elapsed_secs();
+    while events.first().is_some_and(|ev| ev.0 <= now) {
+        let (_, what, on) = events.remove(0);
+        match what {
+            None if on => {
+                connect.write(GamepadConnectionEvent::new(*e, connection()));
+            }
+            None => {
+                connect.write(GamepadConnectionEvent::new(*e, GamepadConnection::Disconnected));
+            }
+            Some(PadInput::Button(b)) => {
+                raw.write(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(*e, b, on as u8 as f32)));
+            }
+            Some(PadInput::Axis(a, p)) => {
+                let v = if !on { 0.0 } else if p { 1.0 } else { -1.0 };
+                raw.write(RawGamepadEvent::Axis(RawGamepadAxisChangedEvent::new(*e, a, v)));
+            }
+        }
     }
 }
 
@@ -596,12 +1045,20 @@ mod tests {
         c.set_pad(3, BRAKE, Some(PadInput::Button(GamepadButton::West)));
         c.set_pad(1, SHOOT_ALT, Some(PadInput::Axis(GamepadAxis::RightZ, true)));
         c.set_pad(1, NEXT_WEAPON, None);
+        c.set_pad(2, LEFT, Some(PadInput::Axis(GamepadAxis::RightStickX, false)));
+        c.opts = PadOptions {
+            deadzone: 35,
+            trigger: 15,
+            labels: LabelStyle::Nintendo,
+            layout: PAD_LAYOUT,
+        };
         let mut t = String::new();
         c.write(&mut t);
         let mut d = Controls {
             keys: [None; 11],
             pads: [[None; 11]; 4],
             mp_keys: [[None; 11]; 4],
+            opts: PadOptions::default(),
         };
         for line in t.lines() {
             let (k, v) = line.split_once('=').unwrap();
@@ -657,5 +1114,219 @@ mod tests {
                 assert_eq!(parse_pad(&pad_id(PadInput::Axis(a, p))), Some(PadInput::Axis(a, p)));
             }
         }
+    }
+
+    #[test]
+    fn default_pad_layout() {
+        use GamepadButton::*;
+        let c = Controls::default();
+        assert!(c.pads.iter().all(|t| *t == PAD));
+        let b = |a: usize| PAD[a];
+        assert_eq!(b(ACCELERATE), Some(PadInput::Button(RightTrigger2)));
+        assert_eq!(b(REVERSE), Some(PadInput::Button(LeftTrigger2)));
+        assert_eq!(b(SHOOT), Some(PadInput::Button(South)));
+        assert_eq!(b(SHOOT_ALT), Some(PadInput::Button(West)));
+        assert_eq!(b(IN_OUT), Some(PadInput::Button(North)));
+        assert_eq!(b(BRAKE), Some(PadInput::Button(East)));
+        assert_eq!(b(NEXT_WEAPON), Some(PadInput::Button(RightTrigger)));
+        assert_eq!(b(PREV_WEAPON), Some(PadInput::Button(LeftTrigger)));
+        assert_eq!(b(REPEAT_MESSAGE), Some(PadInput::Button(Select)));
+        // Every action bound, no button twice, Start (pause) left free.
+        let mut all: Vec<String> = PAD.iter().map(|b| pad_id(b.unwrap())).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), ACTIONS.len());
+        assert!(!PAD.contains(&Some(PadInput::Button(Start))));
+        // The keyboard is unchanged.
+        assert_eq!(c.keys, SP_KEYS);
+        assert_eq!(c.keys[ACCELERATE], Some(KeyCode::ArrowUp));
+    }
+
+    #[test]
+    fn labels() {
+        use GamepadButton::*;
+        let l = |b, s| pad_label(PadInput::Button(b), s);
+        assert_eq!(l(South, LabelStyle::Xbox), "A");
+        assert_eq!(l(South, LabelStyle::PlayStation), "Cross");
+        assert_eq!(l(South, LabelStyle::Nintendo), "B");
+        assert_eq!(l(RightTrigger2, LabelStyle::Xbox), "RT");
+        assert_eq!(l(RightTrigger2, LabelStyle::PlayStation), "R2");
+        assert_eq!(l(RightTrigger2, LabelStyle::Nintendo), "ZR");
+        assert_eq!(l(LeftTrigger, LabelStyle::Xbox), "LB");
+        assert_eq!(pad_label(PadInput::Axis(GamepadAxis::LeftStickX, false), LabelStyle::Xbox), "LS Left");
+        assert_eq!(pad_label(PadInput::Axis(GamepadAxis::RightStickY, true), LabelStyle::Xbox), "RS Up");
+        assert_eq!(pad_label(PadInput::Axis(GamepadAxis::RightZ, true), LabelStyle::PlayStation), "R2");
+        let auto = LabelStyle::Auto;
+        assert_eq!(auto.resolve(None), LabelStyle::Xbox);
+        assert_eq!(auto.resolve(Some(("Wireless Controller", Some(0x054c)))), LabelStyle::PlayStation);
+        assert_eq!(auto.resolve(Some(("DualSense Wireless Controller", None))), LabelStyle::PlayStation);
+        assert_eq!(auto.resolve(Some(("Pro Controller", Some(0x057e)))), LabelStyle::Nintendo);
+        assert_eq!(auto.resolve(Some(("Xbox Series X Controller", Some(0x045e)))), LabelStyle::Xbox);
+        assert_eq!(LabelStyle::PlayStation.resolve(Some(("Xbox", Some(0x045e)))), LabelStyle::PlayStation);
+        // Every bindable control has a short label (the setup's columns
+        // are 100 virtual pixels, 7 per character).
+        for s in [LabelStyle::Xbox, LabelStyle::PlayStation, LabelStyle::Nintendo] {
+            for &b in PADS {
+                assert!(text_len(&pad_label(PadInput::Button(b), s)) <= 12, "{b:?}");
+            }
+            for &a in &AXES {
+                for p in [false, true] {
+                    assert!(pad_label(PadInput::Axis(a, p), s).len() <= 12);
+                }
+            }
+        }
+    }
+
+    fn text_len(s: &str) -> usize {
+        s.chars().count()
+    }
+
+    #[test]
+    fn thresholds() {
+        let o = PadOptions::default();
+        assert_eq!((o.deadzone, o.trigger), (50, 30));
+        // Left stick past the deadzone, or the d-pad: left, right, up, down.
+        assert_eq!(o.directions(Vec2::new(-0.49, 0.0), Vec2::ZERO), [false; 4]);
+        assert_eq!(o.directions(Vec2::new(-0.5, 0.0), Vec2::ZERO), [true, false, false, false]);
+        assert_eq!(o.directions(Vec2::new(0.7, 0.8), Vec2::ZERO), [false, true, true, false]);
+        assert_eq!(o.directions(Vec2::ZERO, Vec2::new(0.0, -1.0)), [false, false, false, true]);
+        let tight = PadOptions { deadzone: 20, ..o };
+        assert_eq!(tight.directions(Vec2::new(0.25, 0.0), Vec2::ZERO), [false, true, false, false]);
+        // Triggers on Z axes use the trigger threshold, sticks the deadzone.
+        assert_eq!(o.axis_threshold(GamepadAxis::RightZ), 0.3);
+        assert_eq!(o.axis_threshold(GamepadAxis::RightStickX), 0.5);
+        // Out-of-range values are clamped.
+        let silly = PadOptions { deadzone: 0, trigger: 200, ..o };
+        assert_eq!((silly.stick(), silly.trigger()), (0.1, 0.9));
+        let mut c = Controls::default();
+        assert!(c.read("pad.deadzone", "3") && c.opts.deadzone == DEADZONE_RANGE.0);
+        assert!(c.read("pad.trigger", "x") && c.opts.trigger == 30);
+    }
+
+    #[test]
+    fn old_settings_upgrade() {
+        // A file from before layout 2: the old pad defaults, one edited table.
+        let mut old = Controls { pads: [PAD_V1; 4], ..Controls::default() };
+        old.pads[1][BRAKE] = Some(PadInput::Button(GamepadButton::LeftThumb));
+        let mut t = String::new();
+        old.write(&mut t);
+        let t: String = t.lines().filter(|l| !l.starts_with("pad.layout") && !l.starts_with("pad.deadzone")).map(|l| format!("{l}\n")).collect();
+        let mut c = Controls::default();
+        for line in t.lines() {
+            let (k, v) = line.split_once('=').unwrap();
+            c.read(k.trim(), v.trim());
+        }
+        assert_eq!(c.opts.layout, 1);
+        c.upgrade();
+        assert_eq!(c.opts.layout, PAD_LAYOUT);
+        assert_eq!(c.pads[0], PAD, "untouched table takes the new defaults");
+        assert_eq!(c.pads[1][SHOOT_ALT], None, "edited table kept");
+        assert_eq!(c.pads[1][BRAKE], Some(PadInput::Button(GamepadButton::LeftThumb)));
+        // A current file stays as written.
+        let mut cur = Controls::default();
+        cur.pads[0][SHOOT_ALT] = None;
+        cur.pads[0][REPEAT_MESSAGE] = None;
+        let mut t = String::new();
+        cur.write(&mut t);
+        let mut d = Controls::default();
+        for line in t.lines() {
+            let (k, v) = line.split_once('=').unwrap();
+            d.read(k.trim(), v.trim());
+        }
+        d.upgrade();
+        assert_eq!(d.pads[0], PAD_V1);
+        // Reset.
+        d.reset_pads();
+        d.keys[SHOOT] = None;
+        d.reset_keys();
+        assert_eq!(d, Controls::default());
+    }
+
+    #[test]
+    fn menu_repeat() {
+        let mut r = NavRepeat::default();
+        let down = IVec2::new(0, -1);
+        assert_eq!(r.step(down, 0.0), down, "pressed at once");
+        assert_eq!(r.step(down, 0.2), IVec2::ZERO);
+        assert_eq!(r.step(down, 0.39), IVec2::ZERO);
+        assert_eq!(r.step(down, 0.4), down, "first repeat after the delay");
+        assert_eq!(r.step(down, 0.45), IVec2::ZERO);
+        assert_eq!(r.step(down, 0.5), down, "then at the repeat rate");
+        assert_eq!(r.step(IVec2::ZERO, 0.6), IVec2::ZERO);
+        assert_eq!(r.step(IVec2::new(1, 0), 0.61), IVec2::new(1, 0));
+        // Adding a direction presses only the new one.
+        assert_eq!(r.step(IVec2::new(1, 1), 0.62), IVec2::new(0, 1));
+    }
+
+    /// Bevy's gamepad input in a headless App: a pad connects, presses
+    /// the d-pad, holds it, moves the stick; the menu keys follow.
+    #[test]
+    fn menu_input_from_pad_events() {
+        use super::super::ui::Input;
+        use bevy::input::gamepad::{GamepadConnection, RawGamepadAxisChangedEvent, RawGamepadButtonChangedEvent};
+
+        #[derive(Resource, Default)]
+        struct Menu {
+            now: f32,
+            nav: Vec<(Entity, NavRepeat)>,
+            input: Input,
+        }
+        fn read(pads: Query<(Entity, &Gamepad)>, axes: Res<PadAxes>, mut m: ResMut<Menu>) {
+            let m = &mut *m;
+            let mut input = Input::default();
+            pad_menu_input(pads.iter(), &axes, &PadOptions::default(), &mut m.nav, m.now, &mut input);
+            m.input = input;
+        }
+        let mut app = App::new();
+        app.add_plugins(bevy::input::InputPlugin)
+            .init_resource::<PadSlots>()
+            .init_resource::<PadAxes>()
+            .init_resource::<Menu>()
+            .add_systems(PreUpdate, (assign_pads, track_pad_axes, apply_pad_options).after(bevy::input::InputSystems))
+            .add_systems(Update, read);
+        let pad = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(GamepadConnectionEvent::new(
+            pad,
+            GamepadConnection::Connected { name: "Test pad".into(), vendor_id: Some(0x054c), product_id: Some(1) },
+        ));
+        app.update();
+        assert_eq!(app.world().resource::<PadSlots>().first(), Some(pad));
+        let frame = |app: &mut App, now: f32, ev: Option<RawGamepadEvent>| -> Input {
+            app.world_mut().resource_mut::<Menu>().now = now;
+            if let Some(ev) = ev {
+                app.world_mut().write_message(ev);
+            }
+            app.update();
+            app.world().resource::<Menu>().input.clone()
+        };
+        let button = |b, v| Some(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(pad, b, v)));
+        let i = frame(&mut app, 1.0, button(GamepadButton::DPadDown, 1.0));
+        assert!(i.down && !i.up && !i.fire);
+        assert!(!frame(&mut app, 1.1, None).down, "held: no repeat yet");
+        assert!(frame(&mut app, 1.4, None).down, "held: repeats");
+        assert!(!frame(&mut app, 1.45, button(GamepadButton::DPadDown, 0.0)).down);
+        let i = frame(&mut app, 1.5, button(GamepadButton::South, 1.0));
+        assert!(i.fire && i.enter && i.pad == vec![GamepadButton::South]);
+        let i = frame(&mut app, 1.6, button(GamepadButton::Start, 1.0));
+        assert!(i.fire && i.start);
+        assert!(frame(&mut app, 1.7, button(GamepadButton::East, 1.0)).back);
+        // The stick: past the deadzone only.
+        let stick = |v| Some(RawGamepadEvent::Axis(RawGamepadAxisChangedEvent::new(pad, GamepadAxis::LeftStickX, v)));
+        assert!(!frame(&mut app, 2.0, stick(0.3)).right);
+        let i = frame(&mut app, 2.1, stick(0.8));
+        assert!(i.right);
+        assert_eq!(i.pad_axes, vec![PadInput::Axis(GamepadAxis::LeftStickX, true)]);
+        // A trigger past the 30 % threshold counts as pressed (Bevy's
+        // default press point is 75 %).
+        frame(&mut app, 2.2, button(GamepadButton::RightTrigger2, 0.4));
+        let g = app.world().get::<Gamepad>(pad).unwrap();
+        assert!(g.pressed(GamepadButton::RightTrigger2));
+        // Unplugged: reported once.
+        app.world_mut().write_message(GamepadConnectionEvent::new(pad, GamepadConnection::Disconnected));
+        app.update();
+        let mut slots = app.world_mut().resource_mut::<PadSlots>();
+        assert_eq!(slots.first(), None);
+        assert!(slots.take_lost());
+        assert!(!slots.take_lost());
     }
 }

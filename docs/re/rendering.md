@@ -347,7 +347,22 @@ over ice (map 1, on a zero-height cube 1 above the Reflect ice), `RoofWindow.chu
   width, from just behind the front bumper to ~10 half-widths ahead. Faces `(v0 v1 v2)`
   and `(v1 v3 v2)`, slot 0 only (one-sided), texture `Lights` (`DAT_0114c90c`), UVs
   (77,3) (17,3) (77,82) and (17,3) (17,82) (77,82) (texel, row — the beam picture in
-  the top-left of `Lights`), **mode 4** (additive, §10) param 2.
+  the top-left of `Lights`), **mode 4** (additive, §10) param 2. The Mac builds the same
+  polygon (`AddHeadlights__FP9Structure` @ 10073f60, rows doubled: 7 and 0xa5, CONFIRMED).
+  Being part of the model, the beam turns with the body's pitch and roll (steering lean
+  up to ±256 = 16°, throttle dip), so one side or the far end dips below the model's
+  ground plane; the original has no z-buffer and draws the vehicle (layer-1 pass,
+  `FUN_01049374` draw order) after the road tops of layer 0, so the beam is drawn whole over
+  the road. Port (`objects.rs` `headlight_polygon`, `shaders/objects.wgsl`): the beam
+  sits in the additive overlay with `uv_b` = (−2, −2); the vertex shader slides any
+  beam point below the horizontal plane of the model's origin along its view ray up to
+  that plane: the same pixels, with the depth of the road under the car (+16 h, the
+  object lift), so the road no longer cuts the beam along its centre line in turns
+  (the bug: half the beam vanished at full lean). Higher cubes (kerbs, walls) still
+  occlude it, as their tops are drawn after the objects of layer 1. Mesh bounds are not
+  a factor: the beam is a static part of the model mesh, and Bevy 0.19 recomputes an
+  `Aabb` when a mesh asset changes (`calculate_bounds`: `AssetChanged<Mesh3d>`), so
+  meshes edited in place (people poses, debris, shadows) keep correct bounds.
 
 ### Gouraud lighting (option; `DAT_0114c2fc`, "Gouraud shading" menu) — CONFIRMED
 

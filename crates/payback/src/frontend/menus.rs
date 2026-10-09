@@ -10,10 +10,12 @@ use super::display::{self, GraphicsSetup, ITEMS};
 use super::progress::Profile;
 use super::ui::*;
 
-/// Option models by main-menu item (`DAT_0117b6f8[0..9]`), plus item 8
-/// "Graphics options" (not in the original, whose PaybackSetup launcher
-/// chose the screen mode and renderer) with the pause menu's model.
-const MAIN_MODELS: [&str; 10] = [
+/// Option models by main-menu item (`DAT_0117b6f8[0..9]`), plus two
+/// port-added items before "Quit game": 8 "Graphics options" (not in the
+/// original, whose PaybackSetup launcher chose the screen mode and
+/// renderer) with the pause menu's model, and 9 "Unlock all levels"
+/// ([`UNLOCK_ITEM`]) with the gold cup.
+const MAIN_MODELS: [&str; 11] = [
     "options/joystick.obj",
     "options/disk.obj",
     "options/moviereel.obj",
@@ -23,8 +25,15 @@ const MAIN_MODELS: [&str; 10] = [
     "options/world.obj",
     "options/moviereel.obj",
     "options/questionmarks.obj",
+    "options/cup_gold.obj",
     "options/amiga.obj",
 ];
+
+/// Main-menu item "Unlock all levels: On / Off" (port-added, no phrase;
+/// `Settings::unlock_all`, docs/re/frontend_menus.md §5): fire toggles it
+/// in place and saves the settings, so every story level and built-in
+/// city can be chosen without starting a game first.
+const UNLOCK_ITEM: usize = 9;
 
 /// Save the settings when the game quits, from the menu or by closing the
 /// window (Mac: every loop polls `MacHasQuit` @ 1004f560, then
@@ -142,7 +151,7 @@ impl MainMenu {
             6 => 2132,
             7 => 2109,
             8 => 1600,
-            9 => 2130,
+            10 => 2130,
             i => 2090 + i as u32,
         }
     }
@@ -186,6 +195,12 @@ impl Screen for MainMenu {
             return Step::Stay;
         }
         if !input.fire {
+            return Step::Stay;
+        }
+        if self.sel == UNLOCK_ITEM {
+            cx.sound(Sfx::Select);
+            cx.settings.unlock_all = !cx.settings.unlock_all;
+            cx.settings.save();
             return Step::Stay;
         }
         if self.sel == 7 {
@@ -273,7 +288,12 @@ impl Screen for MainMenu {
         }
         ui.picture(0, false);
         let y = ui.hy(0x46);
-        ui.centred(&cx.g(Self::phrase(self.sel)), y, 1);
+        let label = if self.sel == UNLOCK_ITEM {
+            format!("Unlock all levels: {}", cx.g(if cx.settings.unlock_all { 2081 } else { 2080 }))
+        } else {
+            cx.g(Self::phrase(self.sel))
+        };
+        ui.centred(&label, y, 1);
         match &self.confirm {
             Some(c) => c.draw(ui, cx, ui.cy(), true),
             None => ui.arrows(y),
@@ -602,7 +622,8 @@ impl Screen for PauseMenu {
             }
             return Step::Stay;
         }
-        if input.back {
+        // Esc, or a gamepad's B or Start (port addition: Start toggles).
+        if input.back || input.start {
             cx.sound(Sfx::Select);
             cx.settings.save();
             cx.requests.push(Request::Resume);
@@ -765,5 +786,28 @@ mod tests {
     fn replay_names() {
         assert_eq!(super::replay_file_name("Travis - 12:30. ").as_deref(), Some("Travis - 12_30"));
         assert_eq!(super::replay_file_name(" ..").as_deref(), None);
+    }
+
+    /// "Unlock all levels" on the main menu: fire toggles the setting in
+    /// place and saves it; the menu stays.
+    #[test]
+    fn main_menu_unlock_all() {
+        use super::super::progress::{self, Settings, testing};
+        use super::*;
+        let dir = testing::scratch("unlock_menu");
+        progress::with_saves_dir(&dir, || {
+            let mut env = testing::Env::new();
+            let mut cx = env.cx();
+            let fire = Input { fire: true, ..Input::default() };
+            let mut m = MainMenu::at(UNLOCK_ITEM);
+            assert!(!cx.settings.unlock_all);
+            assert!(matches!(m.tick(&mut cx, &fire), Step::Stay));
+            assert!(cx.settings.unlock_all);
+            assert!(Settings::load().unlock_all, "saved");
+            m.tick(&mut cx, &fire);
+            assert!(!cx.settings.unlock_all && !Settings::load().unlock_all);
+            assert_eq!(MainMenu::phrase(UNLOCK_ITEM + 1), 2130, "Quit game stays last");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,7 +14,7 @@
 //! them in its next fixed tick and records them in the replay.
 
 use super::ui::*;
-use crate::cheats::{Cheat, MAX_WANTED, VEHICLES};
+use crate::cheats::{Cheat, Cheats, MAX_WANTED, VEHICLES};
 use crate::objects::{PAINT_COUNT, paintable};
 use crate::data::GameData;
 use crate::vehicles::TYPES;
@@ -29,38 +29,52 @@ fn panel(ui: &mut Ui) {
 const TITLE_Y: i32 = 34;
 
 /// Menu lines.
-const ITEMS: usize = 6;
+const ITEMS: usize = 7;
 
 /// Line spacing of the items (virtual 200-line units).
 const LINE: i32 = 12;
 
-/// Main cheat menu: God mode (On/Off), All weapons, Spawn vehicle, Clear
-/// wanted, Wanted up, Wanted down, and the wanted level below them.
+/// First item line (virtual 200-line units): seven items and the wanted
+/// level above the "Esc" line at 0x9a.
+const TOP: i32 = 0x3a;
+
+/// Main cheat menu: God mode (On/Off), Vehicle god mode (On/Off), All
+/// weapons, Spawn vehicle, Clear wanted, Wanted up, Wanted down, and the
+/// wanted level below them.
 pub struct CheatMenu {
     sel: usize,
     /// God mode as it will be after the queued cheats.
     god: bool,
+    /// Vehicle god mode as it will be after the queued cheats.
+    vehicle_god: bool,
     /// The wanted level as it will be after the queued cheats.
     wanted: i32,
 }
 
 impl CheatMenu {
-    pub fn new(god: bool, wanted: i32) -> CheatMenu {
-        CheatMenu { sel: 0, god, wanted }
+    /// Showing the cheats as they will be once the queue is applied.
+    pub fn new(cheats: &Cheats) -> CheatMenu {
+        CheatMenu {
+            sel: 0,
+            god: cheats.god_pending(),
+            vehicle_god: cheats.vehicle_god_pending(),
+            wanted: cheats.wanted_pending(),
+        }
     }
 
     /// Debug (`--cheat-menu`, on line `--menu-item <n>`).
-    pub fn at(god: bool, wanted: i32, sel: usize) -> CheatMenu {
-        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(god, wanted) }
+    pub fn at(cheats: &Cheats, sel: usize) -> CheatMenu {
+        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats) }
     }
 
     fn label(&self, cx: &Ctx, i: usize) -> String {
         match i {
             0 => format!("God mode: {}", cx.g(if self.god { 2081 } else { 2080 })),
-            1 => "All weapons".into(),
-            2 => "Spawn vehicle".into(),
-            3 => "Clear wanted".into(),
-            4 => "Wanted up".into(),
+            1 => format!("Vehicle god mode: {}", cx.g(if self.vehicle_god { 2081 } else { 2080 })),
+            2 => "All weapons".into(),
+            3 => "Spawn vehicle".into(),
+            4 => "Clear wanted".into(),
+            5 => "Wanted up".into(),
             _ => "Wanted down".into(),
         }
     }
@@ -94,7 +108,7 @@ impl Screen for CheatMenu {
             cx.sound(Sfx::Move);
             return Step::Stay;
         }
-        if (self.sel == 0 && (input.left || input.right)) || input.fire {
+        if (self.sel <= 1 && (input.left || input.right)) || input.fire {
             cx.sound(Sfx::Select);
             match self.sel {
                 0 => {
@@ -102,12 +116,16 @@ impl Screen for CheatMenu {
                     cx.requests.push(Request::Cheat(Cheat::God(self.god)));
                 }
                 1 => {
+                    self.vehicle_god = !self.vehicle_god;
+                    cx.requests.push(Request::Cheat(Cheat::VehicleGod(self.vehicle_god)));
+                }
+                2 => {
                     cx.requests.push(Request::Cheat(Cheat::AllWeapons));
                     cx.requests.push(Request::Resume);
                 }
-                2 => return Step::Push(Box::new(VehicleSelect::new(cx.data, 0))),
-                3 => self.wanted(cx, Cheat::ClearWanted),
-                4 => self.wanted(cx, Cheat::Wanted(1)),
+                3 => return Step::Push(Box::new(VehicleSelect::new(cx.data, 0))),
+                4 => self.wanted(cx, Cheat::ClearWanted),
+                5 => self.wanted(cx, Cheat::Wanted(1)),
                 _ => self.wanted(cx, Cheat::Wanted(-1)),
             }
         }
@@ -119,10 +137,10 @@ impl Screen for CheatMenu {
         ui.heading("CHEATS", TITLE_Y);
         for i in 0..ITEMS {
             let c = if i == self.sel { ui.flash() } else { 1 };
-            ui.centred(&self.label(cx, i), ui.hy(0x46 + LINE * i as i32), c);
+            ui.centred(&self.label(cx, i), ui.hy(TOP + LINE * i as i32), c);
         }
         let w = format!("Wanted level: {}/{}", self.wanted, MAX_WANTED);
-        ui.centred(&w, ui.hy(0x46 + LINE * ITEMS as i32), 2);
+        ui.centred(&w, ui.hy(TOP + LINE * ITEMS as i32), 2);
         ui.centred("Esc: back to the game", ui.hy(0x9a), 2);
     }
 }

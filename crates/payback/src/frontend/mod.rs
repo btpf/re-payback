@@ -94,8 +94,8 @@ struct Frontend {
     needs_init: bool,
     /// The canvases are spawned (the `Layers` resource may lag a frame).
     layers_open: bool,
-    /// Gamepads' last left-stick directions (menu navigation).
-    stick: Vec<(Entity, IVec2)>,
+    /// Gamepads' held menu directions (auto-repeat).
+    nav: Vec<(Entity, bindings::NavRepeat)>,
 }
 
 /// The two canvases and their nodes, alive while a menu is shown.
@@ -191,9 +191,11 @@ impl Plugin for FrontendPlugin {
             .init_resource::<bindings::PadAxes>()
             .add_systems(
                 PreUpdate,
-                (bindings::assign_pads, bindings::track_pad_axes, bindings::learn_key_labels)
+                (bindings::assign_pads, bindings::track_pad_axes, bindings::learn_key_labels, bindings::apply_pad_options)
                     .after(bevy::input::InputSystems),
             )
+            .add_systems(PreUpdate, bindings::simulate_pad.before(bevy::input::InputSystems))
+            .add_systems(Startup, bindings::upgrade_pad_layout)
             .add_plugins(display::DisplayPlugin)
             .add_systems(Startup, setup)
             .add_systems(PostStartup, default_ui_camera)
@@ -303,6 +305,8 @@ fn debug_screen(name: &str, cx: &mut Ctx) -> Option<Box<dyn Screen>> {
         "language" => Box::new(misc::LanguageChooser::new(cx)),
         "controls" => Box::new(misc::ControlSetup::new(cx)),
         "controls-redefine" => Box::new(misc::ControlSetup::redefining(cx)),
+        "controls-pad" => Box::new(misc::ControlSetup::debug(cx, false)),
+        "controls-pad-options" => Box::new(misc::ControlSetup::debug(cx, true)),
         "cd" => Box::new(misc::CdSetup::new()),
         "graphics" => Box::new(display::GraphicsSetup::new(cx.settings)),
         _ => return None,
@@ -504,43 +508,22 @@ fn watch_level_end(
     }
 }
 
-/// The menu keys from the keyboard and every connected gamepad. The left
-/// stick counts as a press when it leaves the centre (`stick` = its last
-/// direction per pad).
+/// The menu keys from the keyboard and every connected gamepad
+/// (`bindings::pad_menu_input`: d-pad / left stick with auto-repeat, `nav`
+/// = each pad's held direction).
+#[allow(clippy::too_many_arguments)]
 fn gather_input(
     keys: &ButtonInput<KeyCode>,
     typed: &mut MessageReader<KeyboardInput>,
     pads: &Query<(Entity, &Gamepad)>,
     pad_axes: &bindings::PadAxes,
-    stick: &mut Vec<(Entity, IVec2)>,
+    opts: &bindings::PadOptions,
+    nav: &mut Vec<(Entity, bindings::NavRepeat)>,
+    now: f32,
     input: &mut Input,
 ) {
     input.keys.extend(keys.get_just_pressed().copied());
-    let mut seen = Vec::new();
-    for (e, pad) in pads {
-        input.pad.extend(pad.get_just_pressed().copied());
-        input.pad_axes.extend(pad_axes.just_pressed(e));
-        input.left |= pad.just_pressed(GamepadButton::DPadLeft);
-        input.right |= pad.just_pressed(GamepadButton::DPadRight);
-        input.up |= pad.just_pressed(GamepadButton::DPadUp);
-        input.down |= pad.just_pressed(GamepadButton::DPadDown);
-        let ok = pad.any_just_pressed([GamepadButton::South, GamepadButton::Start]);
-        input.fire |= ok;
-        input.enter |= ok;
-        input.back |= pad.just_pressed(GamepadButton::East);
-        let s = pad.left_stick();
-        let dir = IVec2::new(
-            if s.x > 0.5 { 1 } else if s.x < -0.5 { -1 } else { 0 },
-            if s.y > 0.5 { 1 } else if s.y < -0.5 { -1 } else { 0 },
-        );
-        let prev = stick.iter().find(|p| p.0 == e).map_or(IVec2::ZERO, |p| p.1);
-        input.left |= dir.x < 0 && prev.x >= 0;
-        input.right |= dir.x > 0 && prev.x <= 0;
-        input.up |= dir.y > 0 && prev.y <= 0;
-        input.down |= dir.y < 0 && prev.y >= 0;
-        seen.push((e, dir));
-    }
-    *stick = seen;
+    bindings::pad_menu_input(pads.iter(), pad_axes, opts, nav, now, input);
     input.left |= keys.just_pressed(KeyCode::ArrowLeft);
     input.right |= keys.just_pressed(KeyCode::ArrowRight);
     input.up |= keys.just_pressed(KeyCode::ArrowUp);
@@ -611,6 +594,7 @@ struct Env<'w, 's> {
     startup: Option<Res<'w, crate::startup::StartupLoad>>,
     pads: Query<'w, 's, (Entity, &'static Gamepad)>,
     pad_axes: Res<'w, bindings::PadAxes>,
+    pad_slots: ResMut<'w, bindings::PadSlots>,
     user_maps: Res<'w, usermaps::UserMaps>,
     display: Res<'w, display::Display>,
     render_mode: Option<Res<'w, crate::render_mode::RenderMode>>,
@@ -658,7 +642,8 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     };
 
     // Esc (or a gamepad's Start) in a level opens the pause menu
-    // (`FUN_0101a7dc`).
+    // (`FUN_0101a7dc`); so does unplugging a gamepad (port addition).
+    let pad_lost = env.pad_slots.take_lost();
     let debug_pause = playing
         && !fe.debug_paused
         && crate::arg("--frontend-screen").as_deref() == Some("pause")
@@ -670,6 +655,7 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         && !env.replay.playing()
         && (env.keys.just_pressed(KeyCode::Escape)
             || env.pads.iter().any(|(_, p)| p.just_pressed(GamepadButton::Start))
+            || pad_lost
             || debug_pause)
     {
         fe.debug_paused = true;
@@ -704,10 +690,8 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     {
         fe.debug_cheats = true;
         env.virtual_time.pause();
-        let god = env.cheats.god_pending();
-        let wanted = env.cheats.wanted_pending();
         let item = crate::arg("--menu-item").and_then(|v| v.parse().ok()).filter(|_| debug_cheats);
-        fe.stack.push(Box::new(cheats::CheatMenu::at(god, wanted, item.unwrap_or(0))));
+        fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, item.unwrap_or(0))));
         if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
             fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));
         }
@@ -756,7 +740,8 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     }
 
     let mut pending = std::mem::take(&mut fe.pending);
-    gather_input(&env.keys, &mut env.typed, &env.pads, &env.pad_axes, &mut fe.stick, &mut pending);
+    let (opts, now) = (cx.settings.controls.opts, env.time.elapsed_secs());
+    gather_input(&env.keys, &mut env.typed, &env.pads, &env.pad_axes, &opts, &mut fe.nav, now, &mut pending);
 
     // Ticks at 30 Hz of real time (virtual time is paused in the pause
     // menu).

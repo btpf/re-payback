@@ -434,14 +434,15 @@ fn read_keyboard(
     // The lowest-numbered connected pad (`bindings::PadSlots`).
     let pad = slots.first().and_then(|e| pads.get(e).ok()).map(|(e, g)| axes.state(e, g));
     let pad = pad.as_ref();
-    let stick = pad.map_or(Vec2::ZERO, |p| p.g.left_stick() + p.g.dpad());
+    // Left stick (past the deadzone) and d-pad: left, right, up, down.
+    let [sl, sr, su, sd] = pad.map_or([false; 4], |p| controls.opts.pad_directions(p.g));
     let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
     let just = |a: usize| key_just(&keys, k[a], true) || pad.is_some_and(|g| pad_just(g, p[a]));
     let input = &mut inputs.0[0];
-    input.left = held(b::LEFT) || stick.x < -0.5;
-    input.right = held(b::RIGHT) || stick.x > 0.5;
-    input.accel = held(b::ACCELERATE) || stick.y > 0.5;
-    input.reverse = held(b::REVERSE) || stick.y < -0.5;
+    input.left = held(b::LEFT) || sl;
+    input.right = held(b::RIGHT) || sr;
+    input.accel = held(b::ACCELERATE) || su;
+    input.reverse = held(b::REVERSE) || sd;
     input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
     input.brake = held(b::BRAKE);
     // The original reads the input once per tick; here it is read every

@@ -112,8 +112,8 @@ The `.Obj` reader is `FUN_0009610c` (68k) / `FUN_010bf8bc` (OS4). It does the fo
 | +0x48d0 | max \|Z\| (no gameplay reader found) |
 | +0x48f4 | `= −max|X|`; door lateral position (vehicles) |
 | +0x48f8 | `= maxY/2`; door longitudinal position (vehicles) |
-| +0x490e/+0x4912 (68k) or +0x4910/+0x4914 (OS4) | mean X / mean Y of Z==0 vertices |
-| +0x4916 (68k) or +0x4918 (OS4) | `max(min(xRange, yRange)/2, 0x80)`; scenery collision size |
+| +0x490e/+0x4912 (68k) or +0x4910/+0x4914 (OS4) | mean X / mean Y of Z==0 vertices (all vertices if none) |
+| +0x4916 (68k) or +0x4918 (OS4) | `(maxY − minX)/2` of the same vertices, 0x80 if the difference is < 0x100 (not the footprint, see §5.2; CONFIRMED Mac `LoadStructure` @ 10074630, OS4 `FUN_010bf8bc`); scenery collision size |
 
 After loading each **people** model, the loader sets:
 
@@ -698,7 +698,15 @@ wall (`vx = ±|vx|`). AI peds use the "hit a wall" flag to choose a new directio
 - Scenery on nearby squares is treated as a circle.
 - Centre = square centre + the model's mean (X, Y) rotated by the scenery rotation (`rotation·0x5a & 0x7ffc` byte
   offset, i.e. rot·22.5 units).
-- Radius R = `scenery.0x4918/2 + person.0x48c4` (= quarter of the smaller footprint extent, at least 64, + 192).
+- Radius R = `scenery.0x4918/2 + person.0x48c4` (+ 192 for a person). CONFIRMED (Mac `LoadStructure` @ 10074630,
+  Mac 9 identical, OS4 `FUN_010bf8bc`): `0x4918` = (max Y − min X) / 2 of the ground vertices (z = 0; all vertices
+  when none touch the ground), 0x80 when that difference is below 0x100. The original keeps only min X and max Y of
+  the four extents (both PowerPC builds carry the dead min/max pair, OS4 drops it), so the size is not the footprint:
+  the lamp posts (base 8 × 8 units at Y 48..56) give (896 + 64)/2 = 480, radius 240, centred on the base at
+  (0, 832). The light geometry of `lamppost_dark` reaches far out, which made the port's old all-vertex footprint
+  3712 (radius 1856). Other sizes: crossing beacons 544, bench 544, trees `newtree`/`newtree3` 480, `tree` 1504,
+  `newtree2` 1608, crates and chimneys 320, phones, traffic lights, poles and pot plants 128, snowman 280.
+  `0x4910/0x4914` (the centre offset) are the mean X/Y of the same vertices.
 - Only applies when the z ranges overlap within ±500.
 - Penetration is resolved by moving the person and its velocity out by **half the overlap** per sub-step.
 - **People take no damage from scenery.** Vehicles do, except from the snowman (0x4908 = 0xfe).

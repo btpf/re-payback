@@ -7,7 +7,7 @@
 //!
 //! **Files.** Put the tracks in a `Music` folder in the working directory,
 //! the saves folder (`frontend::progress::saves_dir`, e.g.
-//! `%APPDATA%\Payback\Music`), the data root or the Mac data folder, one
+//! `Saves\Music` next to the executable), the data root or the Mac data folder, one
 //! file per CD track, numbered by CD track: a name starting with the number
 //! (`13.ogg`, `13 - Payback.mp3`) or with the number last
 //! (`Track13.flac`, `Payback (Track 13).wav`). Any format the decoder

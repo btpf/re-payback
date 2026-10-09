@@ -1,7 +1,7 @@
 //! Cheats (port addition, not in the original; docs/re/frontend_menus.md
 //! "Cheat menu"): F12 in a single-player level opens a menu
-//! (`crate::frontend::cheats`) with God mode, All weapons, Spawn vehicle
-//! and the wanted level (clear, up, down).
+//! (`crate::frontend::cheats`) with God mode, Vehicle god mode, All
+//! weapons, Spawn vehicle and the wanted level (clear, up, down).
 //!
 //! Every cheat changes the simulation, so the menu only queues it
 //! ([`Cheats::queue`]); [`apply`] takes the queue at the start of the next
@@ -9,8 +9,9 @@
 //! action in the replay as a [`CheatEvent`] at that tick, and applies it.
 //! Playing a replay back applies the recorded events at their ticks
 //! instead (the menu is not available then), so a game with cheats replays
-//! exactly. The god-mode flag is sim state: reset at level start, changed
-//! only by the events, and part of the replay hash through [`Obj::god`].
+//! exactly. The god-mode flags are sim state: reset at level start,
+//! changed only by the events, and part of the replay hash through
+//! [`Obj::god`].
 //!
 //! - **God mode**: the player's object (on foot, or the vehicle they drive)
 //!   takes no damage: punches, bullets, flames, explosions, run-overs and
@@ -18,6 +19,18 @@
 //!   damage. Deaths that are not damage still happen: drowning (sinking
 //!   below the water), being busted by the police, mission scripts that
 //!   kill the player, the RC car dying in water.
+//! - **Vehicle god mode**: the same protection for the vehicle the player
+//!   drives only, whichever it is (it follows the player from vehicle to
+//!   vehicle; a vehicle left behind is vulnerable again), while the player
+//!   on foot can be hurt as usual. It sets the same [`Obj::god`] flag, so
+//!   the vehicle takes no crash, collision, run-over, bullet, flame or
+//!   blast damage and so is never set alight or wrecked (`sim::contact`
+//!   wrecks a vehicle only at health < 1). God mode already covers the
+//!   driven vehicle (it is the player's object while driving): this is
+//!   the vehicle-only half. Sinking is not damage and is kept as in the
+//!   original: a car driven into deep water still sinks and the player
+//!   drowns, and the RC car still dies in water; mission scripts can still
+//!   destroy it.
 //! - **All weapons**: every weapon slot 1..7 gets at least [`FULL_AMMO`].
 //! - **Spawn vehicle**: a parked vehicle of the chosen type
 //!   ([`VEHICLES`]) in front of the player, facing the player's heading:
@@ -37,7 +50,8 @@
 //!   police in traffic from 4, roadblocks from 5, cops on foot from 3.
 //!
 //! Debug: `--cheat-script <tick>:<cheat>,...` queues cheats at those ticks
-//! of a recorded game (`god`, `nogod`, `weapons`, `vehicle=<type>[:<paint>]`,
+//! of a recorded game (`god`, `nogod`, `vgod`, `novgod`, `weapons`,
+//! `vehicle=<type>[:<paint>]`,
 //! `wanted+`, `wanted-`, `wanted0`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
 //! menus (`crate::frontend`).
 
@@ -76,12 +90,16 @@ const EV_VEHICLE: u32 = 3;
 /// Argument: +1 up, -1 down.
 const EV_WANTED: u32 = 4;
 const EV_CLEAR_WANTED: u32 = 5;
+/// Argument: 1 on, 0 off.
+const EV_VEHICLE_GOD: u32 = 6;
 
 /// One cheat action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cheat {
     /// God mode on or off.
     God(bool),
+    /// Vehicle god mode on or off.
+    VehicleGod(bool),
     AllWeapons,
     /// Spawn a vehicle of this `vehicles::TYPES` index in this paint
     /// colour (`objects::PAINTS` index).
@@ -95,6 +113,7 @@ impl Cheat {
     pub fn event(self, tick: u32) -> CheatEvent {
         let (kind, arg) = match self {
             Cheat::God(on) => (EV_GOD, on as i32),
+            Cheat::VehicleGod(on) => (EV_VEHICLE_GOD, on as i32),
             Cheat::AllWeapons => (EV_WEAPONS, 0),
             Cheat::Vehicle(k, c) => (EV_VEHICLE, k as i32 | (c as i32) << 8),
             Cheat::Wanted(d) => (EV_WANTED, d.signum()),
@@ -106,6 +125,7 @@ impl Cheat {
     pub fn from_event(e: &CheatEvent) -> Option<Cheat> {
         Some(match e.kind {
             EV_GOD => Cheat::God(e.arg != 0),
+            EV_VEHICLE_GOD => Cheat::VehicleGod(e.arg != 0),
             EV_WEAPONS => Cheat::AllWeapons,
             EV_VEHICLE => vehicle(e.arg & 0xff, e.arg >> 8)?,
             EV_WANTED if e.arg != 0 => Cheat::Wanted(e.arg.signum()),
@@ -114,12 +134,14 @@ impl Cheat {
         })
     }
 
-    /// `god`, `nogod`, `weapons`, `vehicle=<type>[:<paint>]`, `wanted+`,
+    /// `god`, `nogod`, `vgod`, `novgod`, `weapons`, `vehicle=<type>[:<paint>]`, `wanted+`,
     /// `wanted-`, `wanted0` (`--cheat-script`).
     fn parse(s: &str) -> Option<Cheat> {
         Some(match s.trim() {
             "god" => Cheat::God(true),
             "nogod" => Cheat::God(false),
+            "vgod" => Cheat::VehicleGod(true),
+            "novgod" => Cheat::VehicleGod(false),
             "weapons" => Cheat::AllWeapons,
             "wanted+" => Cheat::Wanted(1),
             "wanted-" => Cheat::Wanted(-1),
@@ -140,12 +162,15 @@ fn vehicle(kind: i32, colour: i32) -> Option<Cheat> {
     Some(Cheat::Vehicle(k, c))
 }
 
-/// Cheat state: god mode (sim state, changed only in the fixed tick), the
+/// Cheat state: god mode and vehicle god mode (sim state, changed only in
+/// the fixed tick), the
 /// player's wanted level as of the last tick (for the menu) and the
 /// actions the menu has queued for the next tick.
 #[derive(Resource, Default, Debug)]
 pub struct Cheats {
     pub god: bool,
+    /// Vehicle god mode: the vehicle the player drives takes no damage.
+    pub vehicle_god: bool,
     /// The player's wanted level after the last tick (a copy, for the menu).
     pub wanted: i32,
     pub queue: Vec<Cheat>,
@@ -170,6 +195,16 @@ impl Cheats {
             .rev()
             .find_map(|c| if let Cheat::God(on) = c { Some(*on) } else { None })
             .unwrap_or(self.god)
+    }
+
+    /// Vehicle god mode as it will be once the queue is applied (the menu
+    /// shows this).
+    pub fn vehicle_god_pending(&self) -> bool {
+        self.queue
+            .iter()
+            .rev()
+            .find_map(|c| if let Cheat::VehicleGod(on) = c { Some(*on) } else { None })
+            .unwrap_or(self.vehicle_god)
     }
 }
 
@@ -201,7 +236,8 @@ fn script() -> Vec<(u32, Cheat)> {
 
 /// Start of every fixed tick, after the replay input (chained after
 /// `replay::debug_hash`): this tick's cheats, recorded or played back,
-/// then the god-mode flag onto the player objects.
+/// then the god-mode flag onto the player objects (every one with god
+/// mode; with vehicle god mode, a player's object that is a vehicle).
 pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>>>) {
     let queued = std::mem::take(&mut world.resource_mut::<Cheats>().queue);
     let multiplayer = world.resource::<GameMode>().is_multiplayer();
@@ -231,6 +267,7 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
         info!("cheat at tick {tick}: {a:?}");
         match a {
             Cheat::God(on) => world.resource_mut::<Cheats>().god = on,
+            Cheat::VehicleGod(on) => world.resource_mut::<Cheats>().vehicle_god = on,
             Cheat::AllWeapons => all_weapons(world),
             Cheat::Vehicle(k, c) => {
                 spawn_vehicle(world, k, c);
@@ -241,10 +278,13 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
     }
     let wanted = player(world).and_then(|(e, ..)| world.get::<Obj>(e)).map_or(0, |o| o.wanted);
     world.resource_mut::<Cheats>().wanted = wanted;
-    let god = world.resource::<Cheats>().god;
-    let mut q = world.query::<&mut Obj>();
-    for mut o in q.iter_mut(world) {
-        let want = god && o.player.is_some();
+    let (god, vehicle_god) = {
+        let c = world.resource::<Cheats>();
+        (c.god, c.vehicle_god)
+    };
+    let mut q = world.query::<(&mut Obj, Has<Vehicle>)>();
+    for (mut o, is_vehicle) in q.iter_mut(world) {
+        let want = (god || (vehicle_god && is_vehicle)) && o.player.is_some();
         if o.god != want {
             o.god = want;
         }
@@ -444,6 +484,8 @@ mod tests {
         for c in [
             Cheat::God(true),
             Cheat::God(false),
+            Cheat::VehicleGod(true),
+            Cheat::VehicleGod(false),
             Cheat::AllWeapons,
             Cheat::Vehicle(11, 0),
             Cheat::Vehicle(27, 7),
@@ -466,6 +508,8 @@ mod tests {
         assert_eq!(Cheat::parse("vehicle=11:3"), Some(Cheat::Vehicle(11, 3)));
         assert_eq!(Cheat::parse("vehicle=11:8"), None);
         assert_eq!(Cheat::parse("nogod"), Some(Cheat::God(false)));
+        assert_eq!(Cheat::parse("vgod"), Some(Cheat::VehicleGod(true)));
+        assert_eq!(Cheat::parse("novgod"), Some(Cheat::VehicleGod(false)));
         assert_eq!(Cheat::parse("wanted+"), Some(Cheat::Wanted(1)));
         assert_eq!(Cheat::parse("wanted-"), Some(Cheat::Wanted(-1)));
         assert_eq!(Cheat::parse("wanted0"), Some(Cheat::ClearWanted));
@@ -498,6 +542,14 @@ mod tests {
         assert!(c.god_pending());
         c.god = true;
         c.queue = vec![Cheat::God(false)];
+        assert!(!c.god_pending());
+        // Vehicle god mode is separate.
+        c.queue = vec![Cheat::VehicleGod(true)];
+        assert!(c.god_pending());
+        assert!(c.vehicle_god_pending());
+        c.vehicle_god = true;
+        c.queue = vec![Cheat::VehicleGod(false), Cheat::God(false)];
+        assert!(!c.vehicle_god_pending());
         assert!(!c.god_pending());
     }
 }
