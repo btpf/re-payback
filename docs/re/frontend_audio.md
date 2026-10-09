@@ -731,6 +731,18 @@ Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_ver
 * **Pause menu**: `ShowOptions` @ 10093240 calls `PauseAllSounds` @ 100f1810 and on leaving
   `ResumeAllSounds` @ 100f1880; game voices hold their place, the menu sound plays (C). The
   port holds every game voice while virtual time is paused.
+* **Leaving a level**: `amiga_finishlevel` @ 10101ab0 (the level's teardown; that every exit — pause-menu
+  quit, complete, game over — goes through it is I) deletes the script's sound, calls `StopAllSounds`
+  @ 100f17c0 (`StopSound` @ 100f18f0 → `CMSStopSound` @ 10155bd0 on all 6 channels; the
+  argument is ignored), stops the CD (mode ≠ 3), `RemoveAllObj`, then `ResetSound` @ 100f1670
+  (channels stopped again, every sound slot set to −1) (C). OS4 `FUN_010692bc` does the same
+  with `FUN_01005294` (intro stream) and `FUN_010050a4` (stop everything) (C). So no game sound
+  outlives the level. The port despawns every non-menu `Sound` and drops its voice from the
+  mixer on `OnExit(Playing)` (`audio::stop_game_sounds`), and again on `OnEnter(Playing)`
+  before the level loads; menu sounds (the quit click) play on. Before this, game sounds were
+  free-standing entities (engine, skid, siren, flamethrower held by the object that spawned
+  them, script and dialog loops) that the level unload did not reach,
+  and pause-held voices resumed when the virtual clock was unpaused on leaving.
 * **Port output latency** (port only, not the original): the mixer stream is played with
   `PlaybackSettings::ONCE` (it never ends). With `LOOP`, bevy_audio wrapped it in rodio's
   `repeat_infinite` → `buffered()`, which pulls 32,768-sample spans (743 ms at 22,050 Hz

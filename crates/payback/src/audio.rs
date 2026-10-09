@@ -17,6 +17,7 @@
 //! (`PauseAllSounds` @ 100f1810 / `ResumeAllSounds` @ 100f1880).
 
 use crate::data::GameData;
+use crate::level::AppState;
 use bevy::{
     audio::{AddAudioSource, ChannelCount, Decodable, SampleRate, Source},
     platform::collections::HashMap,
@@ -289,7 +290,10 @@ impl Plugin for AudioPlugin {
             .init_resource::<Mixer>()
             .add_systems(Startup, start_mixer)
             .add_systems(FixedPostUpdate, slot_clock)
-            .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain());
+            .add_systems(PostUpdate, (start_sounds, mix, end_sounds).chain())
+            .add_systems(OnExit(AppState::Playing), stop_game_sounds)
+            // A level or replay never starts with a stale voice.
+            .add_systems(OnEnter(AppState::Playing), stop_game_sounds.before(crate::level::load_level));
     }
 }
 
@@ -702,6 +706,26 @@ fn end_sounds(mut commands: Commands, mixer: Res<Mixer>, alive: Query<(), With<S
     });
 }
 
+/// Leaving a level silences every game voice at once; menu sounds play on.
+/// Mac `amiga_finishlevel` @ 10101ab0 calls `StopAllSounds` @ 100f17c0
+/// (`CMSStopSound` on all 6 channels) and, after `RemoveAllObj`,
+/// `ResetSound` @ 100f1670 (empties the sound slot table); OS4
+/// `FUN_010692bc` the same with `FUN_010050a4`. Game sounds are their own
+/// entities (engine, skid, siren, flamethrower, script and dialog loops are not
+/// level entities), and voices held by the pause menu would resume when the
+/// virtual clock is unpaused on leaving, so they are despawned and their
+/// voices dropped here, not left to `end_sounds`.
+pub fn stop_game_sounds(mut commands: Commands, mixer: Res<Mixer>, sounds: Query<(Entity, &Sound)>) {
+    for (e, s) in &sounds {
+        if !s.menu {
+            commands.entity(e).try_despawn();
+        }
+    }
+    if let Ok(mut voices) = mixer.0.lock() {
+        voices.retain(|&e, _| sounds.get(e).is_ok_and(|(_, s)| s.menu));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,5 +872,35 @@ mod tests {
         assert_eq!(d.next(), Some(0.0));
         let v = mixer.0.lock().unwrap();
         assert_eq!(v[&e].pos, 0.0);
+    }
+
+    /// Leaving a level drops every game voice (looping, held by the pause
+    /// menu or not) and despawns its sound; menu sounds keep playing.
+    #[test]
+    fn level_exit_silences_game_voices() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let pcm: Arc<[i8]> = Arc::from(vec![64i8; 100]);
+        world.insert_resource(Sounds { by_id: vec![Some(pcm)] });
+        world.insert_resource(Mixer::default());
+        world.insert_resource(FxVolume(50));
+        let menu = world.spawn(Sound::menu(0, 15232.0)).id();
+        let engine = world.spawn(Sound::looping(0, 1e7, 6000.0, SoundPos::At(Vec3::ZERO))).id();
+        let rain = world.spawn(Sound::looping(0, 255.0, 14000.0, SoundPos::Global)).id();
+        let shot = world.spawn(Sound::once(0, 255.0, 15000.0, SoundPos::Global)).id();
+        world.run_system_once(start_sounds).unwrap();
+        world.resource::<Mixer>().0.lock().unwrap().get_mut(&rain).unwrap().paused = false;
+        assert_eq!(world.resource::<Mixer>().0.lock().unwrap().len(), 4);
+        world.run_system_once(stop_game_sounds).unwrap();
+        let voices: Vec<Entity> = world.resource::<Mixer>().0.lock().unwrap().keys().copied().collect();
+        assert_eq!(voices, vec![menu]);
+        for e in [engine, rain, shot] {
+            assert!(world.get_entity(e).is_err());
+        }
+        assert!(world.get_entity(menu).is_ok());
+        // The stream renders only the menu voice.
+        let mixer = world.resource::<Mixer>().clone();
+        let mut d = MixerStream(mixer).decoder();
+        assert!((d.next().unwrap() - 0.25).abs() < 1e-6);
     }
 }
