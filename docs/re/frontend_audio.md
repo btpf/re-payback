@@ -234,6 +234,17 @@ The money display *is* the score (player +0x384).
   `Blob.0` (green) / `Blob.1` (orange) alternating every 2 frames at
   `((px>>12)+X−3, (py>>12)+Y−3)`; mission target (`DAT_0114c67c/678` ≥ 0): `Blob.2` (blue)
   / `Blob.3` (red). Warp3D hi-res: >> 11. (C)
+* Mac `DisplayMinimap__Fiiiiii` @ 10091630 (called from `amiga_levelloop` @ 10100f50 with
+  the followed object's x, y and the seek target `_DAT_1017c3b0/3ac`): the same two
+  `PlotPoint__Fiii` @ 100915d0 calls (`DrawIcon(Blob + n, x − 3, y − 3)`), **player first,
+  target second** (the target is drawn over the player). Both blobs switch on one counter
+  `_DAT_1017d2e4` (0..3, +1 per call, `> 1` → Blob.1/Blob.3), so the player is orange
+  exactly when the target is red. These are the only markers: **no police, pedestrians,
+  vehicles, pickups or other players** are plotted in any version, and nothing tests the
+  radar pickup. A red and an orange dot on a screenshot are the target and the player.
+  (C)
+* Blob colours (Mac `Icons/Blob.0..3`, 7×7, black (8) ring): 0x70/0x74 green,
+  0xD7/0xDC orange, 0xC5/0xC6 blue, 0xAE/0x1E red. (C)
 * "Rotating view" (`DAT_0114c7dc`): X = xmax − (xs*72>>4), Y = 40 (80); map drawn as a
   camera-rotated, perspective-tilted quad (corners ±32) via `FUN_01018844`, cos/sin tables
   `012a676c`/`012ac16c` (scale 256, **5760 steps per turn**), tilt index 5040; software:

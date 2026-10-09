@@ -903,19 +903,24 @@ fn draw(
 
     // Minimap (`DisplayMinimap__Fiiiiii` @ 10091630, called with
     // (xmax − 71, 33), hi-res (xmax − 142, 66)), image at (X+1, Y+1) with
-    // player/target blobs (1 px = 2 squares). The map itself is not doubled
-    // in software hi-res; hardware draws it ×2 and plots at >> 11.
+    // two blobs (`PlotPoint__Fiii` @ 100915d0, 7×7 centred, 1 px = 2
+    // squares): the followed object, Blob.0 green / Blob.1 orange, then the
+    // seek target when its x ≥ 0, Blob.2 blue / Blob.3 red, both switching
+    // on the same 4-frame counter (`_DAT_1017d2e4 > 1`). Nothing else is
+    // plotted: no police, pedestrians or pickups (the radar pickup has no
+    // effect). The map itself is not doubled in software hi-res; hardware
+    // draws it ×2 and plots at >> 11.
     if let Some(mm) = &minimap {
         let (mx, my) = (xmax - 71 * k, 33 * k);
         pen.icon(mm, mx + 1, my + 1, Blend::Plain);
         let shift = if bilinear { 11 } else { 12 };
-        if let Some(t) = hud.target_pos {
-            let b = if blink { &ic.blobs[3] } else { &ic.blobs[2] };
-            pen.icon(b, (t.x >> shift) + mx - 3, (t.y >> shift) + my - 3, Blend::Plain);
-        }
         if let Some(pp) = hud.player_pos {
             let b = if blink { &ic.blobs[1] } else { &ic.blobs[0] };
             pen.icon(b, (pp.x >> shift) + mx - 3, (pp.y >> shift) + my - 3, Blend::Plain);
+        }
+        if let Some(t) = hud.target_pos.filter(|t| t.x >= 0) {
+            let b = if blink { &ic.blobs[3] } else { &ic.blobs[2] };
+            pen.icon(b, (t.x >> shift) + mx - 3, (t.y >> shift) + my - 3, Blend::Plain);
         }
     }
 
