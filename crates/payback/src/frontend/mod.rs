@@ -208,7 +208,7 @@ impl Plugin for FrontendPlugin {
                 #[cfg(all(windows, not(target_arch = "wasm32")))]
                 xinput::sync_buttons.after(bevy::input::InputSystems).before(bindings::track_pad_axes),
                 #[cfg(not(all(windows, not(target_arch = "wasm32"))))]
-                (),
+                || {},
             )
             .add_systems(Startup, bindings::upgrade_pad_layout)
             .add_plugins(display::DisplayPlugin)
