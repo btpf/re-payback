@@ -156,6 +156,8 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
         Some(city.map.square(x as usize, y as usize).cubes[c.clamp(0, 2) as usize].scenery)
     };
     let mut fired = Vec::new();
+    // Points of the arrow triggers, for the seek target (`arrow.rs`).
+    let mut seek = Vec::new();
     let mut keep = Vec::with_capacity(triggers.len());
     let mut stopped = Vec::new();
     for mut t in triggers.drain(..) {
@@ -243,6 +245,9 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
             keep.push(t);
             continue;
         }
+        if let Some(p) = crate::arrow::seek_point(world, &t, actor.as_ref().map(|a| (a.pos, a.level))) {
+            seek.push(p);
+        }
         let fire = condition(
             world,
             &mut t,
@@ -266,6 +271,7 @@ fn evaluate(world: &mut World, p: &PlayerView) -> Vec<(i32, u8)> {
         }
     }
     world.resource_mut::<Triggers>().list = keep;
+    crate::arrow::seek_tick(world, seek, 1);
     for e in stopped {
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();

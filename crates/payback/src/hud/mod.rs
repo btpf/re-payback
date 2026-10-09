@@ -62,6 +62,9 @@ pub struct HudData {
     pub multiplayer: bool,
     /// Draw the flashing checkpoint marker at the target.
     pub checkpoint: bool,
+    /// Where the marker is drawn this frame (render space), set by
+    /// `arrow.rs` while it is on and there is a target.
+    pub checkpoint_at: Option<Vec3>,
     /// Split screen: each player's view, by player number.
     pub views: Vec<ViewHud>,
 }
@@ -841,6 +844,17 @@ fn draw(
             let p = (p + origin) / size * Vec2::new(w as f32, h as f32);
             let x = p.x.floor() as i32 - ((7 * text_len(&l.text)) >> 1);
             pen.text(&ic.them, &l.text, x, p.y.floor() as i32 + 3, 7, Blend::Lighten);
+        }
+        // Checkpoint marker (`DrawCheckpoint__Fiiiiii` @ 10095240, after the
+        // labels): `Checkpoint.red/blue` by the frame counter
+        // (`_DAT_1017c898 >> 1`, 0..3) through `DrawIconAlpha` centred on
+        // the projected target, −27 (−54 hi-res, icon doubled).
+        if let Some(at) = hud.checkpoint_at
+            && let Ok(p) = cam.world_to_viewport(eye, at)
+        {
+            let p = (p + origin) / size * Vec2::new(w as f32, h as f32);
+            let icon = &ic.checkpoint[((frame >> 1) & 1) as usize];
+            pen.icon(icon, p.x.floor() as i32 - 27 * k, p.y.floor() as i32 - 27 * k, Blend::Lighten);
         }
     }
 

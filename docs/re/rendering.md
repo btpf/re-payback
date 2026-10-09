@@ -819,7 +819,7 @@ for all tables except 4 and 10. Single sprites are mirrored left-right
   (11xx quarters, s/2), −1 (12xx quarters, s); singles are not mirrored. Every element
   goes through the flare's table: 5–8 add only R / R+G / G / B, so traffic-light
   flares are red, amber and green. No sun flare.
-* **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47; the Mac has no `Blood.dark` and keeps its own `Blood` at night, see `mac_version.md`). `Bubble` is loaded but unused. FadeDarken*,
+* **Blood** → `Blood.dark` at night (`FUN_01035250`; port: `effects.rs` tile 47; the Mac has no `Blood.dark` and keeps its own `Blood` at night, see `mac_version.md`). `Bubble`: type-5 bubbles of sinking vehicles and drowning people (CONFIRMED Mac `do_Other` @ 10146280, `do_Person` @ 1013fbd0; port `sim::driving::box_bubbles`). FadeDarken*,
   HealthBar are HUD textures.
 * **Debris** (CONFIRMED: Mac `Split` @ 100a78b0 = OS4 `FUN_01035438`, `Detonate`
   @ 100550c0, `Bang` @ 100a6dd0 = OS4 `FUN_01035730`, the part loop at the top of
@@ -1077,10 +1077,83 @@ Additive blending happens in linear colour rather than palette space.
   `DrawMap` square loops after each layer's effects; object shadows once per frame,
   flag `+0x816`): details and the port in `objects/shadows.rs`. Scenery shadows are
   skipped at night (`GetObjectNight`); object shadows are not. Objects in state 6 have
-  none. Port approximations: depth-tested horizontal triangles 1 h-unit above the ground,
+  none, nor have objects with both `+0x81a` and `+0x818` set (`DrawShadow` entry
+  test): the straight-flying shots. `do_Person` @ 1013fbd0 and `DoVehicleFire`
+  @ 10070c20 set both on every bullet, pellet, petrol drop and missile, and
+  `MoveObject_General` @ 1006e4f0 sets them each tick for those models; grenades and
+  bombs (gravity) keep a shadow. Port: `object_shadows` skips non-gravity
+  `Projectile`s (before, a bullet got the vehicle 3×3 grid: a black square). Port approximations: depth-tested horizontal triangles 1 h-unit above the ground,
   linear-colour subtraction, no spinning-pickup shadows, the face texture's own key for
   the hardware `Tree2.clone`/`tanne.clone` (INFERRED same mask).
 * Not done: debris (`DrawPart` @ 100794c0, the part list of `FUN_01035438`).
+* **Scenery below its origin.** `DrawMap` @ 1005a260 calls `DrawScenery` with the cube
+  top (`height << 4`) and no offset, after that square's cubes, so a model reaching
+  below its origin still shows whole (painter's order). Only the tumbling `Info` sign
+  (z ±8, y ±28, centred) and the `Briefcase` (z ±6) do; the weapon pickups, key, radar,
+  bomb and crate sit at or above it. Port (depth-tested): `objects.rs` `sunk_lift`
+  raises such a model by the depth its lowest vertex reaches (per frame for the
+  tumbling sign); the scenery shadow stays on the ground.
+
+### Direction arrows and the checkpoint marker — CONFIRMED unless noted
+
+Port: `crates/payback/src/arrow.rs` (seek pass hooked into `mission/eval.rs`; marker
+drawn by `hud/mod.rs`).
+
+* **Seek target** `0x34c288/94/90` (x, y, floor; −1 = none; Mac `SetSeek__Fiii`
+  @ 100648e0 → `_DAT_1017c3b0/3ac/3a8`, 68k `FUN_000eff2a`). `CheckForTriggers` @ 100f4a50
+  (68k `0xa4a68`) pushes one point per trigger, in table order, before testing it, for
+  exactly the arrow types (script_api.md §3.2): the watched object's x, y and floor
+  `+0x8b0` for 0x08, 0x0d, 0x1b, 0x28, 0x2e, 0x3c (only when `GetObject` finds it); the
+  trigger's (a, b, c) for 0x02, 0x0f, 0x10, 0x1a, 0x2c, 0x40 and the phones (type 0x01,
+  not 0x07); the square centre `(a·0x800 + 0x400, b·0x800 + 0x400, c)` for 0x25; the
+  garage's point. After the pass: none pushed → −1; else an accumulator adds the ticks,
+  and each time it passes 19 (−20) the index steps to the next point, back to 0 past the
+  last. The index and arrays are statics, never reset (68k `0x1196f8/fc`, arrays
+  `0x2c1008/17d8/1fa8`); an index past a shrunken list reads the old entry until it
+  next moves. So with several arrow triggers the arrow and the minimap blob cycle
+  through them, 20 ticks each. The minimap plots the seek point when x ≥ 0
+  (`DisplayMinimap__Fiiiiii` @ 10091630). Level start sets −1 (68k `0x127111`).
+* **Red arrow** (`amiga_levelloop` draw block after `DrawMap`, `DrawFlares`, `DoLabels`;
+  68k `0xe1a90..0xe1b32`): single player, seek ≥ 0, not during movie playback
+  (`_DAT_1017c594`, `EnablePlayback__Fv` @ 10052390; 68k `0x34c198`), not during the
+  level-start camera drop (`_DAT_1017c374 = 0x23` at level start, −1 per tick in
+  `UpdateMapPosition__Fi` @ 10068cb0). The `arrow_red.obj` object (`InitObjects`:
+  `_DAT_1017c414/410`; 68k `0x34c0a8/b8`) gets the followed object's x, y, z (the
+  vehicle when driving, else the person; dead or alive) and yaw `+0x14 =
+  GetAngle(obj − target)` (`GetAngle__Fdd` @ 10072340 returns the heading of −(dx, dy),
+  so the model's +y points at the target), no pitch or roll, and is drawn with
+  `DrawObject(obj, −camX>>5, −camY>>5, camH·16 − 0x100, 100)`. The model is one triangle
+  (−20, 100) (20, 100) (0, 148) at z 0: flat, 100..148 model units (1600..2368 world
+  units, 0.8..1.2 squares) ahead of the object's origin, so it orbits the player at the
+  target bearing; on a car it lies over the bonnet. Its active slot is `Phone`
+  (6,145) (46,145) (26,105), mode 4: with argument 100 the software mode-4 table is
+  `Alpha.256 + 0x40000` (50 % average) instead of table 0; Warp3D draws mode 4 ONE/ONE
+  (default blend) whatever the argument. No z-buffer in either renderer and drawn after
+  the map: always on top. Port: a render-only mesh with depth compare Always, sorted
+  last; 50 % blend in software, additive in hardware.
+* **Deathmatch arrows** (`_DAT_1017c4bc != 0`): in each view, for every other player j
+  present (`DAT_10188fe8[j] != −1`) and not waiting to respawn (`_DAT_1017c520[j] < 1`),
+  `arrow_red/green/yellow/blue.obj` (index j; same geometry, other `Phone` UVs) at the
+  view's object pointing at player j's person object. Port: at player j's followed
+  object (INFERRED equivalent while driving).
+* **White arrow**: when every layer is drawn (`_DAT_1017c5e4 == 3`, `SetVisibleLayers`;
+  68k `0x34c078`) and not in playback, if a cube above the followed object's floor on
+  its square has a cube (byte +8 ≠ 0) and a top face (byte +9 & 0x7f ≠ 0),
+  `arrow_white.obj` — the same triangle centred on the origin, (−20,−22) (20,−22)
+  (0,26) — at the object with the object's own heading: the player is under a roof.
+  Also in each multiplayer view.
+* **Checkpoint marker** (`DrawCheckpoint__Fiiiiii` @ 10095240; 68k `FUN_00027216`),
+  drawn just before the red arrow while `ShowCheckpointMarker` (`_DAT_1017c61c`, 68k
+  `0x34c28c`) is on: the target at `GetCubeHeight__FP3Mapiii` @ 100ae7d0 of its square
+  and floor (clamped to 0..127 and 0..3: 1500 minus the h1s below minus this cube's h1, or
+  h2 for a Reflect top or a slope with h1 < h2, ×16) is projected like an object
+  (top-down `camH·16 + z − 0x100`; rotating view without the −0x100 and skipped when
+  behind) and `Checkpoint.red` / `Checkpoint.blue` (`_DAT_1017c838 + (c898 >> 1)`, the
+  frame counter `_DAT_1017c898` 0..3 stepped once per frame in `UpdateAnnouncement__Fi`
+  @ 10090010, so two frames each) is drawn centred, −27 (−54 hi-res, doubled icon) with
+  `DrawIconAlpha__FP4Iconii` @ 10086010: the `_DAT_1017c878` alpha table in software,
+  `(7, 8)` in hardware. It is a flat screen sprite: four green arrowheads pointing in,
+  then four yellow ones. Port: drawn on the HUD canvas through the lighten blend.
 
 ---
 
