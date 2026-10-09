@@ -9,7 +9,7 @@ Reverse engineering and Bevy reimplementation of Payback (Apex Designs, Amiga, 2
 - `docs/formats.md`, `docs/research.md`, `docs/re/*.md` — reverse-engineering notes. Mark facts CONFIRMED (with the original function address) or INFERRED.
 - `tools/` — extraction scripts (`extract.py` for the Amiga CD and updates, `extract_mac.py` for the Mac release).
 - Mac release (`PaybackMac.toast`): treated as the more definitive copy; see `docs/re/mac_version.md`. Decompiles are in `analysis/ghidra_macx` (OS X build; functions keep their original C++ names) and `analysis/ghidra_mac9`, next to the Amiga ones (`analysis/ghidra_68k`, `analysis/ghidra_os4`), which stay as they are.
-- Ignored: `Payback Game + Updates/` (the source data), `extracted/`, `analysis/`, `target/`, `Saves/`, `progress.html`, `mac_differences.html`, and `[A] PAYBACK 2025.7z` (ignore it entirely).
+- Ignored: `Payback Game + Updates/` (the source data), `extracted/`, `analysis/`, `target/`, `Saves/`, `progress.html`, `mac_differences.html`, `remaining_gaps.html`, and `[A] PAYBACK 2025.7z` (ignore it entirely).
 - Never commit original game data.
 
 ## Working conventions
