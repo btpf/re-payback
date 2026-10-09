@@ -20,6 +20,7 @@ mod arrow;
 mod audio;
 mod autoplay;
 mod camera;
+mod cheats;
 mod city;
 mod data;
 mod debris;
@@ -99,7 +100,7 @@ fn main() -> AppExit {
             (intro::IntroPlugin, startup::StartupPlugin),
             (parked::ParkedPlugin, window_icon::WindowIconPlugin, render_mode::RenderModePlugin),
             (rampage::RampagePlugin, replay::ReplayPlugin, multiplayer::MultiplayerPlugin),
-            (autoplay::AutoplayPlugin, perf::PerfPlugin, arrow::ArrowPlugin),
+            (autoplay::AutoplayPlugin, perf::PerfPlugin, arrow::ArrowPlugin, cheats::CheatsPlugin),
         ))
                 .add_systems(Update, screenshot_and_exit)
         // `--map` starts a level directly; otherwise the menus come first.

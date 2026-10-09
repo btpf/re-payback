@@ -96,6 +96,12 @@ pub struct Drive {
     pub skid_sound: Option<Entity>,
     pub beep_sound: Option<Entity>,
     pub clonk: bool,
+    /// The looped horn (`+0x918`, Mac `DoVehicleFire` @ 10070c20); see
+    /// [`super::vehicle_ai::horn`].
+    pub horn: Option<Entity>,
+    /// Honked this tick (the original's `_DAT_1017cc70`, cleared at the
+    /// start of each object's update).
+    pub honked: bool,
 }
 
 /// The vehicle update chain.
@@ -114,6 +120,7 @@ impl Plugin for DrivingPlugin {
                     .chain()
                     .run_if(|| crate::arg("--drive-test").is_some()),
                 drive,
+                horns,
                 vehicle_sounds,
             )
                 .chain()
@@ -467,7 +474,10 @@ fn drive(
                 continue;
             }
             let dmg = (v * v) >> 14;
-            obj.health -= dmg;
+            // God mode (`crate::cheats`): no damage.
+            if !obj.god {
+                obj.health -= dmg;
+            }
             let at = SoundPos::At(obj.posf());
             let vol = obj.speed.abs() as f32 * 10000.0;
             if dmg < 11 {
@@ -746,7 +756,10 @@ fn drive(
                     commands.spawn(Sound::once(id::SCREAMS, 255.0, 15000.0, SoundPos::Global));
                 }
             }
-            obj.health -= dmg;
+            // God mode (`crate::cheats`): no damage.
+            if !obj.god {
+                obj.health -= dmg;
+            }
         }
 
         obj.prev_pos = start;
@@ -1298,6 +1311,37 @@ fn vehicle_sounds(
     }
 }
 
+/// The player's horn and the end of every horn (Mac `do_Other` @ 10146280,
+/// state 2 and tail). A player-driven vehicle honks while its player holds
+/// the shoot key (phrase 2461 "Shoot/horn", default Space; the input word's
+/// shoot bit, so replays carry it): `_DAT_1017cc70 = fire[player]`, read
+/// before and regardless of the controls-off flag `+0x988`, which only
+/// zeroes the throttle and steering. A police model's horn is the siren
+/// with the flashing light bar (`pursuit::sirens`). Then every vehicle
+/// that did not honk this tick (player or AI, [`super::vehicle_ai::horn`])
+/// loses its horn sound: `if (!cc70 && +0x918 >= 0) DeleteSound`. Nothing
+/// in the simulation listens to the horn; only sound entities are spawned.
+fn horns(
+    mut commands: Commands,
+    inputs: Res<PlayerInputs>,
+    mut q: Query<(Entity, &Obj, &Vehicle, &mut Drive)>,
+    mut sounds: Query<&mut Sound>,
+) {
+    for e__ in super::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
+        let Ok((e, obj, veh, mut d)) = q.get_mut(e__) else { continue };
+        if obj.state == State::Player && !TYPES[veh.kind].police {
+            let fire = inputs.0[obj.player.unwrap_or(0).min(3) as usize].fire;
+            super::vehicle_ai::horn(&mut commands, &mut sounds, &mut d, e, veh, obj, fire);
+        }
+        if !d.honked
+            && let Some(s) = d.horn.take()
+        {
+            commands.entity(s).try_despawn();
+        }
+        d.honked = false;
+    }
+}
+
 /// Vehicle transforms: heading, then the body pitch (+ = nose down) and
 /// roll (+ = the −x side down) from `PositionUnit`, which include the
 /// steering lean, the throttle dip and the boat bob.
@@ -1430,5 +1474,57 @@ mod tests {
         assert_eq!(obj.heading, 0x100 + 30);
         assert_eq!(obj.pitch, 16);
         assert!(d.trail.iter().all(Option::is_none));
+    }
+
+    /// The player's horn (`do_Other` @ 10146280 state 2, `DoVehicleFire`
+    /// @ 10070c20): a CarHorn loop at 20e6 and `16e6 / mass` Hz while the
+    /// shoot key is held, even with the controls off; gone on release or
+    /// when the car is no longer the player's. Police models use the siren
+    /// (`pursuit::sirens`); the tank never honks.
+    #[test]
+    fn player_horn() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<PlayerInputs>();
+        let car = |world: &mut World, kind: usize, state: State| {
+            let mut o = Obj::new(super::super::Class::Vehicle, 0, IVec3::new(1000, 2000, 0), 0);
+            o.state = state;
+            o.player = Some(0);
+            let veh = Vehicle { kind, colour: 0, engine: None, flying: false, controls: false };
+            world.spawn((o, veh, Drive::default())).id()
+        };
+        let e = car(&mut world, 0, State::Player);
+        let tank = car(&mut world, vk::TANK, State::Player);
+        let cop = car(&mut world, vk::POLICE, State::Player);
+        let horn = |world: &mut World, e: Entity| world.get::<Drive>(e).unwrap().horn;
+        let fire = |world: &mut World, on: bool| world.resource_mut::<PlayerInputs>().0[0].fire = on;
+
+        world.run_system_once(horns).unwrap();
+        assert_eq!(horn(&mut world, e), None);
+        fire(&mut world, true);
+        world.run_system_once(horns).unwrap();
+        let s = horn(&mut world, e).expect("horn starts");
+        let snd = world.get::<Sound>(s).unwrap();
+        assert_eq!((snd.id, snd.looping, snd.volume), (id::CAR_HORN, true, 20e6));
+        assert_eq!(snd.hz, (16_000_000 / TYPES[0].mass).clamp(3000, 20000) as f32);
+        assert!(crate::audio::amplitude(snd, Vec3::new(1000.0, 2000.0, 0.0)) > 19.0);
+        assert_eq!(horn(&mut world, tank), None);
+        assert_eq!(horn(&mut world, cop), None);
+        // Held: the same voice.
+        world.run_system_once(horns).unwrap();
+        assert_eq!(horn(&mut world, e), Some(s));
+        // Released: deleted.
+        fire(&mut world, false);
+        world.run_system_once(horns).unwrap();
+        assert_eq!(horn(&mut world, e), None);
+        assert!(world.get_entity(s).is_err());
+        // Held, then the player gets out: deleted.
+        fire(&mut world, true);
+        world.run_system_once(horns).unwrap();
+        let s = horn(&mut world, e).unwrap();
+        world.get_mut::<Obj>(e).unwrap().state = State::Parked;
+        world.run_system_once(horns).unwrap();
+        assert_eq!(horn(&mut world, e), None);
+        assert!(world.get_entity(s).is_err());
     }
 }

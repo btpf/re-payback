@@ -74,9 +74,6 @@ pub struct Nav {
     pub horn: i32,
     /// Honking (`_DAT_0034c3b4`, Mac `_DAT_1017cc70`) last tick.
     pub honking: bool,
-    /// The looped horn while honking (Mac `DoVehicleFire` @ 10070c20 sound
-    /// handle `+0x918`).
-    pub horn_sound: Option<Entity>,
 }
 
 impl Nav {
@@ -88,7 +85,6 @@ impl Nav {
             aim: pos.truncate(),
             horn: 0,
             honking: false,
-            horn_sound: None,
         }
     }
 }
@@ -404,51 +400,43 @@ pub fn follow_route(
     false
 }
 
-/// The horn while an AI driver honks (Mac `DoVehicleFire` @ 10070c20,
-/// 68k `FUN_000e2a50`): a looped horn sound (`+0x491a`) at volume 20e6 and
-/// `clamp(16e6 / mass, 3000, 20000)` Hz (a police model: its horn is the
-/// siren, 25e6 at 10000 Hz) starts when the fire/horn input goes on, follows
-/// the car, and is deleted the first frame the input is off (`do_Other`
-/// ~10147dec: `DeleteSound(+0x918)`). The tank fires its gun instead
-/// (`tank_cannon`). The sound is a child of the car, so it goes with it.
+/// The horn (Mac `DoVehicleFire` @ 10070c20, 68k `FUN_000e2a50`, OS4
+/// `FUN_0105e02c`), for AI drivers and the player alike: while the
+/// fire/horn input is on, a looped horn sound (`+0x8178`, 68k `+0x491a`) at
+/// volume 20e6 and `clamp(16e6 / mass, 3000, 20000)` Hz (a police model:
+/// its horn is the siren, 25e6 at 10000 Hz) is started into the object's
+/// slot `+0x918` and then follows the car (`ModifySound`). It is deleted
+/// the first update the input is off (`do_Other` @ 10146280 tail:
+/// `DeleteSound(+0x918)`); here [`super::driving`]'s `horns` does that for
+/// every vehicle that did not honk this tick. The tank fires its gun instead
+/// (`+0x8164`, `tank_cannon`) and the bomb truck launches its RC car
+/// (`+0x815c`, not in the port): neither honks. The sound is a child of the
+/// car, so it goes with it.
 pub fn horn(
     commands: &mut Commands,
     sounds: &mut Query<&mut Sound>,
-    nav: &mut Nav,
+    drive: &mut Drive,
     e: Entity,
     veh: &Vehicle,
     obj: &Obj,
     honk: bool,
 ) {
-    nav.honking = honk;
-    if veh.kind == vk::TANK {
+    if !honk || matches!(veh.kind, vk::TANK | vk::BOMB_TRUCK) {
         return;
     }
+    drive.honked = true;
     let at = SoundPos::At(obj.posf());
-    match (honk, nav.horn_sound) {
-        (true, Some(s)) => {
-            if let Ok(mut snd) = sounds.get_mut(s) {
-                snd.pos = at;
-            } else {
-                nav.horn_sound = None;
-            }
-        }
-        (true, None) => {
-            let t = &TYPES[veh.kind];
-            let (vol, hz) = if t.police {
-                (25_000_000.0, 10_000.0)
-            } else {
-                (20_000_000.0, (16_000_000 / t.mass.max(1)).clamp(3000, 20000) as f32)
-            };
-            let s = commands.spawn((Sound::looping(t.horn, vol, hz, at), ChildOf(e))).id();
-            nav.horn_sound = Some(s);
-        }
-        (false, Some(s)) => {
-            commands.entity(s).despawn();
-            nav.horn_sound = None;
-        }
-        (false, None) => {}
+    if let Some(mut snd) = drive.horn.and_then(|s| sounds.get_mut(s).ok()) {
+        snd.pos = at;
+        return;
     }
+    let t = &TYPES[veh.kind];
+    let (vol, hz) = if t.police {
+        (25_000_000.0, 10_000.0)
+    } else {
+        (20_000_000.0, (16_000_000 / t.mass.max(1)).clamp(3000, 20000) as f32)
+    };
+    drive.horn = Some(commands.spawn((Sound::looping(t.horn, vol, hz, at), ChildOf(e))).id());
 }
 
 /// Script orders for vehicles.
@@ -474,7 +462,7 @@ pub fn vehicle_orders(
                 &Vehicle,
                 &mut Ai,
                 &mut Stick,
-                &Drive,
+                &mut Drive,
                 Option<&mut Nav>,
             ),
             Without<CameraTarget>,
@@ -501,7 +489,7 @@ pub fn vehicle_orders(
     let order = crate::sim::table_order(set.p1().iter().map(|(e, o, ..)| (e, o)));
     let mut objs = set.p1();
     for e__ in order {
-        let Ok((e, mut obj, veh, mut ai, mut stick, drive, nav)) = objs.get_mut(e__) else { continue };
+        let Ok((e, mut obj, veh, mut ai, mut stick, mut drive, nav)) = objs.get_mut(e__) else { continue };
         if matches!(
             obj.state,
             State::Player
@@ -621,9 +609,10 @@ pub fn vehicle_orders(
             Some(aim) => {
                 nav.aim = aim;
                 let s = controller(
-                    e, &obj, t, front, drive, driver, aim, &env, &mut nav, &mut rng, &trig,
+                    e, &obj, t, front, &drive, driver, aim, &env, &mut nav, &mut rng, &trig,
                 );
-                horn(&mut commands, &mut sounds, &mut nav, e, veh, &obj, s.fire);
+                nav.honking = s.fire;
+                horn(&mut commands, &mut sounds, &mut drive, e, veh, &obj, s.fire);
                 s
             }
             // No AI input: the car coasts (state 4).

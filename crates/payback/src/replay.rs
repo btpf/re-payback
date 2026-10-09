@@ -132,7 +132,7 @@ impl Plugin for ReplayPlugin {
             .configure_sets(FixedUpdate, ReplayInput.before(PeopleThink))
             .add_systems(
                 FixedUpdate,
-                (scripted_input, feed, debug_hash)
+                (scripted_input, feed, debug_hash, crate::cheats::apply)
                     .chain()
                     .in_set(ReplayInput)
                     .run_if(in_state(AppState::Playing)),
@@ -295,6 +295,7 @@ fn begin(
             random_missions: random_missions.0,
             // Filled in by `random_setup` when the random missions start.
             random_setup: None,
+            cheats: Vec::new(),
         },
         records: Vec::new(),
     });
@@ -444,11 +445,11 @@ fn scripted_input(st: Res<ReplayState>, mut inputs: ResMut<PlayerInputs>) {
 }
 
 /// Order-independent hash of every object's state (position, velocity,
-/// heading, health, state, model) and the generator index. Models are
+/// heading, health, state, model, god mode) and the generator index. Models are
 /// hashed by file name: library indices depend on when the renderer first
 /// asked for a model (e.g. pose and damage variants), not on the game.
 pub fn world_hash<'a>(objs: impl Iterator<Item = &'a Obj>, rng: u16, model_id: impl Fn(usize) -> i32) -> (u64, usize) {
-    let mut v: Vec<[i32; 10]> = objs
+    let mut v: Vec<[i32; 11]> = objs
         .map(|o| {
             [
                 o.pos.x,
@@ -461,6 +462,8 @@ pub fn world_hash<'a>(objs: impl Iterator<Item = &'a Obj>, rng: u16, model_id: i
                 o.health,
                 o.state as i32,
                 model_id(o.model),
+                // God mode (`crate::cheats`) is game state too.
+                o.god as i32,
             ]
         })
         .collect();
@@ -574,6 +577,7 @@ mod tests {
                 level: 1,
                 random_missions: true,
                 random_setup: None,
+                cheats: vec![],
             },
             records: vec![],
         };
@@ -600,6 +604,7 @@ mod tests {
             level: 0,
             random_missions: true,
             random_setup: None,
+            cheats: vec![],
         };
         let now = RandomSetup { goal: 900_000, progress: 6 };
         let mut world = World::new();
@@ -650,6 +655,7 @@ mod tests {
                 level: 1,
                 random_missions: false,
                 random_setup: None,
+                cheats: vec![],
             },
             records: vec![],
         };

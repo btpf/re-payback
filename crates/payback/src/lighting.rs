@@ -821,7 +821,7 @@ fn collect_lights(
     library: Option<Res<ObjectLibrary>>,
     phase: Option<Res<LightPhase>>,
     effects: Res<Effects>,
-    objects: Query<(&SimObj, Option<&Arsenal>)>,
+    objects: Query<(&SimObj, Option<&Arsenal>, Option<&crate::sim::pursuit::Siren>)>,
     mut lights: ResMut<DynamicLights>,
     rng: Option<ResMut<VisualRng>>,
     mut sources: Local<Option<Vec<SceneryLight>>>,
@@ -874,7 +874,7 @@ fn collect_lights(
 
     // Objects: burning (main object update, burn timer obj+0x33c), missiles
     // (`AddCollideObj`), petrol bombs, police lights.
-    for (obj, arsenal) in &objects {
+    for (obj, arsenal, siren) in &objects {
         let info = &library.model(obj.model).info;
         let p = obj.pos.as_vec3();
         let path = info.path.as_str();
@@ -918,7 +918,14 @@ fn collect_lights(
             "vehicles/police_blue.obj" | "vehicles/policevan_blue.obj" => {
                 Some(Vec3::new(20.0, 20.0, 200.0) * m as f32)
             }
-            _ => None,
+            // A flashing light bar (siren or police horn, Mac
+            // `DoVehicleFire` @ 10070c20 `AddLighting` at z − 500): the
+            // port swaps the mesh, not the model, so the colour comes from
+            // the flash.
+            _ => siren.map(|s| {
+                let rgb = if s.blue() { Vec3::new(20.0, 20.0, 200.0) } else { Vec3::new(200.0, 20.0, 20.0) };
+                rgb * m as f32
+            }),
         };
         if let Some(rgb) = rgb {
             lights.0.push(PointLight { pos: p + lift, rgb });

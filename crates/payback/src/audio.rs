@@ -574,6 +574,7 @@ fn start_sounds(
         // its first sample until `mix` gives it its level and pitch, so the
         // audio thread cannot play its start silently in between.
         let gain = if s.menu { menu_gain(fx.0) } else { 0.0 };
+        debug!("voice start {e}: sound {} loop {} vol {} hz {}", s.id, s.looping, s.volume, s.hz);
         voices.insert(
             e,
             Voice {
@@ -696,6 +697,7 @@ fn end_sounds(mut commands: Commands, mixer: Res<Mixer>, alive: Query<(), With<S
     let Ok(mut voices) = mixer.0.lock() else { return };
     voices.retain(|&e, v| {
         if !alive.contains(e) {
+            debug!("voice stop {e}");
             return false;
         }
         if v.done {

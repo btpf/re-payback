@@ -217,7 +217,12 @@ const DRIVING_ROTATING: Follow = Follow {
 
 /// The "Rotating view" option (`DAT_0114c7dc`, pause menu → Graphics
 /// options; needs `DAT_0114c2f4`, initialised to 1). Follows
-/// `Settings::rotating_view`; `--rotating-view [0|1]` wins.
+/// `Settings::rotating_view`; `--rotating-view [0|1]` or
+/// `--no-rotating-view` wins. Off by default, as in the original (Mac
+/// `ClearPreference` @ 100508c0 leaves the pref read by `LoadConfig` @
+/// 10052be0 at +0x2a4 zero; Amiga config field 18). The tilted minimap
+/// that goes with it in the original is a separate setting in the port
+/// (`Settings::minimap_3d`, `hud::minimap_3d`).
 ///
 /// Departure: in the original the rotating view's follow parameters move
 /// the camera state the simulation sees (people spawn window, traffic). The
@@ -258,7 +263,11 @@ impl Default for RotatingView {
     }
 }
 
+/// `--rotating-view [0|1]` or `--no-rotating-view`, overriding the setting.
 fn forced_rotating() -> Option<bool> {
+    if std::env::args().any(|a| a == "--no-rotating-view") {
+        return Some(false);
+    }
     std::env::args()
         .any(|a| a == "--rotating-view")
         .then(|| crate::arg("--rotating-view").is_none_or(|v| v != "0"))
@@ -294,6 +303,14 @@ impl Default for ViewAngle {
         }
     }
 }
+
+/// Yaw the 3-D minimap turns with (port-added, `Settings::minimap_3d`,
+/// `hud::minimap_3d`), in 1/0x1680 turns: view 0's in the rotating view,
+/// otherwise the yaw the rotating view would have (the followed object's
+/// heading, eased as [`turn_views`] does) without turning the top-down
+/// camera. Render-only.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct MinimapYaw(pub f32);
 
 /// Pitch straight down (0x167f) and fully tilted (0x157c, 260 units =
 /// 16.25° short of a turn).
@@ -347,6 +364,7 @@ impl Plugin for CameraPlugin {
             .init_resource::<ViewCams>()
             .init_resource::<RotatingView>()
             .init_resource::<ViewAngles>()
+            .init_resource::<MinimapYaw>()
             .init_resource::<ViewEyes>()
             .init_resource::<TvCamera>()
             .add_plugins(postfx::PostFxPlugin)
@@ -609,38 +627,54 @@ fn follow(trig: &Trig, cam: &mut GameCam, obj: &Obj, driving: bool, rotating: bo
 /// 0x157c. The original halves once per rendered frame (about one tick);
 /// here the step is scaled to the 30 Hz tick so the motion doesn't depend on
 /// the frame rate.
+///
+/// Also keeps [`MinimapYaw`] (port-added): view 0's yaw in the rotating
+/// view, else the yaw the rotating view would have, eased the same way.
 fn turn_views(
     time: Res<Time>,
     rotating: Res<RotatingView>,
     mut angles: ResMut<ViewAngles>,
+    mut minimap: ResMut<MinimapYaw>,
     target: Query<&Obj, With<CameraTarget>>,
 ) {
     if angles.0.is_empty() {
         angles.0.push(ViewAngle::default());
     }
-    if !rotating.0 {
-        return;
-    }
     let ticks = time.delta_secs() * 30.0;
     // Fraction of the remaining difference closed this frame (1/2 per tick).
     let step = 1.0 - 0.5f32.powf(ticks);
-    let turn = TURN as f32;
     let single = angles.0.len() == 1;
+    if !rotating.0 {
+        let obj = target.iter().find(|o| single || o.player == Some(0));
+        minimap.0 = ease_yaw(minimap.0, obj, step, ticks);
+        return;
+    }
     for (p, a) in angles.0.iter_mut().enumerate() {
         let obj = target.iter().find(|o| single || o.player == Some(p as u8));
+        a.yaw = ease_yaw(a.yaw, obj, step, ticks);
         match obj {
             Some(obj) => {
-                let want_yaw = (0xb40 - obj.heading).rem_euclid(TURN) as f32;
-                let d = (want_yaw - a.yaw + turn / 2.0).rem_euclid(turn) - turn / 2.0;
-                a.yaw = (a.yaw + d * step).rem_euclid(turn);
                 let want_pitch = (PITCH_DOWN - obj.speed).clamp(PITCH_TILTED, PITCH_DOWN) as f32;
                 a.pitch += (want_pitch - a.pitch) * step;
             }
-            None => {
-                a.yaw = (a.yaw + 0x20 as f32 * ticks).rem_euclid(turn);
-                a.pitch = (a.pitch - 4.0 * ticks).max(PITCH_TILTED as f32);
-            }
+            None => a.pitch = (a.pitch - 4.0 * ticks).max(PITCH_TILTED as f32),
         }
+    }
+    minimap.0 = angles.0[0].yaw;
+}
+
+/// One frame of the rotating view's yaw ([`turn_views`]): `step` of the
+/// way towards `0xb40 − heading` of the followed object, or `0x20` per
+/// tick while there is none.
+fn ease_yaw(yaw: f32, obj: Option<&Obj>, step: f32, ticks: f32) -> f32 {
+    let turn = TURN as f32;
+    match obj {
+        Some(obj) => {
+            let want = (0xb40 - obj.heading).rem_euclid(TURN) as f32;
+            let d = (want - yaw + turn / 2.0).rem_euclid(turn) - turn / 2.0;
+            (yaw + d * step).rem_euclid(turn)
+        }
+        None => (yaw + 0x20 as f32 * ticks).rem_euclid(turn),
     }
 }
 

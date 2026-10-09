@@ -743,6 +743,30 @@ count. It is rebuilt for each object after its update. The look-ahead and the sp
 (`+0x491a`, 20e6, `clamp(16e6/mass, 3000, 20000)` Hz; police: the siren at 25e6/10000) that follows the car
 and is deleted the first frame the input is off. Port: `vehicle_ai::horn`.
 
+The same code serves the player (C, Mac `do_Other` @ 10146280 and `DoVehicleFire` @ 10070c20):
+
+- Each object's update starts with `_DAT_1017cc70 = 0`. In state 2 (player driving, no RC car out:
+  `_DAT_1017c484[+0x994] == −1`) the shoot key `_DAT_1017c388[player]` sets it to 1 — "Shoot/horn"
+  (phrase 2461; default Space, alt unbound on the Amiga, Ctrl in the port). It is read regardless of the
+  controls-off flag `+0x988`, which only zeroes throttle and steering. The shoot bit of the input word
+  carries it into replays. On foot the same key shoots.
+- At the end of `do_Other`: `cc70 != 0` → `DoVehicleFire(obj)`; else, for a police model, the `_red`/`_blue`
+  model goes back to the plain one, and `if (+0x918 >= 0) { DeleteSound(+0x918); +0x918 = −1 }`.
+- `DoVehicleFire` by type: tank (`+0x8164`) fires its gun (BigGunFire 0x1c, 15e6 @ 9000, a missile, 4×2
+  dust puffs); a type with a linked model `+0x815c` (bomb truck) launches its RC car if the player has
+  none out (port: not implemented); otherwise the horn: `+0x918 < 0` → `AddSound(+0x8178, loop, 20e6,
+  clamp(16e6 / +0x8148 mass, 3000, 20000))`, police (`+0x8166 == 1`) `25e6 @ 10000`; else
+  `ModifySound(+0x918, pos)`. Police also flash: `+0x940 += ticks`, mod 10; < 5 → the `_blue` model,
+  else `_red`; `AddLighting(x, y, z − 500)` with (20e6, 20e6, 200e6) for blue, (200e6, 20e6, 20e6) for red.
+- Horn sounds per type (`InitStructures` @ 1005ffb0, `+0x8178`): 3 CarHorn by default, 0x0b Siren for the
+  police cars and vans, 0x2c IceCream for the ice-cream van. Helicopter, boat and RC car keep CarHorn.
+- Nothing in the simulation reacts to the horn: no pedestrian or traffic code reads `cc70` or `+0x918`
+  (people's `cc70` uses are their own fire input). Only sounds, the police model and lighting change.
+
+Port: `driving::horns` (player, and deleting every horn not sounded this tick), `vehicle_ai::horn`
+(slot `Drive::horn`), police via `pursuit::sirens` (also during pursuit) with the light glow in
+`lighting::collect_lights`.
+
 ### 6.3 Port deviations
 
 Not facts about the original (those are in §6.1–6.2, C); this is what the port does differently on purpose.

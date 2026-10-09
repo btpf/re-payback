@@ -2,9 +2,16 @@
 //! (docs/re/frontend_menus.md §4–6).
 //!
 //! Save slots keep the original 152-byte big-endian layout
-//! (`FUN_0101182c` load, `FUN_01011a70` save) as
-//! `Saves/PaybackSlot<n>.save`, n = 1..14, relative to the working
-//! directory.
+//! (`FUN_0101182c` load, `FUN_01011a70` save; the Mac's `ReadSaveGame` @
+//! 1008b560 / `WriteSaveGame` @ 1008b7e0 write the same bytes) as
+//! `Saves/PaybackSlot<n>.save`, n = 1..14. `Saves` is relative to the
+//! working directory, or the directory in `PAYBACK_SAVES`.
+//!
+//! A slot holds only the description, the player's name, and the best time
+//! and cup of each of the six levels: no money, score, current level or
+//! difficulty (none of the originals stores more). A file shorter than 152
+//! bytes reads as an empty slot here (the original would `fread` what is
+//! there and keep the rest of the old profile).
 //!
 //! Settings replace `S:Payback.config` (whose layout is PaybackSetup's
 //! and mostly screen modes) with a text file, `Saves/Payback.cfg`:
@@ -16,12 +23,14 @@
 //! | `volume` | sound volume 0..100 |
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
+//! | `minimap_3d` | 0 / 1: the rotating view's tilted minimap, also without the rotating view (port-added, default 1) |
 //! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
 //! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
 //! | `window_mode` | `windowed`, `borderless` (borderless fullscreen) or `fullscreen` (exclusive, video mode of `resolution`) |
 //! | `cd_mode` | music mode 0 off, 1 radio (default), 2 continuous; 3 disabled is forced while no music files are found (`music.rs`) and otherwise reads as radio |
 //! | `police` | Rampage police aggressiveness 0..5 (`DAT_0114c2ec`) |
 //! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`; 3.. = user maps) |
+//! | `unlock_all` | 0 / 1: every city and level selectable (port-added; the profile is not changed) |
 //! | `key.<action>` | single-player key, Bevy `KeyCode` name (actions: phrases 2457–2467); empty = disabled |
 //! | `pad.<action>`, `pad<n>.<action>` | gamepad 1 (single player and multiplayer) / gamepad n = 2..4 button, Bevy `GamepadButton` name |
 //! | `mp<n>.key.<action>` | multiplayer key set n (`bindings.rs`) |
@@ -95,14 +104,41 @@ impl Profile {
         cup
     }
 
-    /// A level may be chosen only if the previous one has a cup.
+    /// A level may be chosen only if the previous one has a cup
+    /// (`FUN_01025544`). See [`level_open`] for the "Unlock all" setting.
     pub fn unlocked(&self, index: usize) -> bool {
         index == 0 || self.cups[index - 1] != 0
     }
 
-    /// First level without a cup (the level-select default), or the last.
+    /// A built-in city may be chosen in Rampage and multiplayer once the
+    /// previous city's last level has a cup (`DAT_0117aecc[(c-1)*2]`,
+    /// `FUN_0102a428` / `FUN_0102b2c8`). See [`city_open`].
+    pub fn city_unlocked(&self, city: usize) -> bool {
+        city == 0 || self.cups.get(2 * city - 1).is_some_and(|&c| c != 0)
+    }
+
+    /// The level-select default (`FUN_01025544`): the first level without
+    /// a cup; once every level has one, the first with the lowest cup
+    /// (capped at gold), or the last level when all are gold.
     pub fn first_open(&self) -> usize {
-        self.cups.iter().position(|&c| c == 0).unwrap_or(5)
+        if let Some(i) = self.cups.iter().position(|&c| c == 0) {
+            return i;
+        }
+        let min = self.cups.iter().map(|&c| c.min(3)).min().unwrap_or(3);
+        if min >= 3 { 5 } else { self.cups.iter().position(|&c| c.min(3) == min).unwrap_or(5) }
+    }
+
+    /// The level named in a new slot's description `"%s - C%d, L%d"`
+    /// (`FUN_0101f738`, Mac `DoSaveGame` @ 10096d80): the first level
+    /// without a cup, or city 3 level 1 once all have one.
+    pub fn save_level(&self) -> usize {
+        self.cups.iter().position(|&c| c == 0).unwrap_or(4)
+    }
+
+    /// Default description of an empty slot.
+    pub fn slot_description(&self) -> String {
+        let i = self.save_level();
+        format!("{} - C{}, L{}", self.name, i / 2 + 1, i % 2 + 1)
     }
 
     pub fn to_bytes(&self, description: &str) -> Vec<u8> {
@@ -128,8 +164,9 @@ impl Profile {
             name: cstr(&b[0x36..0x68]),
             ..default()
         };
+        // Garbage is tamed: a negative time is "none", cups are 0..3.
         for i in 0..6 {
-            p.best[i] = i32_at(0x68 + 8 * i);
+            p.best[i] = i32_at(0x68 + 8 * i).max(-1);
             p.cups[i] = i32_at(0x68 + 8 * i + 4).clamp(0, 3);
         }
         Some((cstr(&b[4..0x36]), p))
@@ -148,27 +185,120 @@ fn cstr(b: &[u8]) -> String {
     b.iter().take_while(|&&c| c != 0).map(|&c| c as char).collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests point the saves at a scratch directory.
+    static TEST_SAVES: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the saves in `dir` (tests).
+#[cfg(test)]
+pub fn with_saves_dir<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    TEST_SAVES.with(|t| *t.borrow_mut() = Some(dir.to_path_buf()));
+    let r = f();
+    TEST_SAVES.with(|t| *t.borrow_mut() = None);
+    r
+}
+
+/// `Saves` in the working directory, or `PAYBACK_SAVES`.
 pub fn saves_dir() -> PathBuf {
-    PathBuf::from("Saves")
+    #[cfg(test)]
+    if let Some(d) = TEST_SAVES.with(|t| t.borrow().clone()) {
+        return d;
+    }
+    std::env::var_os("PAYBACK_SAVES")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from("Saves"), PathBuf::from)
 }
 
 fn slot_path(slot: usize) -> PathBuf {
     saves_dir().join(format!("PaybackSlot{}.save", slot + 1))
 }
 
-/// Load slot 0..13.
+/// Write through a temporary file and a rename, so a crash never leaves
+/// a half-written save behind.
+pub fn write_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Load slot 0..13 (`FUN_0101182c`); `None` = missing or too short.
 pub fn load_slot(slot: usize) -> Option<(String, Profile)> {
     std::fs::read(slot_path(slot)).ok().and_then(|b| Profile::from_bytes(&b))
 }
 
+/// Write slot 0..13 (`FUN_01011a70`), replacing what was there.
 pub fn save_slot(slot: usize, description: &str, profile: &Profile) -> std::io::Result<()> {
-    std::fs::create_dir_all(saves_dir())?;
-    std::fs::write(slot_path(slot), profile.to_bytes(description))
+    write_file(&slot_path(slot), &profile.to_bytes(description))
 }
 
-/// Slot descriptions (`FUN_01011da8`); `None` = empty slot.
+/// Slot descriptions (`FUN_01011da8`); `None` = empty slot ("Slot %d").
 pub fn slot_names() -> Vec<Option<String>> {
     (0..SLOTS).map(|s| load_slot(s).map(|(d, _)| d)).collect()
+}
+
+/// A story level may be chosen: the profile's rule, or "Unlock all".
+pub fn level_open(profile: &Profile, settings: &Settings, index: usize) -> bool {
+    settings.unlock_all || profile.unlocked(index)
+}
+
+/// A built-in city may be chosen (Rampage, multiplayer): the profile's
+/// rule, or "Unlock all".
+pub fn city_open(profile: &Profile, settings: &Settings, city: usize) -> bool {
+    settings.unlock_all || profile.city_unlocked(city)
+}
+
+/// Debug (`--autoplay-save <n>`, with `--autoplay`): when the story level
+/// is completed, award its cup as Level Complete does (`FUN_0102395c`)
+/// and write the profile to slot n (1..14) with the empty-slot
+/// description, so a scripted run can check the save end to end.
+pub fn autoplay_save(
+    mut outcomes: MessageReader<crate::mission::LevelOutcome>,
+    clock: Res<crate::mission::LevelClock>,
+    spec: Res<crate::level::LevelSpec>,
+    mode: Res<crate::level::GameMode>,
+    mut profile: ResMut<Profile>,
+) {
+    let Some(slot) = crate::arg("--autoplay-save").and_then(|v| v.parse::<usize>().ok()) else {
+        outcomes.clear();
+        return;
+    };
+    for o in outcomes.read() {
+        let (crate::mission::LevelOutcome::Complete, Some(city), crate::level::GameMode::Story) =
+            (o, spec.city(), &*mode)
+        else {
+            continue;
+        };
+        let (city, level) = (city.min(2) as usize, spec.level.min(1) as usize);
+        let cup = profile.award(city, level, clock.minutes() as i32);
+        let desc = profile.slot_description();
+        let slot = slot.clamp(1, SLOTS) - 1;
+        match save_slot(slot, &desc, &profile) {
+            Ok(()) => info!("autoplay-save: cup {cup}, slot {} \"{desc}\": {:?}", slot + 1, *profile),
+            Err(e) => warn!("autoplay-save: slot {}: {e}", slot + 1),
+        }
+    }
+}
+
+/// Debug (`--load-slot <n>`): load slot n (1..14) into the profile as
+/// "Load saved game" does, and log what the level select will show.
+pub fn debug_load(profile: &mut Profile) {
+    let Some(n) = crate::arg("--load-slot").and_then(|v| v.parse::<usize>().ok()) else {
+        return;
+    };
+    match load_slot(n.clamp(1, SLOTS) - 1) {
+        Some((desc, p)) => {
+            *profile = Profile { played: false, ..p };
+            let i = profile.first_open();
+            info!("load-slot {n}: \"{desc}\": {profile:?}; level select on city {} level {}", i / 2, i % 2);
+        }
+        None => warn!("load-slot {n}: empty"),
+    }
 }
 
 /// Stored options (pause menu, language, sound, controls).
@@ -181,6 +311,9 @@ pub struct Settings {
     pub motion_blur: bool,
     pub gouraud: bool,
     pub rotating_view: bool,
+    /// "3D minimap" (port-added, default on): the rotating view's tilted
+    /// minimap, drawn whether or not the view rotates (`hud::minimap_3d`).
+    pub minimap_3d: bool,
     /// Hardware (Warp3D) rendering, config field 19 (`DAT_0114c7d8`).
     pub hardware: bool,
     /// Window size in physical pixels (PaybackSetup's screen mode); None =
@@ -204,6 +337,10 @@ pub struct Settings {
     /// Hi-res HUD at >= 640x400 (both builds switch at W > 639 && H > 399);
     /// false = always the lo-res 320x256 layout.
     pub hires_hud: bool,
+    /// "Unlock all levels" (port-added): every story level and built-in
+    /// city is selectable whatever the profile's cups; the profile itself
+    /// is not changed, so turning it off restores the original gating.
+    pub unlock_all: bool,
     /// Fixed original framing (HFOV ~64 deg, the 320x256 look on 4:3);
     /// false = widen with the window aspect.
     pub original_aspect: bool,
@@ -277,6 +414,7 @@ impl Default for Settings {
             motion_blur: false,
             gouraud: true,
             rotating_view: false,
+            minimap_3d: true,
             hardware: false,
             resolution: None,
             window_mode: default(),
@@ -295,6 +433,7 @@ impl Default for Settings {
             required_kills: 5,
             variants: default(),
             hires_hud: true,
+            unlock_all: false,
             original_aspect: true,
         }
     }
@@ -327,6 +466,7 @@ impl Settings {
                 "motion_blur" => s.motion_blur = v == "1",
                 "gouraud" => s.gouraud = v == "1",
                 "rotating_view" => s.rotating_view = v == "1",
+                "minimap_3d" => s.minimap_3d = v == "1",
                 "hardware" => s.hardware = v == "1",
                 "resolution" => s.resolution = super::display::parse_size(v).or(s.resolution),
                 "window_mode" => s.window_mode = super::display::WindowChoice::parse(v).unwrap_or(s.window_mode),
@@ -337,6 +477,7 @@ impl Settings {
                 "required_kills" => s.required_kills = num(50).unwrap_or(s.required_kills).max(1),
                 "hires_hud" => s.hires_hud = v == "1",
                 "original_aspect" => s.original_aspect = v == "1",
+                "unlock_all" => s.unlock_all = v == "1",
                 _ => {
                     if let Some((_, f)) = s.variants.fields().into_iter().find(|(n, _)| *n == k) {
                         *f = v == "1";
@@ -376,6 +517,7 @@ impl Settings {
         t += &format!("motion_blur = {}\n", b(self.motion_blur));
         t += &format!("gouraud = {}\n", b(self.gouraud));
         t += &format!("rotating_view = {}\n", b(self.rotating_view));
+        t += &format!("minimap_3d = {}\n", b(self.minimap_3d));
         t += &format!("hardware = {}\n", b(self.hardware));
         if let Some((w, h)) = self.resolution {
             t += &format!("resolution = {w}x{h}\n");
@@ -387,6 +529,7 @@ impl Settings {
         t += &format!("required_kills = {}\n", self.required_kills);
         t += &format!("hires_hud = {}\n", b(self.hires_hud));
         t += &format!("original_aspect = {}\n", b(self.original_aspect));
+        t += &format!("unlock_all = {}\n", b(self.unlock_all));
         for (k, v) in self.variants.clone().fields() {
             t += &format!("{k} = {}\n", b(*v));
         }
@@ -394,7 +537,7 @@ impl Settings {
             t += &format!("mp.player{} = {}\n", i + 1, d.name());
         }
         self.controls.write(&mut t);
-        if let Err(e) = std::fs::create_dir_all(saves_dir()).and_then(|_| std::fs::write(Self::path(), t)) {
+        if let Err(e) = write_file(&Self::path(), t.as_bytes()) {
             warn!("saving settings: {e}");
         }
     }
@@ -402,6 +545,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use super::testing::scratch;
     use super::*;
 
     #[test]
@@ -426,5 +570,234 @@ mod tests {
         assert_eq!(p.cups[0], 3, "worse time keeps the old cup");
         assert_eq!(p.award(2, 0, 20), 1);
         assert_eq!(p.rating(), 0);
+    }
+
+    /// The byte layout of `FUN_01011a70` / Mac `WriteSaveGame`: per city,
+    /// best[2c], cup[2c], best[2c+1], cup[2c+1], big-endian.
+    #[test]
+    fn save_layout() {
+        let mut p = Profile::new_game("Ann".into());
+        p.best = [7, 13, -1, 9, 4, 30];
+        p.cups = [3, 2, 0, 1, 3, 1];
+        let b = p.to_bytes("desc");
+        let at = |o: usize| i32::from_be_bytes(b[o..o + 4].try_into().unwrap());
+        assert_eq!(&b[4..9], b"desc\0");
+        assert_eq!(&b[0x36..0x3a], b"Ann\0");
+        for i in 0..6 {
+            assert_eq!(at(0x68 + 8 * i), p.best[i]);
+            assert_eq!(at(0x6c + 8 * i), p.cups[i]);
+        }
+        // Descriptions are cut to 49 bytes plus the NUL.
+        let long = "x".repeat(60);
+        let (d, _) = Profile::from_bytes(&p.to_bytes(&long)).unwrap();
+        assert_eq!(d.len(), 49);
+    }
+
+    #[test]
+    fn short_and_corrupt_files() {
+        let mut p = Profile::new_game("Bo".into());
+        p.cups[0] = 2;
+        p.best[0] = 11;
+        let mut b = p.to_bytes("ok");
+        assert!(Profile::from_bytes(&b[..SAVE_SIZE - 1]).is_none());
+        assert!(Profile::from_bytes(&[]).is_none());
+        // Trailing bytes are ignored; the version is not checked.
+        b[3] = 7;
+        b.extend_from_slice(&[0xAA; 10]);
+        assert_eq!(Profile::from_bytes(&b).unwrap().1, p);
+        // Garbage values are tamed; strings without a NUL end at the field.
+        let mut g = vec![0xFFu8; SAVE_SIZE];
+        g[0x6c..0x70].copy_from_slice(&99i32.to_be_bytes());
+        let (d, q) = Profile::from_bytes(&g).unwrap();
+        assert_eq!(d.chars().count(), 50);
+        assert_eq!(q.best, [-1; 6]);
+        assert_eq!(q.cups, [3, 0, 0, 0, 0, 0]);
+    }
+
+    /// Level-select default (`FUN_01025544`) and the save description
+    /// (`FUN_0101f738`).
+    #[test]
+    fn defaults() {
+        let mut p = Profile::new_game("Cy".into());
+        assert_eq!((p.first_open(), p.slot_description()), (0, "Cy - C1, L1".to_string()));
+        p.cups = [3, 1, 2, 0, 0, 0];
+        assert_eq!((p.first_open(), p.slot_description()), (3, "Cy - C2, L2".to_string()));
+        p.cups = [3, 2, 3, 1, 1, 2];
+        assert_eq!(p.first_open(), 3, "first lowest cup");
+        assert_eq!(p.slot_description(), "Cy - C3, L1", "all done: C3, L1 (both builds)");
+        p.cups = [2, 3, 3, 3, 3, 3];
+        assert_eq!(p.first_open(), 0);
+        p.cups = [3; 6];
+        assert_eq!(p.first_open(), 5);
+    }
+
+    #[test]
+    fn unlock_all_gating() {
+        let p = Profile::new_game("Di".into());
+        let mut s = Settings::default();
+        assert!(level_open(&p, &s, 0) && !level_open(&p, &s, 1) && !level_open(&p, &s, 5));
+        assert!(city_open(&p, &s, 0) && !city_open(&p, &s, 1) && !city_open(&p, &s, 2));
+        s.unlock_all = true;
+        assert!((0..6).all(|i| level_open(&p, &s, i)));
+        assert!((0..3).all(|c| city_open(&p, &s, c)));
+        assert_eq!(p, Profile::new_game("Di".into()), "the profile is not changed");
+        // Progress: city 1 opens with city 0's last level.
+        let mut q = p.clone();
+        q.cups[0] = 1;
+        assert!(q.unlocked(1) && !q.city_unlocked(1));
+        q.cups[1] = 1;
+        assert!(q.city_unlocked(1) && !q.city_unlocked(2));
+    }
+
+    #[test]
+    fn slot_files() {
+        let dir = scratch("slots");
+        with_saves_dir(&dir, || {
+            assert_eq!(saves_dir(), dir);
+            assert_eq!(slot_names(), vec![None; SLOTS]);
+            assert!(load_slot(0).is_none());
+            let mut p = Profile::new_game("Ed".into());
+            p.award(0, 0, 9);
+            save_slot(2, "first", &p).unwrap();
+            assert!(dir.join("PaybackSlot3.save").is_file());
+            assert!(!dir.join("PaybackSlot3.save.tmp").exists());
+            assert_eq!(std::fs::read(dir.join("PaybackSlot3.save")).unwrap().len(), SAVE_SIZE);
+            let names = slot_names();
+            assert_eq!(names[2].as_deref(), Some("first"));
+            assert_eq!(names.iter().filter(|n| n.is_some()).count(), 1);
+            // Overwrite.
+            p.award(0, 1, 20);
+            save_slot(2, "second", &p).unwrap();
+            assert_eq!(load_slot(2), Some(("second".to_string(), p.clone())));
+            // A truncated file is an empty slot.
+            std::fs::write(dir.join("PaybackSlot5.save"), [0u8; 40]).unwrap();
+            assert!(load_slot(4).is_none() && slot_names()[4].is_none());
+            // Slot 14 is the last one.
+            save_slot(13, "last", &p).unwrap();
+            assert!(dir.join("PaybackSlot14.save").is_file());
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_file() {
+        let dir = scratch("settings");
+        with_saves_dir(&dir, || {
+            assert_eq!(Settings::load(), Settings::default(), "no file: defaults");
+            Settings::default().save();
+            assert_eq!(Settings::load(), Settings::default());
+            let mut s = Settings::default();
+            s.unlock_all = true;
+            s.language = "Deutsch".into();
+            s.volume = 70;
+            s.police = 4;
+            s.rampage_city = 2;
+            s.required_kills = 12;
+            s.variants.textures = false;
+            s.resolution = Some((800, 600));
+            s.save();
+            let text = std::fs::read_to_string(dir.join("Payback.cfg")).unwrap();
+            assert!(text.contains("unlock_all = 1\n"));
+            assert_eq!(Settings::load(), s);
+            // Unknown keys and junk lines are ignored, bad numbers keep the default.
+            std::fs::write(dir.join("Payback.cfg"), "# x\nfoo = 1\nnonsense\nvolume = loud\nunlock_all = 1\n").unwrap();
+            let l = Settings::load();
+            assert!(l.unlock_all);
+            assert_eq!(l.volume, Settings::default().volume);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rampage high scores persist (the Mac's `SaveHiscores` @ 1009eaa0
+    /// bug, which never persists them, is not copied).
+    #[test]
+    fn high_scores_persist() {
+        let dir = scratch("scores");
+        let data = testing::data();
+        with_saves_dir(&dir, || {
+            let mut t = crate::rampage::load_scores(&data, 1);
+            assert_eq!(t, payback_formats::scores::HighScores::default());
+            assert!(t.insert(2, "Fay", 9_999_999).is_some());
+            crate::rampage::save_scores(1, &t);
+            assert!(dir.join("1.scores").is_file());
+            let back = crate::rampage::load_scores(&data, 1);
+            assert_eq!(back, t);
+            assert_eq!(back.tables[2][0].name, "Fay");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A menu context without the game data or a window, for screen tests.
+#[cfg(test)]
+pub mod testing {
+    use super::*;
+    use crate::data::GameData;
+    use crate::frontend::ui::Ctx;
+    use crate::hud::{Language, Texts};
+
+    /// A fresh scratch directory for one test.
+    pub fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("payback_saves_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    pub fn data() -> GameData {
+        GameData {
+            root: PathBuf::from("no-game-data"),
+            mac: None,
+            palette: [0; 768],
+            cube_textures: payback_formats::CubeTextureList { entries: Vec::new() },
+            mac_cube_textures: true,
+            custom_textures: Default::default(),
+        }
+    }
+
+    pub struct Env {
+        pub data: GameData,
+        pub texts: Texts,
+        pub profile: Profile,
+        pub settings: Settings,
+        pub language: Language,
+        pub mp: crate::multiplayer::MpTotals,
+        pub display: super::super::display::Display,
+    }
+
+    impl Env {
+        pub fn new() -> Env {
+            Env {
+                data: data(),
+                texts: Texts::default(),
+                profile: Profile::default(),
+                settings: Settings::default(),
+                language: Language(String::new()),
+                mp: Default::default(),
+                display: Default::default(),
+            }
+        }
+
+        pub fn cx(&mut self) -> Ctx<'_> {
+            Ctx {
+                data: &self.data,
+                texts: &self.texts,
+                profile: &mut self.profile,
+                settings: &mut self.settings,
+                language: &mut self.language,
+                languages: &[],
+                goal: 0,
+                level_ticks: 0,
+                story: false,
+                last_replay: None,
+                mp_totals: &mut self.mp,
+                user_maps: &[],
+                hardware: false,
+                display: &self.display,
+                pads: 0,
+                sfx: Vec::new(),
+                requests: Vec::new(),
+            }
+        }
     }
 }

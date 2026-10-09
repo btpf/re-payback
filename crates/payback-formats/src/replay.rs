@@ -27,6 +27,13 @@
 //! but without bit 1 the records are raw words (this implementation's
 //! first 0x3F3 files). Older versions come from the Amiga builds, which
 //! have no random missions.
+//!
+//! Bit 3 (port addition, not in any original): cheat events follow, after
+//! the [`RandomSetup`] if there is one: a u32 count, then per event three
+//! u32/i32 words: the game tick it was applied at, its kind and an
+//! argument ([`CheatEvent`]; kinds are defined by the game, `cheats.rs`).
+//! Readers that predate the flag stop before it, so files without cheats
+//! are unchanged.
 
 use crate::{Error, Result};
 
@@ -43,6 +50,20 @@ pub const FLAG_MAC_STREAM: u32 = 2;
 /// Trailer flag: a [`RandomSetup`] (goal, progress; two i32) follows the
 /// flags.
 pub const FLAG_RANDOM_SETUP: u32 = 4;
+/// Trailer flag (port addition): [`CheatEvent`]s follow (a u32 count,
+/// then 12 bytes each).
+pub const FLAG_CHEATS: u32 = 8;
+
+/// A cheat applied during the recorded game (port addition, not in the
+/// original): at the start of game tick `tick` (the replay's tick counter,
+/// 1 = the first tick), action `kind` with argument `arg`. The kinds are
+/// the game's (`crates/payback/src/cheats.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheatEvent {
+    pub tick: u32,
+    pub kind: u32,
+    pub arg: i32,
+}
 
 /// What the Rampage random missions read from outside the replay at level
 /// start: the money goal (top of the Rampage high-score table for the
@@ -81,6 +102,9 @@ pub struct Header {
     /// The random missions' outside inputs, when recorded (files before
     /// [`FLAG_RANDOM_SETUP`] and Mac files have none).
     pub random_setup: Option<RandomSetup>,
+    /// Cheats applied during the game, in tick order ([`FLAG_CHEATS`];
+    /// empty for every original file).
+    pub cheats: Vec<CheatEvent>,
 }
 
 /// One player's input for one frame.
@@ -191,6 +215,19 @@ impl Replay {
         } else {
             None
         };
+        let mut cheats = Vec::new();
+        if version == 0x3f3 && flags & FLAG_CHEATS != 0 {
+            let at = end + 8 + (if random_setup.is_some() { 8 } else { 0 });
+            let n = i32_at(d, at)? as u32 as usize;
+            for i in 0..n {
+                let o = at + 4 + 12 * i;
+                cheats.push(CheatEvent {
+                    tick: i32_at(d, o)? as u32,
+                    kind: i32_at(d, o + 4)? as u32,
+                    arg: i32_at(d, o + 8)?,
+                });
+            }
+        }
         let header = Header {
             version,
             players: f(0)?,
@@ -204,6 +241,7 @@ impl Replay {
             level,
             random_missions,
             random_setup,
+            cheats,
         };
         let count = f(6)?.max(0) as usize;
         if flags & FLAG_MAC_STREAM != 0 {
@@ -270,10 +308,19 @@ impl Replay {
         out.extend_from_slice(TRAILER);
         let random = if h.rampage && h.random_missions { FLAG_RANDOM_MISSIONS } else { 0 };
         let setup = if h.random_setup.is_some() { FLAG_RANDOM_SETUP } else { 0 };
-        out.extend_from_slice(&(random | setup | FLAG_MAC_STREAM).to_be_bytes());
+        let cheats = if h.cheats.is_empty() { 0 } else { FLAG_CHEATS };
+        out.extend_from_slice(&(random | setup | cheats | FLAG_MAC_STREAM).to_be_bytes());
         if let Some(r) = h.random_setup {
             out.extend_from_slice(&r.goal.to_be_bytes());
             out.extend_from_slice(&r.progress.to_be_bytes());
+        }
+        if !h.cheats.is_empty() {
+            out.extend_from_slice(&(h.cheats.len() as u32).to_be_bytes());
+            for c in &h.cheats {
+                out.extend_from_slice(&c.tick.to_be_bytes());
+                out.extend_from_slice(&c.kind.to_be_bytes());
+                out.extend_from_slice(&c.arg.to_be_bytes());
+            }
         }
         out
     }
@@ -722,6 +769,7 @@ mod tests {
                 level: 1,
                 random_missions,
                 random_setup: None,
+                cheats: vec![],
             },
             records,
         }
@@ -777,6 +825,34 @@ mod tests {
         // A Mac file: no trailer at all.
         let mac = Replay::parse(&b[..b.len() - 16]).unwrap();
         assert!(mac.header.random_missions && mac.header.random_setup.is_none());
+    }
+
+    /// Cheat events (port addition) round-trip after the random setup;
+    /// cutting them off leaves a file an older build wrote.
+    #[test]
+    fn cheat_events() {
+        let mut r = sample(true, true, "PROGDIR:Maps/1");
+        r.header.cheats = vec![
+            CheatEvent { tick: 12, kind: 1, arg: 1 },
+            CheatEvent { tick: 40, kind: 3, arg: 11 },
+        ];
+        for setup in [None, Some(RandomSetup { goal: 7, progress: 2 })] {
+            r.header.random_setup = setup;
+            let b = r.write();
+            assert_eq!(Replay::parse(&b).unwrap(), r);
+            assert_eq!(&b[b.len() - 12..b.len() - 8], &40u32.to_be_bytes());
+            // Without the block and its flag: the same game, no cheats.
+            let mut old = b[..b.len() - 4 - 24].to_vec();
+            let f = old.len() - (if setup.is_some() { 8 } else { 0 }) - 1;
+            old[f] &= !(FLAG_CHEATS as u8);
+            let p = Replay::parse(&old).unwrap();
+            assert!(p.header.cheats.is_empty());
+            assert_eq!((p.header.random_setup, &p.records), (setup, &r.records));
+        }
+        // No cheats: no flag, no block.
+        r.header.cheats.clear();
+        let b = r.write();
+        assert_eq!(Replay::parse(&b).unwrap(), r);
     }
 
     /// Versions 10 / 0x3F2 (fixed 100-byte path at 0x30, level at 0x94).

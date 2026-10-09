@@ -152,7 +152,10 @@ required root and the Mac `Payback` folder as an optional second one.
   `docs/formats.md`) is loaded with the map: 12 of the Mac maps use custom
   texture numbers >= 2000. They take the last 112 tiles of the cube atlas,
   their `gouraud` field extends the remap table, and their flags drive
-  footsteps and grip like `.CubeTextureList` flags.
+  footsteps and grip like `.CubeTextureList` flags. All 31 (and the Amiga
+  `The Killing Zone`) load, render and run 2000 Rampage ticks without
+  warnings; replays on them match (checks and the missing-file rules in
+  `frontend_menus.md` §11).
 
 ## Findings
 

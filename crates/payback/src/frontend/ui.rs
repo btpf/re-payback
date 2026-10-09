@@ -83,6 +83,9 @@ pub enum Request {
     Resume,
     /// Pause menu "Quit to title screen".
     QuitToTitle,
+    /// Cheat menu (port addition): queue a cheat for the next game tick
+    /// (`crate::cheats`).
+    Cheat(crate::cheats::Cheat),
 }
 
 /// What a screen hands back to the one below it.

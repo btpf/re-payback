@@ -295,6 +295,7 @@ fn spawn_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mode: Res<GameMode>,
     mut rng: ResMut<Rng>,
+    mut session: ResMut<PlayerSession>,
 ) {
     let (Some(starts), Some(mut library)) = (starts, library) else {
         return;
@@ -323,7 +324,18 @@ fn spawn_player(
         }
         return;
     }
-    let Some(pos) = starts.level_start.or_else(|| starts.list.first().copied()) else {
+    // Rampage places the player like a respawn, at a random start point
+    // (`amiga_startlevel` @ 100fff40 calls `StartObject` when the Rampage
+    // flag `DAT_1017c334` is set, else `InitialStartObject` @ 100ade40 with
+    // the level's start square; the same branch in 68k `FUN_000ec686`
+    // ~0xee31a and OS4 `FUN_010692bc` ~49288). Most user maps have no
+    // special 2/3 square, only the random pool.
+    let pos = if mode.is_rampage() {
+        random_start(&starts, &mut session, &mut rng)
+    } else {
+        None
+    };
+    let Some(pos) = pos.or(starts.level_start).or_else(|| starts.list.first().copied()) else {
         warn!("map has no start points");
         return;
     };
@@ -339,6 +351,27 @@ fn spawn_player(
     ) {
         make_player(&mut commands, e, 0);
     }
+}
+
+/// A random start point from LoadMap's pool, avoiding the last 4 used
+/// (Mac `StartObject` @ 100adb70: `random(n)` up to 20 draws; 68k
+/// `FUN_00043c96`, OS4 `FUN_0106ef6c`). None if the map has no pool.
+fn random_start(starts: &StartPoints, session: &mut PlayerSession, rng: &mut Rng) -> Option<Vec3> {
+    if starts.list.is_empty() {
+        return None;
+    }
+    let mut i = rng.rand(starts.list.len() as i32) as usize;
+    for _ in 0..19 {
+        if !session.recent_starts.contains(&i) {
+            break;
+        }
+        i = rng.rand(starts.list.len() as i32) as usize;
+    }
+    session.recent_starts.push(i);
+    if session.recent_starts.len() > 4 {
+        session.recent_starts.remove(0);
+    }
+    Some(starts.list[i])
 }
 
 /// Turn a freshly spawned person into player `player`.
@@ -1026,21 +1059,7 @@ fn regen_and_respawn(
                 crate::world::z_of_h(top),
             )
         }
-        None if !starts.list.is_empty() => {
-            let mut i = rng.rand(starts.list.len() as i32) as usize;
-            for _ in 0..19 {
-                if !session.recent_starts.contains(&i) {
-                    break;
-                }
-                i = rng.rand(starts.list.len() as i32) as usize;
-            }
-            session.recent_starts.push(i);
-            if session.recent_starts.len() > 4 {
-                session.recent_starts.remove(0);
-            }
-            starts.list[i]
-        }
-        None => match starts.level_start {
+        None => match random_start(&starts, &mut session, &mut rng).or(starts.level_start) {
             Some(p) => p,
             None => return,
         },

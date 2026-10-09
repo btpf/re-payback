@@ -121,12 +121,19 @@ impl UserMap {
             .unwrap_or_default()
     }
 
-    pub fn save_scores(&self, scores: &HighScores) {
-        let path = if self.in_data {
+    /// Where [`Self::save_scores`] writes: `Saves/UserMaps/<name>.scores`
+    /// for a map in the game data (Amiga or Mac), else next to the map
+    /// (`FUN_0102a0fc` writes `<map>.scores`).
+    fn score_file(&self) -> PathBuf {
+        if self.in_data {
             self.saved_scores()
         } else {
             self.path.with_extension("scores")
-        };
+        }
+    }
+
+    pub fn save_scores(&self, scores: &HighScores) {
+        let path = self.score_file();
         let res = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
@@ -215,9 +222,21 @@ pub fn city_of(user_maps: &[UserMap], spec: &LevelSpec) -> Option<usize> {
     if let Some(c) = spec.city() {
         return Some(c as usize).filter(|&c| c < BUILT_IN);
     }
+    // Paths compared as the file system does (`--map` or an older replay
+    // may spell the same map with other separators, case or a relative
+    // path).
+    let norm = |p: &str| {
+        let p = Path::new(p);
+        std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase()
+    };
+    let want = norm(&spec.map);
     user_maps
         .iter()
-        .position(|m| m.spec() == spec.clone().with_level(0))
+        .position(|m| m.spec() == spec.clone().with_level(0) || norm(&m.spec().map) == want)
         .map(|i| i + BUILT_IN)
 }
 
@@ -244,5 +263,44 @@ impl WithLevel for LevelSpec {
     fn with_level(mut self, level: u8) -> Self {
         self.level = level;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(name: &str, path: &str, in_data: bool) -> UserMap {
+        UserMap {
+            name: name.into(),
+            path: path.into(),
+            in_data,
+            thumb: Picture { w: 0, h: 0, px: Vec::new() },
+        }
+    }
+
+    #[test]
+    fn score_files() {
+        let saves = super::super::progress::saves_dir().join("UserMaps");
+        let mac = map("Real Park", "D:/Payback/Mac/UserMaps/Real Park.map", true);
+        assert_eq!(mac.score_file(), saves.join("Real Park.scores"));
+        let amiga = map("The Killing Zone", "UserMaps/The Killing Zone.map", true);
+        assert_eq!(amiga.score_file(), saves.join("The Killing Zone.scores"));
+        let own = map("Mine", "D:/Games/UserMaps/Mine.map", false);
+        assert_eq!(own.score_file(), PathBuf::from("D:/Games/UserMaps/Mine.scores"));
+    }
+
+    #[test]
+    fn city_of_any_spelling() {
+        let maps = [
+            map("Amirace", "D:/Payback/Mac/UserMaps/Amirace.map", true),
+            map("The Killing Zone", "UserMaps/The Killing Zone.map", true),
+        ];
+        let spec = |m: &str| LevelSpec { map: m.into(), level: 0 };
+        assert_eq!(city_of(&maps, &spec("D:/Payback/Mac/UserMaps/Amirace")), Some(3));
+        assert_eq!(city_of(&maps, &spec(r"D:\Payback\Mac\UserMaps\AMIRACE")), Some(3));
+        assert_eq!(city_of(&maps, &spec("UserMaps/The Killing Zone")), Some(4));
+        assert_eq!(city_of(&maps, &spec("UserMaps/Other")), None);
+        assert_eq!(city_of(&maps, &spec("2")), Some(2));
     }
 }

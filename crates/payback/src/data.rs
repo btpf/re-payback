@@ -226,7 +226,16 @@ fn find_dir(root: &Path, rel: &Path) -> Option<PathBuf> {
 
 fn resolve_nocase(root: &Path, rel: &Path) -> Option<PathBuf> {
     if rel.is_absolute() {
-        return None;
+        // A user map outside the game data (`UserMaps/` next to the
+        // executable, the Mac data): only the file name is matched without
+        // case, as the Amiga and HFS file systems do (`Foo.MAP` with
+        // `foo.thumb`).
+        let (dir, name) = (rel.parent()?, rel.file_name()?.to_string_lossy());
+        return std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&name))
+            .map(|e| e.path());
     }
     let mut cur = root.to_path_buf();
     for part in rel.components() {

@@ -569,6 +569,12 @@ else:                                               // drowned
    - z is the top of the cube at the given level: `(1500 − Σh[0..level])·16`.
 5. Multiplayer respawns without lives.
 
+**Initial placement (CONFIRMED):** in Rampage the first player is placed by the same random pick
+(Mac `StartObject` @ 100adb70, 68k `FUN_00043c96`, OS4 `FUN_0106ef6c`), which also fills the
+last-4 list; in story levels by `InitialStartObject` @ 100ade40 (68k `FUN_00043f0e`, OS4
+`FUN_0106f1ac`) at the level's special level+2 square (`amiga_startlevel` @ 100fff40, branch on
+`DAT_1017c334`). Port: `spawn_player` / `random_start` in `sim/people.rs`.
+
 **Busted (police on foot, §7.3).** The player gets stun = 10⁹ (lies down permanently), the respawn timer starts,
 and the message is 2017.
 

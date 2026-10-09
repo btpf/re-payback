@@ -275,3 +275,46 @@ fn mac_user_map_textures() {
     }
     assert_eq!(with_custom, 12);
 }
+
+/// Every bundled Mac user map with its companions: `.mini` 65×65,
+/// `.thumb` 256×256, `.route` (optional; four maps ship none and LoadRouting
+/// @ 100f1560 falls back to InitRouting), `.vehicles` (optional; Obj_Load
+/// @ 100ad180 falls back to Obj_Init: no flags, no parked vehicles), and a
+/// random start pool (special 1 squares) for the Rampage spawn.
+#[test]
+fn mac_user_map_companions() {
+    let Some(mac) = mac_dir() else { return };
+    let maps = files(&mac.join("UserMaps"), &|p| ext_is(p, "map"));
+    let (mut routes, mut vehicles) = (0, 0);
+    for p in maps {
+        let name = p.display();
+        let m = Map::parse(&std::fs::read(&p).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(m.variant <= 2, "{name}");
+        assert_eq!(std::fs::read(p.with_extension("mini")).unwrap().len(), 65 * 65, "{name}");
+        assert_eq!(std::fs::read(p.with_extension("thumb")).unwrap().len(), 256 * 256, "{name}");
+        if let Ok(b) = std::fs::read(p.with_extension("route")) {
+            payback_formats::Route::parse(&b).unwrap_or_else(|e| panic!("{name}: {e}"));
+            routes += 1;
+        }
+        if let Ok(b) = std::fs::read(p.with_extension("vehicles")) {
+            let v = payback_formats::vehicles::MapVehicles::parse(&b).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(v.version, 1, "{name}");
+            for r in &v.parked {
+                assert!((0..28).contains(&r.model) && (0..3).contains(&r.layer), "{name}: {r:?}");
+                assert!((0..128 * 0x800).contains(&r.x) && (0..128 * 0x800).contains(&r.y), "{name}: {r:?}");
+            }
+            vehicles += 1;
+        }
+        let pool = m
+            .squares
+            .iter()
+            .flat_map(|s| s.cubes.iter())
+            .filter(|c| c.scenery == 0 && c.flags == 0x20 && c.special == 1)
+            .count();
+        assert!(pool > 0, "{name}: no start points");
+        for c in m.squares.iter().flat_map(|s| s.cubes.iter()) {
+            assert!(c.scenery <= 36, "{name}: scenery {}", c.scenery);
+        }
+    }
+    assert_eq!((routes, vehicles), (28, 22));
+}

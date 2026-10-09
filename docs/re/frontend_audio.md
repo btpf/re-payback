@@ -245,10 +245,44 @@ The money display *is* the score (player +0x384).
   (C)
 * Blob colours (Mac `Icons/Blob.0..3`, 7×7, black (8) ring): 0x70/0x74 green,
   0xD7/0xDC orange, 0xC5/0xC6 blue, 0xAE/0x1E red. (C)
-* "Rotating view" (`DAT_0114c7dc`): X = xmax − (xs*72>>4), Y = 40 (80); map drawn as a
-  camera-rotated, perspective-tilted quad (corners ±32) via `FUN_01018844`, cos/sin tables
-  `012a676c`/`012ac16c` (scale 256, **5760 steps per turn**), tilt index 5040; software:
-  two triangles with `FUN_0107fc64`. (C)
+* "Rotating view" (`DAT_0114c7dc`; Mac second half of `DisplayMinimap__Fiiiiii` @ 10091630,
+  OS4 `FUN_01018954` + projection `FUN_01018844`). Called with X = xmax − (xs·72>>4),
+  Y = 40 (hi-res 80; `AreIconsScaled`), no doubling of Y. xs = (W+8)·16/320, ys =
+  ((H+8)·16)>>8 (`ReadScreenParams__Fv` @ 10051fc0): 16/16 at 320×256, 32/30 at 640×480.
+  The map is the square of ±32 map pixels about its centre, turned by the view yaw a
+  (`DAT_0114c7d0`) and tilted by the **fixed** angle 5040 (315°, independent of the camera
+  pitch); with c, s = cos/sin a (tables `012a676c`/`012ac16c`, 8.8, 5760 per turn) and z = 0:
+  ry = (c·y − s·x) >> 8; w = ((cos5040·z + sin5040·ry) >> 4) + 0x800;
+  sx = ((c·x + s·y) >> 1)·xs / w; sy = ((cos5040·ry − sin5040·z) >> 1)·ys / w; point at
+  (X + 2xs + sx, Y + 2ys + sy), q = 1.0/w. Heading up the screen (yaw = 0xB40 − heading)
+  is −ry, so the far (top) edge is the narrower: at 320×256, yaw 0, the top edge spans
+  ±27 px at sy −19, the bottom ±38 at +27. Two triangles (−32,−32)(32,−32)(−32,32) and
+  (32,32)(32,−32)(−32,32), texel u, v from 0.1 to 63.0 (`DAT_01130ac8/acc`). (C)
+  * Software (`DAT_0114c7d8` = 0): `DrawPerspectiveTriangleGenlock__FP8triangle` @ 100b8c50
+    (OS4 `FUN_0107fc64`): rows walked from the top vertex (x truncated), u·q, v·q, q divided
+    every 16 pixels with 1/64-texel steps between, texel `tex[(v & 0xFC0) + (u >> 6)]`,
+    colour 0 skipped, clipped to the screen. Hi-res (xs = 32) draws it twice as big. (C)
+  * Hardware: `W3D_SetBlendMode(7, 8)` (source alpha, 1 − source alpha), Z buffer off,
+    then the same two triangles with `W3D_DrawTriangle` (OS4 `FUN_0100499c`), texture
+    filtered (bilinear in the port, as `DrawIcon`). (C; filter I)
+  * Blobs: `FUN_01018844((p >> 12) − 32, (p >> 12) − 32, 0)`, icon at (X + 2xs + sx − 3,
+    Y + 2ys + sy − 3), not scaled with the map (always >> 12, also in hardware hi-res);
+    player first, target when x ≥ 0. The north arrow is part of the texture and turns
+    with the map. Single player only (split screen has no minimap, §2.6). (C)
+  * Port: `hud::minimap_3d`, `Painter::textured_triangle` (software) and
+    `textured_triangle_bilinear` (hardware) in `hud/paint.rs`; xs/ys from the HUD canvas
+    (so a widescreen canvas stretches the map horizontally, as the formula would on such a
+    screen). Departure: the original ties the tilted minimap to the rotating view; the port
+    makes it a separate setting, `Settings::minimap_3d` ("3D minimap", Graphics options),
+    **on by default** at the user's request: drawn at the rotating view's position and size
+    whenever it is on, turned by the view's yaw in the rotating view and otherwise by the yaw
+    the rotating view would have (the followed object's heading, eased as `turn_views` does;
+    `camera::MinimapYaw`), the top-down camera itself unchanged; off gives the flat,
+    north-up minimap. The rotating view itself
+    defaults to off, as in the original (Mac `ClearPreference` @ 100508c0 leaves the pref
+    that `LoadConfig` @ 10052be0 copies from +0x2a4 at 0; Amiga: `DAT_0114c7dc` is BSS, set
+    only from config field 18 and the menu). `--rotating-view [0|1]` / `--no-rotating-view`
+    force it for a run. (C)
 * Replay playback (`DAT_0114c6ce`, I) replaces it with `FUN_010176e0`: clock "H:MM:SS.cc"
   at (xmax−78, 43) and a progress bar on rows 37–41 (black frame, 0xB4 red, 0x78 green
   elapsed). (C)
@@ -653,7 +687,8 @@ a wanted-level sound.
   HelicopterBlades · remotecontrolledcar RCEngine/16 · boat BoatEngine/8 · rocketcar
   Flamethrower/12.
 * **Horn** (`FUN_0105e02c`): police Siren loop 25,000,000 @ 10000; others loop 20,000,000
-  @ `clamp(16,000,000/mass, 3000, 20000)` (mass = type+0x48EC); deleted on release (I).
+  @ `clamp(16,000,000/mass, 3000, 20000)` (mass = type+0x48EC); deleted on release (C, Mac
+  `DoVehicleFire` @ 10070c20 / `do_Other` @ 10146280 tail; player and AI alike, vehicles.md §6.2).
   Reverse beep while speed < 0: loop 10,000,000 @ 22050.
 * **Collisions** (`FUN_010cd198`): impact = v²>>14; < 11 Thud (speed*10000 @ 12000), else
   Thud2 @ 8000 (+ Screams 255 @ 15000+rand(2000) if the player is in the bus).

@@ -157,6 +157,9 @@ pub enum Item {
     Gouraud,
     /// "Rotating view: " 1602 (`DAT_0114c7dc`).
     Rotating,
+    /// "3D minimap: " on / off (`Settings::minimap_3d`, port-added; no
+    /// phrase): the rotating view's tilted minimap, also without it.
+    Minimap3d,
     /// "Hardware acceleration: " 1603 (`DAT_0114c7d8`; unused in the
     /// original's menus, set by PaybackSetup).
     Hardware,
@@ -188,6 +191,9 @@ pub enum Item {
     Scenery,
     /// "German gas: " on / off (`Variants::gas`).
     Gas,
+    /// "Unlock all levels: " on / off (`Settings::unlock_all`, port-added;
+    /// no phrase): every story level and city selectable.
+    UnlockAll,
 }
 
 /// The pause menu's graphics sub-items (item 5), as in the original
@@ -200,12 +206,13 @@ pub const MORE: &str = "More graphics options";
 
 /// The front end's Graphics options screen: the Mac setup dialog's
 /// controls in its order (display, then rendering), then the HUD and
-/// framing, then the Mac/Amiga content choices.
-pub const SETUP_ITEMS: [Item; 16] = [
+/// framing, then the Mac/Amiga content choices, then "Unlock all levels".
+pub const SETUP_ITEMS: [Item; 18] = [
     Item::Resolution,
     Item::WindowMode,
     Item::Hardware,
     Item::Rotating,
+    Item::Minimap3d,
     Item::Gouraud,
     Item::MotionBlur,
     Item::Fx,
@@ -218,6 +225,7 @@ pub const SETUP_ITEMS: [Item; 16] = [
     Item::Title,
     Item::Intro,
     Item::Gas,
+    Item::UnlockAll,
 ];
 
 /// The Mac intro film (`GetPaybackMovie` @ 100fcbc0, played by
@@ -231,6 +239,7 @@ impl Item {
         match self {
             Item::Gouraud => format!("{}{}", cx.g(1601), on_off(s.gouraud)),
             Item::Rotating => format!("{}{}", cx.g(1602), on_off(s.rotating_view)),
+            Item::Minimap3d => format!("3D minimap: {}", on_off(s.minimap_3d)),
             Item::Hardware => format!("{}{}", cx.g(1603), on_off(s.hardware)),
             Item::Resolution => {
                 let (w, h) = cx.display.shown(s);
@@ -243,6 +252,7 @@ impl Item {
             Item::HiresHud => format!("HUD: {}", if s.hires_hud { "Hi-res" } else { "Lo-res" }),
             Item::Aspect => format!("Aspect: {}", if s.original_aspect { "Original" } else { "Free" }),
             Item::Gas => format!("German gas: {}", on_off(s.variants.gas)),
+            Item::UnlockAll => format!("Unlock all levels: {}", on_off(s.unlock_all)),
             _ => {
                 // A Mac choice reads "Amiga" when the Mac data is missing.
                 let mac = self.variant(s).unwrap_or(false) && !self.needs_mac(cx.data);
@@ -318,6 +328,7 @@ impl Item {
         Some(match name.trim() {
             "gouraud" => Item::Gouraud,
             "rotating_view" | "rotating" => Item::Rotating,
+            "minimap_3d" | "minimap" => Item::Minimap3d,
             "hardware" => Item::Hardware,
             "resolution" => Item::Resolution,
             "window_mode" => Item::WindowMode,
@@ -332,6 +343,7 @@ impl Item {
             "intro" => Item::Intro,
             "scenery" => Item::Scenery,
             "gas" => Item::Gas,
+            "unlock_all" => Item::UnlockAll,
             _ => return None,
         })
     }
@@ -372,6 +384,10 @@ impl Item {
                 s.rotating_view = !s.rotating_view;
                 true
             }
+            Item::Minimap3d => {
+                s.minimap_3d = !s.minimap_3d;
+                true
+            }
             Item::Hardware => {
                 s.hardware = !s.hardware;
                 s.apply_hardware();
@@ -403,6 +419,10 @@ impl Item {
             }
             Item::Aspect => {
                 s.original_aspect = !s.original_aspect;
+                true
+            }
+            Item::UnlockAll => {
+                s.unlock_all = !s.unlock_all;
                 true
             }
             _ => match self.variant_mut(s) {

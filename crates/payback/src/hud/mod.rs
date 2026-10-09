@@ -767,6 +767,82 @@ fn ys(h: i32) -> i32 {
     ((h + 8) * 16) >> 8
 }
 
+/// `xs` of `ReadScreenParams` @ 10051fc0: (W+8)·16/320.
+fn xs(w: i32) -> i32 {
+    (w + 8) * 16 / 320
+}
+
+/// 8.8 cosine and sine of an angle in 1/5760 turns, as the original's
+/// tables (`DAT_012a676c`, `DAT_012ac16c`; `sim::Trig`).
+fn cos_sin(a: i32) -> (i32, i32) {
+    let r = a.rem_euclid(5760) as f64 * std::f64::consts::TAU / 5760.0;
+    ((256.0 * r.cos()) as i32, (256.0 * r.sin()) as i32)
+}
+
+/// The minimap in the rotating view (second half of
+/// `DisplayMinimap__Fiiiiii` @ 10091630, OS4 `FUN_01018954` with the
+/// projection `FUN_01018844`; called from `amiga_levelloop` @ 10100f50
+/// with X = xmax − (xs·72 >> 4), Y = 40, hi-res 80). The 64×64 map is a
+/// square of ±32 map pixels about its centre, turned by the view's yaw a
+/// (`DAT_0114c7d0`) and tilted by the fixed angle 5040 (315°, whatever the
+/// camera's pitch), then projected:
+///
+/// * ry = (cos a·y − sin a·x) >> 8, w = (sin 5040·ry >> 4) + 0x800,
+/// * sx = ((cos a·x + sin a·y) >> 1)·xs / w, sy = (cos 5040·ry >> 1)·ys / w,
+/// * on screen at (X + 2·xs + sx, Y + 2·ys + sy), q = 1/w,
+///
+/// so the map grows with the screen (xs, ys = 16 at 320×256, 32×30 at
+/// 640×480) and its far (top) edge is narrower. Two triangles,
+/// (−32,−32) (32,−32) (−32,32) and (32,32) (32,−32) (−32,32), texel
+/// coordinates 0.1 .. 63.0 (`DAT_01130ac8/acc`): software
+/// `DrawPerspectiveTriangleGenlock` ([`Painter::textured_triangle`]),
+/// hardware `W3D_DrawTriangle` with blend (7, 8)
+/// ([`Painter::textured_triangle_bilinear`]). The north arrow is baked into
+/// the texture, so it turns with the map. The blobs (`PlotPoint__Fiii`,
+/// icon at −3, −3, not scaled) go through the same projection at
+/// ((p >> 12) − 32, (p >> 12) − 32): the player, then the target if its
+/// x ≥ 0.
+///
+/// Departure: the original draws this only in the rotating view; the port
+/// draws it whenever `Settings::minimap_3d` is on (the default); when the
+/// view does not rotate it still turns with the yaw the rotating view
+/// would have (`camera::MinimapYaw`), the top-down camera unchanged.
+fn minimap_3d(pen: &mut Pen, mm: &Icon, w: i32, h: i32, yaw: i32, hud: &HudData, blink: bool) {
+    let (xs, ys) = (xs(w), ys(h));
+    let (x0, y0) = ((w - 1) - ((xs * 72) >> 4), 40 * pen.k());
+    let (c, s) = cos_sin(yaw);
+    let (tc, ts) = cos_sin(5040);
+    let project = |px: i32, py: i32| -> (i32, i32, i32) {
+        let ry = (c * py - s * px) >> 8;
+        let wz = ((ts * ry) >> 4) + 0x800;
+        let sx = ((c * px + s * py) >> 1) * xs / wz;
+        let sy = ((tc * ry) >> 1) * ys / wz;
+        (x0 + 2 * xs + sx, y0 + 2 * ys + sy, wz)
+    };
+    let (lo, hi) = (0.1, 63.0);
+    let vert = |px: i32, py: i32, u: f32, v: f32| {
+        let (x, y, wz) = project(px, py);
+        paint::TexVertex { x: x as f32, y: y as f32, q: 1.0 / wz as f32, u, v }
+    };
+    let (b, cc) = (vert(32, -32, hi, lo), vert(-32, 32, lo, hi));
+    for tri in [[vert(-32, -32, lo, lo), b, cc], [vert(32, 32, hi, hi), b, cc]] {
+        if pen.hardware {
+            pen.p.textured_triangle_bilinear(mm, tri);
+        } else {
+            pen.p.textured_triangle(mm, tri);
+        }
+    }
+    let ic = pen.icons;
+    if let Some(pp) = hud.player_pos {
+        let (x, y, _) = project((pp.x >> 12) - 32, (pp.y >> 12) - 32);
+        pen.icon(&ic.blobs[if blink { 1 } else { 0 }], x - 3, y - 3, Blend::Plain);
+    }
+    if let Some(t) = hud.target_pos.filter(|t| t.x >= 0) {
+        let (x, y, _) = project((t.x >> 12) - 32, (t.y >> 12) - 32);
+        pen.icon(&ic.blobs[if blink { 3 } else { 2 }], x - 3, y - 3, Blend::Plain);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     mut canvas: ResMut<Canvas>,
@@ -783,6 +859,7 @@ fn draw(
     texts: Res<Texts>,
     labels: Res<labels::Labels>,
     view: Query<(&Camera, &GlobalTransform), With<crate::camera::GameCamera>>,
+    minimap_yaw: Res<crate::camera::MinimapYaw>,
 ) {
     let Some(lo) = icons else { return };
     let physical = window.single().map_or(UVec2::new(1280, 800), |w| w.physical_size());
@@ -909,8 +986,17 @@ fn draw(
     // on the same 4-frame counter (`_DAT_1017d2e4 > 1`). Nothing else is
     // plotted: no police, pedestrians or pickups (the radar pickup has no
     // effect). The map itself is not doubled in software hi-res; hardware
-    // draws it ×2 and plots at >> 11.
-    if let Some(mm) = &minimap {
+    // draws it ×2 and plots at >> 11. The original draws it tilted and
+    // turned with the camera in the rotating view ([`minimap_3d`]); the port
+    // ties that to `Settings::minimap_3d` instead (on by default), turned
+    // by the rotating view's yaw, or by the yaw the rotating view would
+    // have when the view does not rotate (`camera::MinimapYaw`).
+    if let Some(mm) = &minimap
+        && settings.as_ref().is_none_or(|s| s.minimap_3d)
+    {
+        let yaw = minimap_yaw.0 as i32;
+        minimap_3d(&mut pen, mm, w as i32, h as i32, yaw, &hud, blink);
+    } else if let Some(mm) = &minimap {
         let (mx, my) = (xmax - 71 * k, 33 * k);
         pen.icon(mm, mx + 1, my + 1, Blend::Plain);
         let shift = if bilinear { 11 } else { 12 };

@@ -308,13 +308,14 @@ pub fn pad_just(pad: &Gamepad, b: Option<GamepadButton>) -> bool {
 /// Keys the redefine prompt refuses: the digits pick weapons, `-` and `=`
 /// are game keys too, and F1 is kept for "Press F1 to continue" (Mac
 /// `DoControlSetup` @ 100a1f80 refuses key code 0x7A and allows `P`, which
-/// the Amiga's `FUN_01040790` refused). 0 disables (handled by the
-/// caller), Esc cancels.
+/// the Amiga's `FUN_01040790` refused). F12 opens the cheat menu (port
+/// addition, `crate::cheats`). 0 disables (handled by the caller), Esc
+/// cancels.
 pub fn refused_key(k: KeyCode) -> bool {
     use KeyCode::*;
     matches!(
         k,
-        Digit1 | Digit2 | Digit3 | Digit4 | Digit5 | Digit6 | Digit7 | Digit8 | Digit9 | Minus | Equal | F1
+        Digit1 | Digit2 | Digit3 | Digit4 | Digit5 | Digit6 | Digit7 | Digit8 | Digit9 | Minus | Equal | F1 | F12
     )
 }
 

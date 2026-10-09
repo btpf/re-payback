@@ -620,7 +620,10 @@ fn fire_weapons(
         if t.health <= 0 {
             continue;
         }
-        t.health -= 30;
+        // God mode (`crate::cheats`): no damage.
+        if !t.god {
+            t.health -= 30;
+        }
         commands.spawn(Sound::once(
             id::PUNCH_HIT,
             4e6,
@@ -1034,7 +1037,8 @@ fn projectile_hits(
                 by_weapon: true,
                 attacker: p.player,
             });
-            if t.filter == -1 || t.filter == weapon.filter_class() {
+            // God mode (`crate::cheats`): no damage.
+            if (t.filter == -1 || t.filter == weapon.filter_class()) && !t.god {
                 if p.kind == ProjectileKind::Petrol {
                     let dmg = (base / mass).clamp(1, (t.health + 71).max(1));
                     t.health -= dmg;
@@ -1185,7 +1189,8 @@ fn explosions(
                 let push = (d * q / k).clamp(I64Vec3::splat(-1000), I64Vec3::splat(1000));
                 o.vel += push.as_ivec3();
             }
-            if matches!(o.filter, -1 | 1 | 3) {
+            // God mode (`crate::cheats`): no damage.
+            if matches!(o.filter, -1 | 1 | 3) && !o.god {
                 let dmg = if prop { (q >> 4) / k } else { q / k };
                 o.health -= dmg.min(i32::MAX as i64) as i32;
                 if pays && !is_target && o.state != State::Player && o.player.is_none() {

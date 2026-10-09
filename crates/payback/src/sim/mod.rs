@@ -310,6 +310,10 @@ pub struct Obj {
     pub script_id: i32,
     /// Who created/fired this object (projectiles, thrown drivers).
     pub owner: Option<Entity>,
+    /// God mode (port addition, `crate::cheats`): the player's object
+    /// takes no damage. Set at the start of every tick for the objects
+    /// with a `player`, while the cheat is on.
+    pub god: bool,
 }
 
 impl Obj {
@@ -340,6 +344,7 @@ impl Obj {
             filter: -1,
             script_id: -1,
             owner: None,
+            god: false,
         }
     }
 

@@ -76,7 +76,7 @@ ground cubes are 256 high; buildings stack to ~1024. North is −y.
 |---|---|---|---|
 | `<n>.mini` | 4225 = 65×65 | 8bpp minimap, cropped to 64×64 with a red north arrow stamped at the top (confirmed) | `frontend_audio.md` §6.2 |
 | `<n>.thumb` | 65536 = 256×256 | 8bpp top-down picture for city selection (confirmed) | `frontend_audio.md` §6.1 |
-| `<n>.route` | 276480 | police routing graph, 1024 nodes × 270 bytes (confirmed, 68k `FUN_000a4200`) | `combat_police.md` §1 |
+| `<n>.route` | 276480 | police routing graph, 1024 nodes × 270 bytes (confirmed, 68k `FUN_000a4200`); optional: when missing, Mac `LoadRouting` @ 100f1560 calls `InitRouting` (all nodes unused) | `combat_police.md` §1 |
 | `<n>.vehicles` | ~100 | parked vehicles and user-map traffic (confirmed, below) | — |
 | `<n>.textures` | — | custom textures for user maps (confirmed, below) | — |
 | `<n>.scores` | 1024 | rampage high scores | `frontend_menus.md` §7 |
@@ -91,6 +91,8 @@ big-endian i32:
 | count | ≤ 6 |
 | count × {model, x, y, layer, heading} | model id 0–27 (`DAT_012a6364`); x, y in object units (0x800 per square); layer 0–2; heading 5760 = full turn |
 
+Optional: with no file, or a version other than 1, Mac `Obj_Load` @ 100ad180
+falls back to `Obj_Init` @ 100ad130 (all three flags 0, no vehicles).
 Parked vehicles spawn only in Rampage and multiplayer (`DAT_0114c7c6 ||
 DAT_0114c7c8`; `FUN_010692bc` ~49456), with z on top of the cubes up to
 `layer`. Shipped: map 0 (1,0,0) 4 records (one all zero), map 1 (0,1,0) 4,

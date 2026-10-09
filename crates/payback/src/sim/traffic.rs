@@ -734,7 +734,7 @@ fn drive_traffic(
             &Vehicle,
             &mut Traffic,
             &mut Stick,
-            &super::driving::Drive,
+            &mut super::driving::Drive,
             Option<&mut Nav>,
             Option<&super::ai::Ai>,
         )>,
@@ -752,7 +752,7 @@ fn drive_traffic(
     let order = crate::sim::table_order(set.p1().iter().map(|(e, o, ..)| (e, o)));
     let mut q = set.p1();
     for e__ in order {
-        let Ok((e, mut obj, veh, mut tr, mut stick, drive, nav, ai)) = q.get_mut(e__) else {
+        let Ok((e, mut obj, veh, mut tr, mut stick, mut drive, nav, ai)) = q.get_mut(e__) else {
             continue;
         };
         if obj.state != State::Wander || obj.burn > 0 {
@@ -773,9 +773,10 @@ fn drive_traffic(
         };
         let aim = nav.aim;
         let s = vehicle_ai::controller(
-            e, &obj, t, front, drive, driver, aim, &env, &mut nav, &mut rng, &trig,
+            e, &obj, t, front, &drive, driver, aim, &env, &mut nav, &mut rng, &trig,
         );
-        vehicle_ai::horn(&mut commands, &mut sounds, &mut nav, e, veh, &obj, s.fire);
+        nav.honking = s.fire;
+        vehicle_ai::horn(&mut commands, &mut sounds, &mut drive, e, veh, &obj, s.fire);
         *stick = s;
         // Script speed cap (`+0x386`, Mac `+0x868`).
         if let Some(ai) = ai {

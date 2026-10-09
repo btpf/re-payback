@@ -113,13 +113,22 @@ fn pick(sel: &mut usize, n: usize, cx: &mut Ctx, input: &Input) {
     }
 }
 
-/// The 14 slot lines at y = 0x20 + 14i and "Cancel" at 0xeb.
-fn draw_slots(ui: &mut Ui, cx: &Ctx, names: &[Option<String>], sel: usize) {
+/// The 14 slot lines and "Cancel": load at virtual y = 0x20 + 14i, Cancel
+/// at 0xeb (`FUN_0101f1a4`, Mac `DoLoadGame` @ 10096950); save at
+/// (0x19 + 11i)/200 of the height, Cancel at 0xb8/200 (`FUN_0101f738`, Mac
+/// `DoSaveGame` @ 10096d80). An empty slot reads "Slot %d" (`FUN_01011da8`).
+fn draw_slots(ui: &mut Ui, cx: &Ctx, names: &[Option<String>], sel: usize, save: bool) {
     for i in 0..=SLOTS {
-        let (s, y) = match names.get(i) {
-            Some(Some(n)) => (n.clone(), 0x20 + 14 * i as i32),
-            Some(None) => (format!("Slot {}", i + 1), 0x20 + 14 * i as i32),
-            None => (cx.g(2114), 0xeb),
+        let y = match (save, i == SLOTS) {
+            (false, false) => 0x20 + 14 * i as i32,
+            (false, true) => 0xeb,
+            (true, false) => ui.hy(0x19 + 11 * i as i32),
+            (true, true) => ui.hy(0xb8),
+        };
+        let s = match names.get(i) {
+            Some(Some(n)) => n.clone(),
+            Some(None) => format!("Slot {}", i + 1),
+            None => cx.g(2114),
         };
         let c = if i == sel { ui.flash() } else { 2 };
         ui.centred(&s, y, c);
@@ -172,7 +181,7 @@ impl Screen for LoadGame {
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
         ui.title(&cx.g(2082));
-        draw_slots(ui, cx, &self.names, self.sel);
+        draw_slots(ui, cx, &self.names, self.sel, false);
     }
 }
 
@@ -213,12 +222,9 @@ impl Screen for SaveGame {
             return Step::Stay;
         }
         cx.sound(Sfx::Select);
-        // Empty slot: "<name> - C<city>, L<level>" of the first level
-        // without a cup.
-        let i = cx.profile.first_open();
-        let default = self.names[self.sel]
-            .clone()
-            .unwrap_or_else(|| format!("{} - C{}, L{}", cx.profile.name, i / 2 + 1, i % 2 + 1));
+        // A used slot offers its description; an empty one "<name> -
+        // C<city>, L<level>" of the first level without a cup.
+        let default = self.names[self.sel].clone().unwrap_or_else(|| cx.profile.slot_description());
         self.state = SaveState::Naming;
         Step::Push(Box::new(TextEntry::new(cx.g(2084), &default, 40)))
     }
@@ -246,7 +252,7 @@ impl Screen for SaveGame {
     fn draw(&self, ui: &mut Ui, cx: &Ctx) {
         ui.picture(0, true);
         ui.title(&cx.g(2089));
-        draw_slots(ui, cx, &self.names, self.sel);
+        draw_slots(ui, cx, &self.names, self.sel, true);
     }
 }
 

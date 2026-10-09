@@ -62,7 +62,7 @@ impl Screen for LevelSelect {
             cx.sound(Sfx::Select);
             return Step::Pop(Outcome::Cancel);
         } else if input.fire {
-            if cx.profile.unlocked(self.city * 2 + self.level) {
+            if super::progress::level_open(cx.profile, cx.settings, self.city * 2 + self.level) {
                 cx.sound(Sfx::Select);
                 self.zoom = Some(0);
             } else {
@@ -344,5 +344,85 @@ impl Screen for GameComplete {
 
     fn brightness(&self) -> f32 {
         self.slide.map_or(1.0, |s| s.brightness())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::misc::{LoadGame, SaveGame};
+    use super::super::progress::{self, testing};
+    use super::*;
+
+    fn key(f: impl FnOnce(&mut Input)) -> Input {
+        let mut i = Input::default();
+        f(&mut i);
+        i
+    }
+
+    /// Complete a level, save from the game menu's Save screen, start
+    /// again, load the slot and check the level select (`FUN_0102395c`,
+    /// `FUN_0101f738`, `FUN_0101f1a4`, `FUN_01025544`).
+    #[test]
+    fn complete_save_restart_load() {
+        let dir = testing::scratch("flow");
+        let (down, fire, right) = (key(|i| i.down = true), key(|i| i.fire = true), key(|i| i.right = true));
+        progress::with_saves_dir(&dir, || {
+            let mut env = testing::Env::new();
+            env.profile = Profile::new_game("Tester".into());
+            let _ = LevelComplete::new(&mut env.profile, 0, 0, 7);
+            assert_eq!((env.profile.cups[0], env.profile.best[0]), (3, 7));
+            let desc = env.profile.slot_description();
+            assert_eq!(desc, "Tester - C1, L2");
+
+            // Save into slot 3 (two down, fire, enter the description).
+            let mut save = SaveGame::new();
+            let mut cx = env.cx();
+            save.tick(&mut cx, &down);
+            save.tick(&mut cx, &down);
+            assert!(matches!(save.tick(&mut cx, &fire), Step::Push(_)), "text entry");
+            assert!(matches!(save.resume(&mut cx, Outcome::Text(desc.clone())), Step::Push(_)), "GAME SAVED!");
+            assert!(matches!(save.tick(&mut cx, &Input::default()), Step::Pop(Outcome::Done)));
+            assert_eq!(progress::slot_names()[2].as_deref(), Some(desc.as_str()));
+
+            // Restart: a fresh profile; the empty slot 1 is refused.
+            let mut env = testing::Env::new();
+            let mut cx = env.cx();
+            let mut load = LoadGame::new();
+            assert!(matches!(load.tick(&mut cx, &fire), Step::Push(_)), "SLOT EMPTY!");
+            assert_eq!(cx.sfx.last(), Some(&Sfx::Refuse));
+            assert_eq!(*cx.profile, Profile::default());
+            load.tick(&mut cx, &down);
+            load.tick(&mut cx, &down);
+            assert!(matches!(load.tick(&mut cx, &fire), Step::Push(_)), "GAME LOADED!");
+            assert!(matches!(load.tick(&mut cx, &Input::default()), Step::Pop(Outcome::Done)));
+            assert_eq!(cx.profile.name, "Tester");
+            assert_eq!((cx.profile.cups, cx.profile.best), ([3, 0, 0, 0, 0, 0], [7, -1, -1, -1, -1, -1]));
+
+            // Level select starts on city 0 level 1, which may be played.
+            let mut sel = LevelSelect::new(cx.profile);
+            assert_eq!((sel.city, sel.level), (0, 1));
+            sel.tick(&mut cx, &fire);
+            assert!(sel.zoom.is_some());
+
+            // City 1 is still locked, until "Unlock all" is on.
+            let mut sel = LevelSelect::new(cx.profile);
+            sel.tick(&mut cx, &right);
+            sel.tick(&mut cx, &fire);
+            assert_eq!((sel.city, sel.zoom, cx.sfx.last()), (1, None, Some(&Sfx::Refuse)));
+            assert_eq!(super::super::usermaps::step_city(&cx, 0, 1), 0, "Rampage: only city 0");
+            cx.settings.unlock_all = true;
+            sel.tick(&mut cx, &fire);
+            assert!(sel.zoom.is_some());
+            assert_eq!(super::super::usermaps::step_city(&cx, 0, 1), 1);
+            assert_eq!(super::super::usermaps::step_city(&cx, 1, 1), 2);
+            // The profile is untouched; off again restores the gating.
+            assert_eq!(cx.profile.cups, [3, 0, 0, 0, 0, 0]);
+            cx.settings.unlock_all = false;
+            let mut sel = LevelSelect::new(cx.profile);
+            sel.tick(&mut cx, &right);
+            sel.tick(&mut cx, &fire);
+            assert!(sel.zoom.is_none());
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

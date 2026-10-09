@@ -27,6 +27,7 @@
 
 pub mod assets;
 pub mod bindings;
+mod cheats;
 pub mod display;
 mod levels;
 mod menus;
@@ -87,6 +88,8 @@ struct Frontend {
     loading: Option<(Launch, u32)>,
     /// `--frontend-screen pause` has been opened.
     debug_paused: bool,
+    /// `--cheat-menu` / `--cheat-vehicle` has been opened.
+    debug_cheats: bool,
     /// Build the menu stack on the next update.
     needs_init: bool,
     /// The canvases are spawned (the `Layers` resource may lag a frame).
@@ -201,6 +204,7 @@ impl Plugin for FrontendPlugin {
             )
             .add_systems(Update, (run, model::sync_model).chain().in_set(FrontendRun))
             .add_systems(Last, menus::save_on_exit)
+            .add_systems(Update, progress::autoplay_save.run_if(in_state(AppState::Playing)))
             .add_systems(Update, sync_title)
             // The pause menu's FX option drives the lens flares (`--fx` wins).
             .add_systems(Update, |settings: Res<Settings>, mut mode: ResMut<crate::effects::FxMode>| {
@@ -344,6 +348,7 @@ fn init_stack(fe: &mut Frontend, cx: &mut Ctx, result: Option<LevelResult>) {
         return;
     }
     fe.stack.push(Box::new(menus::MainMenu::new()));
+    progress::debug_load(cx.profile);
     let debug = crate::arg("--frontend-screen");
     if let Some(s) = debug.as_deref().and_then(|n| debug_screen(n, cx)) {
         fe.stack.push(s);
@@ -599,6 +604,7 @@ struct Env<'w, 's> {
     user_maps: Res<'w, usermaps::UserMaps>,
     display: Res<'w, display::Display>,
     render_mode: Option<Res<'w, crate::render_mode::RenderMode>>,
+    cheats: ResMut<'w, crate::cheats::Cheats>,
 }
 
 /// The menu loop: input, ticks, requests, drawing.
@@ -665,6 +671,34 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         fe.stack.push(Box::new(menu));
         if debug_pause && std::env::args().any(|a| a == "--pause-graphics") {
             fe.stack.push(Box::new(display::GraphicsSetup::debug(&env.settings)));
+        }
+        fe.pending = Input::default();
+        fe.acc = 0.0;
+        env.typed.clear();
+        return;
+    }
+    // F12 in a single-player level opens the cheat menu (port addition,
+    // `crate::cheats`; debug `--cheat-menu [--menu-item <n>]` /
+    // `--cheat-vehicle <type>` after 3 s), pausing the game like the pause
+    // menu.
+    let debug_cheats = playing
+        && !fe.debug_cheats
+        && (std::env::args().any(|a| a == "--cheat-menu") || crate::arg("--cheat-vehicle").is_some())
+        && env.time.elapsed_secs() > 3.0;
+    if playing
+        && fe.stack.is_empty()
+        && env.pending_end.0.is_none()
+        && !intro_on
+        && crate::cheats::allowed(&env.mode, &env.replay)
+        && (env.keys.just_pressed(KeyCode::F12) || debug_cheats)
+    {
+        fe.debug_cheats = true;
+        env.virtual_time.pause();
+        let god = env.cheats.god_pending();
+        let item = crate::arg("--menu-item").and_then(|v| v.parse().ok()).filter(|_| debug_cheats);
+        fe.stack.push(Box::new(cheats::CheatMenu::at(god, item.unwrap_or(0))));
+        if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
+            fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));
         }
         fe.pending = Input::default();
         fe.acc = 0.0;
@@ -794,6 +828,7 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
                 env.virtual_time.unpause();
                 close = true;
             }
+            Request::Cheat(c) => env.cheats.queue.push(c),
             Request::QuitToTitle => {
                 env.virtual_time.unpause();
                 close = true;

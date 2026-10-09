@@ -40,6 +40,60 @@ pub fn blank_sized(w: usize, h: usize) -> Image {
     image
 }
 
+/// A vertex of a textured triangle: screen position, q = 1/w and texel
+/// coordinates (the original's `triangle` vertex: x, y, 1/w, u, v).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TexVertex {
+    pub x: f32,
+    pub y: f32,
+    pub q: f32,
+    pub u: f32,
+    pub v: f32,
+}
+
+/// Per-pixel x gradients of the attributes 1..4 of `a` (u·q, v·q, q) over
+/// the triangle's plane; None for a degenerate triangle.
+fn x_gradients(v: &[TexVertex; 3], a: &[[f32; 4]; 3]) -> Option<[f32; 3]> {
+    let det = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
+    if det == 0.0 {
+        return None;
+    }
+    let mut g = [0.0; 3];
+    for k in 0..3 {
+        let (d1, d2) = (a[1][k + 1] - a[0][k + 1], a[2][k + 1] - a[0][k + 1]);
+        g[k] = (d1 * (v[2].y - v[0].y) - d2 * (v[1].y - v[0].y)) / det;
+    }
+    Some(g)
+}
+
+/// A triangle edge walked one row at a time: (x, u·q, v·q, q) and its
+/// per-row step, rows = ⌊y_end − y_start⌋.
+struct Edge {
+    cur: [f32; 4],
+    d: [f32; 4],
+    rows: i32,
+}
+
+impl Edge {
+    fn new(v: &[TexVertex; 3], a: &[[f32; 4]; 3], from: usize, to: usize) -> Edge {
+        let rows = (v[to].y - v[from].y) as i32;
+        let mut d = [0.0; 4];
+        if rows > 0 {
+            for k in 0..4 {
+                d[k] = (a[to][k] - a[from][k]) / rows as f32;
+            }
+        }
+        Edge { cur: a[from], d, rows: rows.max(0) }
+    }
+
+    fn step(&mut self) {
+        for k in 0..4 {
+            self.cur[k] += self.d[k];
+        }
+        self.rows -= 1;
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Blend {
     Plain,
@@ -163,20 +217,193 @@ impl Painter<'_> {
                     let bot = c[k] * (1.0 - fx) + d[k] * fx;
                     s[k] = top * (1.0 - fy) + bot * fy;
                 }
-                if s[3] < 0.5 {
+                self.over(px, py, s);
+            }
+        }
+    }
+
+    /// A premultiplied RGBA sample (0..255) over the canvas pixel (x, y),
+    /// which must be on the canvas; samples with alpha < 0.5 are dropped.
+    fn over(&mut self, x: i32, y: i32, s: [f32; 4]) {
+        if s[3] < 0.5 {
+            return;
+        }
+        let i = (y as usize * self.w + x as usize) * 4;
+        // Over the canvas (straight alpha).
+        let da = self.px[i + 3] as f32;
+        let sa = s[3] / 255.0;
+        let out_a = s[3] + da * (1.0 - sa);
+        for k in 0..3 {
+            let dst = self.px[i + k] as f32 * da / 255.0;
+            let v = s[k] + dst * (1.0 - sa);
+            self.px[i + k] = (v * 255.0 / out_a.max(1.0)).round().clamp(0.0, 255.0) as u8;
+        }
+        self.px[i + 3] = out_a.round().clamp(0.0, 255.0) as u8;
+    }
+
+    /// A perspective-textured triangle of a 64×64 texture, colour 0
+    /// transparent, nearest texel: the software renderer's
+    /// `DrawPerspectiveTriangleGenlock__FP8triangle` @ 100b8c50 (OS4
+    /// `FUN_0107fc64`). Edges are walked from the topmost vertex one row
+    /// at a time from row ⌊y⌋ (x truncated, no sub-pixel correction), the
+    /// edge that runs out first replaced by the third; a row covers
+    /// [⌊x_left⌋, ⌊x_right⌋), clipped to the canvas. u·q, v·q and q are
+    /// stepped linearly and divided every 16 pixels (spans of 16, the last
+    /// one shorter), with u, v in 1/64 texel steps in between; the texel is
+    /// `tex[(v & 0xFC0) + (u >> 6)]`.
+    pub fn textured_triangle(&mut self, tex: &Icon, v: [TexVertex; 3]) {
+        if tex.w != 64 || tex.h != 64 {
+            return;
+        }
+        let (w, h) = (self.w as i32, self.h() as i32);
+        if v.iter().all(|p| p.x < 0.0)
+            || v.iter().all(|p| p.y < 0.0)
+            || v.iter().all(|p| p.x >= w as f32)
+            || v.iter().all(|p| p.y >= h as f32)
+        {
+            return;
+        }
+        // (x, 64·u·q, 64·v·q, q) per vertex.
+        let a = v.map(|p| [p.x, 64.0 * p.u * p.q, 64.0 * p.v * p.q, p.q]);
+        let Some(grad) = x_gradients(&v, &a) else { return };
+        let mut top = if v[1].y < v[0].y { 1 } else { 0 };
+        if v[2].y < v[top].y {
+            top = 2;
+        }
+        let (next, prev) = ((top + 1) % 3, (top + 2) % 3);
+        let mut ea = Edge::new(&v, &a, top, next);
+        let mut eb = Edge::new(&v, &a, top, prev);
+        let mut y = v[top].y as i32;
+        for half in 0..2 {
+            let n = ea.rows.min(eb.rows);
+            for _ in 0..n {
+                if y >= h {
+                    return;
+                }
+                if y >= 0 {
+                    self.span_row(tex, y, &ea.cur, &eb.cur, &grad);
+                }
+                ea.step();
+                eb.step();
+                y += 1;
+            }
+            if half == 1 {
+                break;
+            }
+            if ea.rows == 0 {
+                ea = Edge::new(&v, &a, next, prev);
+            } else {
+                eb = Edge::new(&v, &a, prev, next);
+            }
+        }
+    }
+
+    /// One row of [`Painter::textured_triangle`] between the edge points
+    /// `ea` and `eb`.
+    fn span_row(&mut self, tex: &Icon, y: i32, ea: &[f32; 4], eb: &[f32; 4], grad: &[f32; 3]) {
+        let (xa, xb) = (ea[0] as i32, eb[0] as i32);
+        let (l, mut x, x1) = match xa.cmp(&xb) {
+            std::cmp::Ordering::Less => (ea, xa, xb),
+            std::cmp::Ordering::Greater => (eb, xb, xa),
+            std::cmp::Ordering::Equal => return,
+        };
+        let mut s = [l[1], l[2], l[3]];
+        if x < 0 {
+            for k in 0..3 {
+                s[k] += grad[k] * (-x) as f32;
+            }
+            x = 0;
+        }
+        let mut n = x1.min(self.w as i32) - x;
+        let (mut u, mut v) = ((s[0] / s[2]) as i32, (s[1] / s[2]) as i32);
+        while n > 0 {
+            let span = n.min(16);
+            for k in 0..3 {
+                s[k] += grad[k] * span as f32;
+            }
+            let (u1, v1) = ((s[0] / s[2]) as i32, (s[1] / s[2]) as i32);
+            let (du, dv) = if span < 16 {
+                ((u1 - u) / span, (v1 - v) / span)
+            } else {
+                ((u1 - u) >> 4, (v1 - v) >> 4)
+            };
+            for _ in 0..span {
+                let c = tex.px[(v as u32 & 0xFC0) as usize + (u >> 6).clamp(0, 63) as usize];
+                self.put(x, y, c, Blend::Plain);
+                u += du;
+                v += dv;
+                x += 1;
+            }
+            n -= span;
+        }
+    }
+
+    /// A perspective-textured triangle, bilinear-filtered: the hardware
+    /// renderer's `W3D_DrawTriangle` (OS4 `FUN_0100499c`; the Mac's GL
+    /// path filters `GL_LINEAR`, see [`Painter::icon_bilinear2`]) with
+    /// blend `(7, 8)` (source alpha, one minus source alpha). Pixel centres
+    /// inside the triangle (top-left rule) are drawn; u, v are in texels
+    /// (texel centres at i + 1/2, edges clamped), colour 0 is transparent
+    /// and texels are filtered premultiplied.
+    pub fn textured_triangle_bilinear(&mut self, tex: &Icon, v: [TexVertex; 3]) {
+        if tex.w == 0 || tex.h == 0 {
+            return;
+        }
+        let (w, h) = (self.w as i32, self.h() as i32);
+        let det = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
+        if det == 0.0 {
+            return;
+        }
+        let x0 = v.iter().map(|p| p.x).fold(f32::MAX, f32::min).floor().max(0.0) as i32;
+        let x1 = v.iter().map(|p| p.x).fold(f32::MIN, f32::max).ceil().min(w as f32) as i32;
+        let y0 = v.iter().map(|p| p.y).fold(f32::MAX, f32::min).floor().max(0.0) as i32;
+        let y1 = v.iter().map(|p| p.y).fold(f32::MIN, f32::max).ceil().min(h as f32) as i32;
+        // Edge k runs from vertex k+1 to k+2 (opposite vertex k), signed so
+        // that the inside is positive.
+        let sign = det.signum();
+        let edge = |k: usize, px: f32, py: f32| {
+            let (a, b) = (v[(k + 1) % 3], v[(k + 2) % 3]);
+            sign * ((b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x))
+        };
+        // Pixels exactly on an edge belong to one of the two triangles
+        // sharing it: the "top-left" rule.
+        let owns = |k: usize| {
+            let (a, b) = (v[(k + 1) % 3], v[(k + 2) % 3]);
+            let (dx, dy) = (sign * (b.x - a.x), sign * (b.y - a.y));
+            dy < 0.0 || (dy == 0.0 && dx > 0.0)
+        };
+        let pal = self.pal;
+        let texel = |tx: i32, ty: i32| -> [f32; 4] {
+            let tx = tx.clamp(0, tex.w as i32 - 1) as usize;
+            let ty = ty.clamp(0, tex.h as i32 - 1) as usize;
+            let c = tex.px[ty * tex.w + tx] as usize;
+            if c == 0 {
+                return [0.0; 4];
+            }
+            [pal[c * 3] as f32, pal[c * 3 + 1] as f32, pal[c * 3 + 2] as f32, 255.0]
+        };
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (cx, cy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let e = [edge(0, cx, cy), edge(1, cx, cy), edge(2, cx, cy)];
+                if (0..3).any(|k| e[k] < 0.0 || (e[k] == 0.0 && !owns(k))) {
                     continue;
                 }
-                let i = (py as usize * self.w + px as usize) * 4;
-                // Over the canvas (straight alpha).
-                let da = self.px[i + 3] as f32;
-                let sa = s[3] / 255.0;
-                let out_a = s[3] + da * (1.0 - sa);
-                for k in 0..3 {
-                    let dst = self.px[i + k] as f32 * da / 255.0;
-                    let v = s[k] + dst * (1.0 - sa);
-                    self.px[i + k] = (v * 255.0 / out_a.max(1.0)).round().clamp(0.0, 255.0) as u8;
+                let sum = e[0] + e[1] + e[2];
+                let b = e.map(|e| e / sum);
+                let q: f32 = (0..3).map(|k| b[k] * v[k].q).sum();
+                let u = (0..3).map(|k| b[k] * v[k].u * v[k].q).sum::<f32>() / q - 0.5;
+                let t = (0..3).map(|k| b[k] * v[k].v * v[k].q).sum::<f32>() / q - 0.5;
+                let (tx, ty) = (u.floor() as i32, t.floor() as i32);
+                let (fx, fy) = (u - u.floor(), t - t.floor());
+                let (a, bb, c, d) = (texel(tx, ty), texel(tx + 1, ty), texel(tx, ty + 1), texel(tx + 1, ty + 1));
+                let mut s = [0.0f32; 4];
+                for k in 0..4 {
+                    let top = a[k] * (1.0 - fx) + bb[k] * fx;
+                    let bot = c[k] * (1.0 - fx) + d[k] * fx;
+                    s[k] = top * (1.0 - fy) + bot * fy;
                 }
-                self.px[i + 3] = out_a.round().clamp(0.0, 255.0) as u8;
+                self.over(px, py, s);
             }
         }
     }

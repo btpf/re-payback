@@ -39,6 +39,13 @@ pub struct Siren {
     flash: i32,
 }
 
+impl Siren {
+    /// The light bar shows blue (`_blue` model) rather than red.
+    pub fn blue(&self) -> bool {
+        self.flash < 5
+    }
+}
+
 /// Part of a roadblock (despawned with the window like other drones).
 #[derive(Component)]
 pub struct Roadblock;
@@ -357,7 +364,10 @@ pub fn spawn_cop_world(world: &mut World, pos: IVec3, heading: i32, level: usize
 
 /// Siren loop and red/blue light bar while pursuing (68k `FUN_000e2a50`):
 /// sound 11 at 25e6 / 10000 Hz; the model alternates `_blue` (flash < 5)
-/// and `_red` every 5 ticks; the plain model returns when it stops.
+/// and `_red` every 5 ticks; the plain model returns when it stops. It is
+/// the police model's horn (Mac `DoVehicleFire` @ 10070c20, `+0x8166`
+/// branch; flash `+0x940`), so a player driving a police car or van gets
+/// it while holding the shoot/horn key (`do_Other` @ 10146280 state 2).
 #[allow(clippy::type_complexity)]
 fn sirens(
     mut commands: Commands,
@@ -367,6 +377,7 @@ fn sirens(
     mut models: Local<Option<[Handle<Mesh>; 6]>>,
     mut q: Query<(Entity, &Obj, &Vehicle, Option<&mut Siren>, &mut Mesh3d)>,
     mut sounds: Query<&mut Sound>,
+    inputs: Res<super::people::PlayerInputs>,
 ) {
     let Some(mut library) = library else { return };
     if models.is_none() {
@@ -397,7 +408,8 @@ fn sirens(
             continue;
         }
         let base = if veh.kind == vk::POLICE_VAN { 3 } else { 0 };
-        let on = matches!(obj.state, State::PursuitRoute | State::Pursuit);
+        let honk = obj.state == State::Player && inputs.0[obj.player.unwrap_or(0).min(3) as usize].fire;
+        let on = honk || matches!(obj.state, State::PursuitRoute | State::Pursuit);
         let at = SoundPos::At(obj.posf());
         match (on, siren) {
             (true, Some(mut s)) => {

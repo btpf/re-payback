@@ -299,6 +299,8 @@ fn contacts(
                     }
                 }
                 let alive = o.health >= 1;
+                // God mode (`crate::cheats`): no damage.
+                let dmg = if o.god { 0 } else { dmg };
                 o.health -= dmg;
                 let at = SoundPos::At(o.posf());
                 // "Irony bonus!": the player runs a person over with the car
