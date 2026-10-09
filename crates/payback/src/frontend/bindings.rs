@@ -23,8 +23,11 @@
 //! polls device 1 every frame next to the keyboard.
 //!
 //! Fixed, as in the original: digits 0..7 pick a weapon, Esc pauses. A
-//! gamepad's left stick and d-pad always steer and accelerate/reverse
-//! (the joystick directions); its table adds buttons. In single player,
+//! gamepad's left stick and d-pad always steer (the joystick's left and
+//! right); up/down drive forward/back only with the "Left stick
+//! forward/back" option ([`PadOptions::stick_drive`], off by default in
+//! layout 3). The table adds buttons. A twelfth action, [`HORN`], is a
+//! port addition: the original honks with the shoot key in a vehicle. In single player,
 //! Ctrl, Shift and Enter bindings accept either key of the pair
 //! (left/right, main/numpad), so the defaults behave exactly as the
 //! hard-wired keys did before.
@@ -43,8 +46,9 @@
 use bevy::input::gamepad::{ButtonSettings, GamepadConnectionEvent, RawGamepadEvent};
 use bevy::prelude::*;
 
-/// Actions in phrase order 2457..2467.
-pub const ACTIONS: [&str; 11] = [
+/// Actions in phrase order 2457..2467, then [`HORN`] (port addition, no
+/// phrase).
+pub const ACTIONS: [&str; 12] = [
     "accelerate",
     "reverse",
     "left",
@@ -56,6 +60,7 @@ pub const ACTIONS: [&str; 11] = [
     "next_weapon",
     "prev_weapon",
     "repeat_message",
+    "horn",
 ];
 
 pub const ACCELERATE: usize = 0;
@@ -69,9 +74,33 @@ pub const BRAKE: usize = 7;
 pub const NEXT_WEAPON: usize = 8;
 pub const PREV_WEAPON: usize = 9;
 pub const REPEAT_MESSAGE: usize = 10;
+/// Horn (port addition, docs/controls.md): the original honks with the
+/// shoot key while driving (`do_Other` @ 10146280 state 2, the input
+/// word's shoot bit; docs/re/vehicles.md §6.2). This action sets the
+/// same per-tick `PlayerInput::fire` bit, but only while the player is
+/// in a vehicle; on foot it does nothing. So it is what Shoot is in a
+/// vehicle (a vehicle with a gun fires it too), and replays carry it as
+/// the shoot bit.
+pub const HORN: usize = 11;
 
-pub type KeyTable = [Option<KeyCode>; 11];
-pub type PadTable = [Option<PadInput>; 11];
+/// Number of actions: the original's 11 rows plus [`HORN`].
+pub const NUM_ACTIONS: usize = ACTIONS.len();
+
+/// The shoot bit of `PlayerInput` from the held actions: Shoot (either
+/// slot), and the horn while the player is in a vehicle (`driving`; on
+/// foot the horn does nothing).
+pub fn fire_held(held: impl Fn(usize) -> bool, driving: bool) -> bool {
+    held(SHOOT) || held(SHOOT_ALT) || (driving && held(HORN))
+}
+
+/// The control-setup label of action `a`: phrases 2457..2467; the horn
+/// has none (plain English, "Horn").
+pub fn action_phrase(a: usize) -> Option<u32> {
+    (a < HORN).then_some(2457 + a as u32)
+}
+
+pub type KeyTable = [Option<KeyCode>; NUM_ACTIONS];
+pub type PadTable = [Option<PadInput>; NUM_ACTIONS];
 
 /// A gamepad control a binding can use: a button, or an axis pushed to
 /// one end (`positive`). The Mac binds any HID element, axes included, and
@@ -150,13 +179,20 @@ pub struct PadOptions {
     /// Trigger threshold in percent: how far LT/RT must be pulled to count.
     pub trigger: u8,
     pub labels: LabelStyle,
+    /// "Left stick forward/back" (`pad.stick_drive`): the joystick's up
+    /// and down (left stick or d-pad) accelerate and reverse in game, as
+    /// the original's joystick directions did. Off by default (layout 3
+    /// drives with A / X; the stick only steers). The menus navigate with
+    /// all four directions either way.
+    pub stick_drive: bool,
     /// Settings-file layout of the pad tables: 1 = files from before the
-    /// modern defaults (no `pad.layout`), [`PAD_LAYOUT`] = now.
+    /// modern defaults (no `pad.layout`), 2 = RT/LT drive and A shoots,
+    /// [`PAD_LAYOUT`] = now ([`PAD`]).
     pub layout: u8,
 }
 
 /// Current pad-table layout (`pad.layout`).
-pub const PAD_LAYOUT: u8 = 2;
+pub const PAD_LAYOUT: u8 = 3;
 
 pub const DEADZONE_RANGE: (u8, u8) = (10, 90);
 pub const TRIGGER_RANGE: (u8, u8) = (5, 90);
@@ -167,6 +203,7 @@ impl Default for PadOptions {
             deadzone: 50,
             trigger: 30,
             labels: LabelStyle::Auto,
+            stick_drive: false,
             layout: PAD_LAYOUT,
         }
     }
@@ -369,9 +406,18 @@ pub struct PadState<'a> {
 impl PadState<'_> {
     /// The joystick directions (left, right, up, down): left stick past
     /// the deadzone or d-pad, opposite directions cancelling, a direction
-    /// held since the pad connected ignored until released.
+    /// held since the pad connected ignored until released. The menus
+    /// use all four.
     pub fn directions(&self) -> [bool; 4] {
         self.dirs
+    }
+
+    /// The fixed directions in game (left, right, forward, back): left and
+    /// right always steer; up and down drive only with
+    /// [`PadOptions::stick_drive`] (layout 3 drives with A / X instead).
+    pub fn game_directions(&self, opts: &PadOptions) -> [bool; 4] {
+        let [l, r, u, d] = self.dirs;
+        [l, r, u && opts.stick_drive, d && opts.stick_drive]
     }
 }
 
@@ -398,6 +444,8 @@ const SP_KEYS: KeyTable = [
     Some(KeyCode::Insert),
     Some(KeyCode::Delete),
     Some(KeyCode::KeyM),
+    // Horn (port addition): H, free in the single-player map.
+    Some(KeyCode::KeyH),
 ];
 
 /// Fixed next-weapon keys besides the binding (Mac `UpdateInputStatus`
@@ -408,12 +456,40 @@ pub const NEXT_WEAPON_ALIASES: [KeyCode; 3] = [KeyCode::F3, KeyCode::F10, KeyCod
 /// Fixed previous-weapon keys (Forward-Delete, F2, F9, keypad −).
 pub const PREV_WEAPON_ALIASES: [KeyCode; 4] = [KeyCode::Delete, KeyCode::F2, KeyCode::F9, KeyCode::NumpadSubtract];
 
-/// A gamepad (layout 2, docs/controls.md); up/down/left/right also come
-/// from the left stick and d-pad. RT accelerate, LT reverse, A fire (X
-/// too), Y in/out, B brake, RB/LB next/previous weapon, Back repeats the
-/// last message (Xbox names; PlayStation R2 L2 Cross Square Triangle
-/// Circle R1 L1 Share, Switch ZR ZL B Y X A R L −).
+/// A gamepad (layout 3, docs/controls.md), on foot and in vehicles
+/// alike: A accelerates / walks forward, X reverses / walks back, the left
+/// stick's left/right (and the d-pad's) steer, RB brakes (the handbrake),
+/// RT shoots (punches unarmed; in a vehicle the horn or the vehicle's gun,
+/// as the original's shoot key), Y gets in / out, B is the horn (in
+/// vehicles only), LB / LT next / previous weapon (under the left index
+/// finger, usable while the thumb steers; the d-pad is not), Back repeats
+/// the last message. Shoot's second slot is free on purpose: RT is the
+/// one fire button. Xbox names; PlayStation Cross Square R2 Triangle R1
+/// L1 L2 Share Circle, Switch B Y ZR X R L ZL − A.
 pub const PAD: PadTable = {
+    use GamepadButton::*;
+    use PadInput::Button as B;
+    [
+        Some(B(South)),
+        Some(B(West)),
+        Some(B(DPadLeft)),
+        Some(B(DPadRight)),
+        Some(B(RightTrigger2)),
+        None,
+        Some(B(North)),
+        Some(B(RightTrigger)),
+        Some(B(LeftTrigger)),
+        Some(B(LeftTrigger2)),
+        Some(B(Select)),
+        Some(B(East)),
+    ]
+};
+
+/// The layout-2 pad default: RT accelerate, LT reverse, A fire (X too),
+/// Y in/out, B brake, RB / LB next / previous weapon, Back repeat
+/// message; the stick and d-pad drove forward/back. Tables still equal to
+/// it move to [`PAD`].
+const PAD_V2: PadTable = {
     use GamepadButton::*;
     use PadInput::Button as B;
     [
@@ -428,17 +504,25 @@ pub const PAD: PadTable = {
         Some(B(RightTrigger)),
         Some(B(LeftTrigger)),
         Some(B(Select)),
+        None,
     ]
 };
 
 /// The pad default before layout 2 (no shoot-alt or repeat-message
 /// button); tables still equal to it move to [`PAD`].
 const PAD_V1: PadTable = {
-    let mut t = PAD;
+    let mut t = PAD_V2;
     t[SHOOT_ALT] = None;
     t[REPEAT_MESSAGE] = None;
     t
 };
+
+/// A table equals an old default in the original's 11 actions (files
+/// from before layout 3 have no horn line, so the horn holds whatever
+/// the table started with).
+fn same_eleven(a: &PadTable, b: &PadTable) -> bool {
+    a[..HORN] == b[..HORN]
+}
 
 /// Multiplayer keyboard key sets, so that up to four players can share a
 /// keyboard.
@@ -457,6 +541,7 @@ const MP_KEYS: [KeyTable; 4] = {
             Some(PageDown),
             Some(Delete),
             None,
+            None,
         ],
         [
             Some(KeyW),
@@ -469,6 +554,7 @@ const MP_KEYS: [KeyTable; 4] = {
             Some(ShiftLeft),
             Some(KeyE),
             Some(KeyQ),
+            None,
             None,
         ],
         [
@@ -483,6 +569,7 @@ const MP_KEYS: [KeyTable; 4] = {
             Some(NumpadAdd),
             Some(NumpadSubtract),
             None,
+            None,
         ],
         [
             Some(KeyI),
@@ -495,6 +582,7 @@ const MP_KEYS: [KeyTable; 4] = {
             Some(KeyN),
             Some(KeyO),
             Some(KeyU),
+            None,
             None,
         ],
     ]
@@ -577,23 +665,36 @@ impl Controls {
         self.mp_keys = MP_KEYS;
     }
 
-    /// Settings files from before layout 2: pad tables still on the old
-    /// default take the new one (edited tables are kept).
+    /// Settings files from before layout 3: pad tables still on an old
+    /// default (layout 1 or 2) take the new one; edited tables are kept,
+    /// and so is their behaviour: the horn goes unbound if its default
+    /// button already has an action there, and the stick and d-pad keep
+    /// driving forward/back ([`PadOptions::stick_drive`]) if gamepad 1's
+    /// table is an edited one.
     pub fn upgrade(&mut self) {
-        if self.opts.layout < PAD_LAYOUT {
-            for t in &mut self.pads {
-                if *t == PAD_V1 {
-                    *t = PAD;
+        if self.opts.layout >= PAD_LAYOUT {
+            return;
+        }
+        for (n, t) in self.pads.iter_mut().enumerate() {
+            if same_eleven(t, &PAD_V1) || same_eleven(t, &PAD_V2) {
+                *t = PAD;
+            } else {
+                if t[..HORN].contains(&PAD[HORN]) {
+                    t[HORN] = None;
+                }
+                // The option is shared; gamepad 1 (single player) decides.
+                if n == 0 {
+                    self.opts.stick_drive = true;
                 }
             }
-            self.opts.layout = PAD_LAYOUT;
         }
+        self.opts.layout = PAD_LAYOUT;
     }
 
     /// Settings-file lines (`key.<action>`, `pad.<action>` = gamepad 1,
     /// `pad<n>.<action>` = gamepad n, `mp<n>.key.<action>` = key set n).
     pub fn write(&self, t: &mut String) {
-        let mut table = |prefix: &str, names: [String; 11]| {
+        let mut table = |prefix: &str, names: [String; NUM_ACTIONS]| {
             for (a, n) in ACTIONS.iter().zip(names) {
                 t.push_str(&format!("{prefix}{a} = {n}\n"));
             }
@@ -609,7 +710,9 @@ impl Controls {
         // After the pad tables: `pad.layout` marks a file as current.
         let o = &self.opts;
         t.push_str(&format!("pad.deadzone = {}\npad.trigger = {}\n", o.deadzone, o.trigger));
-        t.push_str(&format!("pad.labels = {}\npad.layout = {}\n", o.labels.id(), o.layout.max(PAD_LAYOUT)));
+        t.push_str(&format!("pad.labels = {}\n", o.labels.id()));
+        t.push_str(&format!("pad.stick_drive = {}\n", if o.stick_drive { "on" } else { "off" }));
+        t.push_str(&format!("pad.layout = {}\n", o.layout.max(PAD_LAYOUT)));
     }
 
     /// One settings-file line; false if the key is not a binding.
@@ -626,6 +729,10 @@ impl Controls {
             }
             "pad.labels" => {
                 o.labels = LabelStyle::parse(v).unwrap_or_default();
+                return true;
+            }
+            "pad.stick_drive" => {
+                o.stick_drive = matches!(v, "on" | "1" | "true");
                 return true;
             }
             "pad.layout" => {
@@ -758,10 +865,18 @@ impl PadSlots {
     }
 }
 
-/// Keep [`PadSlots`] in step with the connected gamepads.
+/// The `--pad-sim` pad's entity, once it exists.
+static SIM_PAD: std::sync::OnceLock<Entity> = std::sync::OnceLock::new();
+
+/// Keep [`PadSlots`] in step with the connected gamepads. With
+/// `--pad-sim`, only the virtual pad gets a number (a real pad plugged
+/// into the test machine would otherwise be gamepad 1 and take single
+/// player).
 pub fn assign_pads(mut slots: ResMut<PadSlots>, pads: Query<(Entity, &Gamepad, Option<&Name>)>) {
+    let sim = crate::arg("--pad-sim").is_some();
     let list: Vec<_> = pads
         .iter()
+        .filter(|(e, ..)| !sim || SIM_PAD.get() == Some(e))
         .map(|(e, g, n)| (e, (n.map_or_else(String::new, |n| n.as_str().to_string()), g.vendor_id(), g.product_id())))
         .collect();
     let changed = list.len() != slots.slots.iter().flatten().filter(|s| s.connected).count()
@@ -771,8 +886,8 @@ pub fn assign_pads(mut slots: ResMut<PadSlots>, pads: Query<(Entity, &Gamepad, O
     }
 }
 
-/// Settings files from before the modern pad defaults: untouched pad
-/// tables take them (`Startup`; [`Controls::upgrade`]).
+/// Settings files from before the current pad defaults (layout 1 or 2):
+/// untouched pad tables take them (`Startup`; [`Controls::upgrade`]).
 pub fn upgrade_pad_layout(mut settings: ResMut<super::progress::Settings>) {
     if settings.controls.opts.layout < PAD_LAYOUT {
         settings.controls.upgrade();
@@ -934,7 +1049,8 @@ pub fn pad_menu_input<'a>(
 /// gamepad that connects at start and presses each control (a
 /// [`pad_id`] name such as `DPadDown`, `South`, `LeftStickY-`; or
 /// `disconnect` / `connect`) at the given real time for 0.15 s or the
-/// hold time. `--pad-sim-name` names it (default "Xbox Controller
+/// hold time; it is the only pad that gets a number ([`assign_pads`]).
+/// `--pad-sim-name` names it (default "Xbox Controller
 /// (virtual)"), `--pad-sim-vendor <hex>` sets its USB vendor id.
 /// `PreUpdate`, before the input systems.
 pub fn simulate_pad(
@@ -953,6 +1069,7 @@ pub fn simulate_pad(
     };
     let (e, events) = state.get_or_insert_with(|| {
         let e = commands.spawn_empty().id();
+        let _ = SIM_PAD.set(e);
         connect.write(GamepadConnectionEvent::new(e, connection()));
         let mut events = Vec::new();
         for item in script.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -1287,14 +1404,17 @@ mod tests {
             deadzone: 35,
             trigger: 15,
             labels: LabelStyle::Nintendo,
+            stick_drive: true,
             layout: PAD_LAYOUT,
         };
+        c.set_key(0, HORN, Some(KeyCode::KeyG));
+        c.set_pad(4, HORN, Some(PadInput::Axis(GamepadAxis::LeftStickY, true)));
         let mut t = String::new();
         c.write(&mut t);
         let mut d = Controls {
-            keys: [None; 11],
-            pads: [[None; 11]; 4],
-            mp_keys: [[None; 11]; 4],
+            keys: [None; NUM_ACTIONS],
+            pads: [[None; NUM_ACTIONS]; 4],
+            mp_keys: [[None; NUM_ACTIONS]; 4],
             opts: PadOptions::default(),
         };
         for line in t.lines() {
@@ -1305,6 +1425,15 @@ mod tests {
         assert_eq!(d.pads[2][BRAKE], Some(PadInput::Button(GamepadButton::West)));
         assert_eq!(d.pads[0][SHOOT_ALT], Some(PadInput::Axis(GamepadAxis::RightZ, true)));
         assert_eq!(d.mp_keys[1][SHOOT], None);
+        assert_eq!(d.keys[HORN], Some(KeyCode::KeyG));
+        assert_eq!(d.pads[3][HORN], Some(PadInput::Axis(GamepadAxis::LeftStickY, true)));
+        assert!(d.opts.stick_drive);
+        assert!(t.contains("pad.horn = East
+") && t.contains("pad4.horn = LeftStickY+
+"));
+        assert!(t.contains("pad.stick_drive = on
+") && t.contains("pad.layout = 3
+"));
         assert!(!d.read("key.fly", "KeyF"));
         assert!(!d.read("pad5.brake", "West"));
         assert!(d.read("mp2.pad.brake", "East"), "old per-player pad lines are skipped");
@@ -1358,25 +1487,50 @@ mod tests {
         use GamepadButton::*;
         let c = Controls::default();
         assert!(c.pads.iter().all(|t| *t == PAD));
+        assert_eq!(PAD_LAYOUT, 3);
         let b = |a: usize| PAD[a];
-        assert_eq!(b(ACCELERATE), Some(PadInput::Button(RightTrigger2)));
-        assert_eq!(b(REVERSE), Some(PadInput::Button(LeftTrigger2)));
-        assert_eq!(b(SHOOT), Some(PadInput::Button(South)));
-        assert_eq!(b(SHOOT_ALT), Some(PadInput::Button(West)));
-        assert_eq!(b(IN_OUT), Some(PadInput::Button(North)));
-        assert_eq!(b(BRAKE), Some(PadInput::Button(East)));
-        assert_eq!(b(NEXT_WEAPON), Some(PadInput::Button(RightTrigger)));
-        assert_eq!(b(PREV_WEAPON), Some(PadInput::Button(LeftTrigger)));
-        assert_eq!(b(REPEAT_MESSAGE), Some(PadInput::Button(Select)));
-        // Every action bound, no button twice, Start (pause) left free.
-        let mut all: Vec<String> = PAD.iter().map(|b| pad_id(b.unwrap())).collect();
+        let x = |b: GamepadButton| Some(PadInput::Button(b));
+        // Layout 3 (Xbox names): A forward, X reverse, d-pad left/right
+        // steer, RT shoot, Y in/out, RB handbrake, LB / LT next / previous
+        // weapon, Back repeats the message, B horn.
+        assert_eq!(b(ACCELERATE), x(South));
+        assert_eq!(b(REVERSE), x(West));
+        assert_eq!(b(LEFT), x(DPadLeft));
+        assert_eq!(b(RIGHT), x(DPadRight));
+        assert_eq!(b(SHOOT), x(RightTrigger2));
+        assert_eq!(b(SHOOT_ALT), None, "deliberately free: RT is the one fire button");
+        assert_eq!(b(IN_OUT), x(North));
+        assert_eq!(b(BRAKE), x(RightTrigger));
+        assert_eq!(b(NEXT_WEAPON), x(LeftTrigger));
+        assert_eq!(b(PREV_WEAPON), x(LeftTrigger2));
+        assert_eq!(b(REPEAT_MESSAGE), x(Select));
+        assert_eq!(b(HORN), x(East));
+        assert_eq!(ACTIONS[HORN], "horn");
+        assert_eq!((action_phrase(SHOOT), action_phrase(REPEAT_MESSAGE), action_phrase(HORN)), (Some(2461), Some(2467), None));
+        // Every other action bound, no button twice, Start (pause) left free.
+        let mut all: Vec<String> = PAD.iter().flatten().map(|b| pad_id(*b)).collect();
         all.sort();
         all.dedup();
-        assert_eq!(all.len(), ACTIONS.len());
-        assert!(!PAD.contains(&Some(PadInput::Button(Start))));
-        // The keyboard is unchanged.
+        assert_eq!(all.len(), ACTIONS.len() - 1);
+        assert!(!PAD.contains(&x(Start)));
+        // The stick only steers by default.
+        assert!(!c.opts.stick_drive);
+        // The keyboard is unchanged, plus H for the horn.
         assert_eq!(c.keys, SP_KEYS);
         assert_eq!(c.keys[ACCELERATE], Some(KeyCode::ArrowUp));
+        assert_eq!(c.keys[HORN], Some(KeyCode::KeyH));
+        assert!(c.mp_keys.iter().all(|t| t[HORN].is_none()), "shared keyboard: horn unbound");
+    }
+
+    /// The horn is the shoot bit in a vehicle only; Shoot works anywhere.
+    #[test]
+    fn horn_only_in_vehicles() {
+        let held = |on: &'static [usize]| move |a: usize| on.contains(&a);
+        assert!(!fire_held(held(&[HORN]), false), "on foot the horn does nothing");
+        assert!(fire_held(held(&[HORN]), true), "in a vehicle it honks (the shoot bit)");
+        assert!(fire_held(held(&[SHOOT]), false) && fire_held(held(&[SHOOT]), true));
+        assert!(fire_held(held(&[SHOOT_ALT]), false));
+        assert!(!fire_held(held(&[BRAKE, IN_OUT]), true));
     }
 
     #[test]
@@ -1440,43 +1594,95 @@ mod tests {
         assert!(c.read("pad.trigger", "x") && c.opts.trigger == 30);
     }
 
-    #[test]
-    fn old_settings_upgrade() {
-        // A file from before layout 2: the old pad defaults, one edited table.
-        let mut old = Controls { pads: [PAD_V1; 4], ..Controls::default() };
-        old.pads[1][BRAKE] = Some(PadInput::Button(GamepadButton::LeftThumb));
-        let mut t = String::new();
-        old.write(&mut t);
-        let t: String = t.lines().filter(|l| !l.starts_with("pad.layout") && !l.starts_with("pad.deadzone")).map(|l| format!("{l}\n")).collect();
+    /// Read settings-file text into the defaults, as `Settings::load`.
+    fn load(t: &str) -> Controls {
         let mut c = Controls::default();
         for line in t.lines() {
             let (k, v) = line.split_once('=').unwrap();
             c.read(k.trim(), v.trim());
         }
+        c
+    }
+
+    /// The lines a file of `layout` wrote: no horn and no stick-drive line
+    /// before layout 3, no `pad.layout` before layout 2.
+    fn old_file(c: &Controls, layout: u8) -> String {
+        let mut t = String::new();
+        c.write(&mut t);
+        t.lines()
+            .filter(|l| !l.contains(".horn ") && !l.starts_with("pad.stick_drive"))
+            .filter(|l| !(layout < 2 && (l.starts_with("pad.layout") || l.starts_with("pad.deadzone"))))
+            .map(|l| if l.starts_with("pad.layout") { format!("pad.layout = {layout}
+") } else { format!("{l}
+") })
+            .collect()
+    }
+
+    #[test]
+    fn old_settings_upgrade() {
+        // A file from before layout 2: the old pad defaults, one edited table.
+        let mut old = Controls { pads: [PAD_V1; 4], ..Controls::default() };
+        old.pads[1][BRAKE] = Some(PadInput::Button(GamepadButton::LeftThumb));
+        let mut c = load(&old_file(&old, 1));
         assert_eq!(c.opts.layout, 1);
         c.upgrade();
         assert_eq!(c.opts.layout, PAD_LAYOUT);
         assert_eq!(c.pads[0], PAD, "untouched table takes the new defaults");
         assert_eq!(c.pads[1][SHOOT_ALT], None, "edited table kept");
         assert_eq!(c.pads[1][BRAKE], Some(PadInput::Button(GamepadButton::LeftThumb)));
+        assert!(!c.opts.stick_drive, "gamepad 1 took the new layout");
         // A current file stays as written.
         let mut cur = Controls::default();
-        cur.pads[0][SHOOT_ALT] = None;
-        cur.pads[0][REPEAT_MESSAGE] = None;
+        cur.pads[0][SHOOT_ALT] = Some(PadInput::Button(GamepadButton::DPadUp));
+        cur.pads[0][HORN] = None;
         let mut t = String::new();
         cur.write(&mut t);
-        let mut d = Controls::default();
-        for line in t.lines() {
-            let (k, v) = line.split_once('=').unwrap();
-            d.read(k.trim(), v.trim());
-        }
+        let mut d = load(&t);
         d.upgrade();
-        assert_eq!(d.pads[0], PAD_V1);
+        assert_eq!(d, cur);
         // Reset.
         d.reset_pads();
         d.keys[SHOOT] = None;
         d.reset_keys();
         assert_eq!(d, Controls::default());
+    }
+
+    /// Layout 2 (the previous defaults, e.g. the user's Payback.cfg) moves
+    /// to layout 3; an edited gamepad-1 table is left alone, with its horn
+    /// off its brake button and the stick still driving.
+    #[test]
+    fn layout_2_upgrade() {
+        let old = Controls { pads: [PAD_V2; 4], ..Controls::default() };
+        let t = old_file(&old, 2);
+        assert!(t.contains("pad.accelerate = RightTrigger2
+") && t.contains("pad.layout = 2
+"));
+        let mut c = load(&t);
+        assert_eq!(c.opts.layout, 2);
+        c.upgrade();
+        assert_eq!(c.pads, [PAD; 4]);
+        assert_eq!((c.opts.layout, c.opts.stick_drive), (PAD_LAYOUT, false));
+        let mut out = String::new();
+        c.write(&mut out);
+        assert!(out.contains("pad.accelerate = South
+") && out.contains("pad.horn = East
+"));
+        assert!(out.contains("pad.layout = 3
+") && out.contains("pad.stick_drive = off
+"));
+        // Saved and loaded again: nothing more changes.
+        let mut again = load(&out);
+        again.upgrade();
+        assert_eq!(again, c);
+        // Gamepad 1 edited (shoot on RB), gamepad 2 default.
+        let mut edited = old.clone();
+        edited.pads[0][SHOOT] = Some(PadInput::Button(GamepadButton::RightTrigger));
+        let mut c = load(&old_file(&edited, 2));
+        c.upgrade();
+        assert_eq!(c.pads[0][..HORN], edited.pads[0][..HORN], "edited table kept");
+        assert_eq!(c.pads[0][HORN], None, "B is its brake: no horn on it");
+        assert_eq!(c.pads[1], PAD);
+        assert!(c.opts.stick_drive, "the stick keeps driving for the edited table");
     }
 
     #[test]
@@ -1582,8 +1788,11 @@ mod tests {
             pub now: f32,
             pub nav: Vec<(Entity, NavRepeat)>,
             pub input: Input,
-            /// The single-player directions (as `sim::people` reads them).
+            /// The pad's raw directions (menus) and the in-game ones
+            /// (`game_directions`, as `sim::people` reads them).
             pub steer: [bool; 4],
+            pub game: [bool; 4],
+            pub opts: PadOptions,
         }
 
         fn read(pads: Query<(Entity, &Gamepad)>, axes: Res<PadAxes>, mut m: ResMut<Menu>) {
@@ -1592,6 +1801,7 @@ mod tests {
             pad_menu_input(pads.iter(), &axes, &mut m.nav, m.now, &mut input);
             m.input = input;
             m.steer = pads.iter().next().map_or([false; 4], |(e, g)| axes.state(e, g).directions());
+            m.game = pads.iter().next().map_or([false; 4], |(e, g)| axes.state(e, g).game_directions(&m.opts));
         }
 
         pub fn app() -> (App, Entity) {
@@ -1637,6 +1847,10 @@ mod tests {
 
         pub fn steer(app: &App) -> [bool; 4] {
             app.world().resource::<Menu>().steer
+        }
+
+        pub fn game(app: &App) -> [bool; 4] {
+            app.world().resource::<Menu>().game
         }
 
         pub fn axis(pad: Entity, a: GamepadAxis, v: f32) -> RawGamepadEvent {
@@ -1761,5 +1975,35 @@ mod tests {
         assert_eq!(steer(&app), [false, false, false, true]);
         frame(&mut app, 8.0, &[button(pad, GamepadButton::DPadDown, 0.0)]);
         assert!(frame(&mut app, 8.05, &[button(pad, GamepadButton::DPadDown, 1.0)]).down);
+    }
+
+    /// Layout 3: the left stick's up/down navigate the menus but do not
+    /// drive in game (A / X do); its left/right steer; the "Left stick
+    /// forward/back" option brings the original's joystick driving back.
+    #[test]
+    fn stick_up_down_menus_only() {
+        use rig::*;
+        let (mut app, pad) = app();
+        frame(&mut app, 0.0, &[]);
+        let i = frame(&mut app, 0.05, &[axis(pad, GamepadAxis::LeftStickY, 0.9)]);
+        assert!(i.up, "the menus take stick up");
+        assert_eq!(steer(&app), [false, false, true, false]);
+        assert_eq!(game(&app), [false; 4], "in game, stick up does nothing");
+        let i = frame(&mut app, 0.1, &[axis(pad, GamepadAxis::LeftStickY, -0.9), button(pad, GamepadButton::DPadDown, 1.0)]);
+        assert!(i.down);
+        assert_eq!(game(&app), [false; 4], "nor stick or d-pad down");
+        frame(&mut app, 0.15, &[axis(pad, GamepadAxis::LeftStickY, 0.0), button(pad, GamepadButton::DPadDown, 0.0)]);
+        frame(&mut app, 0.2, &[axis(pad, GamepadAxis::LeftStickX, -0.9)]);
+        assert_eq!(game(&app), [true, false, false, false], "stick left steers");
+        frame(&mut app, 0.25, &[axis(pad, GamepadAxis::LeftStickX, 0.0), button(pad, GamepadButton::DPadRight, 1.0)]);
+        assert_eq!(game(&app), [false, true, false, false], "d-pad right steers");
+        frame(&mut app, 0.3, &[button(pad, GamepadButton::DPadRight, 0.0)]);
+        // The option on: the stick drives forward/back again.
+        app.world_mut().resource_mut::<rig::Menu>().opts.stick_drive = true;
+        frame(&mut app, 0.35, &[axis(pad, GamepadAxis::LeftStickY, 0.9)]);
+        assert_eq!(game(&app), [false, false, true, false]);
+        // A and X are plain buttons for the bindings (accelerate, reverse).
+        frame(&mut app, 0.4, &[axis(pad, GamepadAxis::LeftStickY, 0.0), button(pad, GamepadButton::South, 1.0)]);
+        assert!(held(&app, pad, PAD[ACCELERATE].unwrap()) && !held(&app, pad, PAD[REVERSE].unwrap()));
     }
 }

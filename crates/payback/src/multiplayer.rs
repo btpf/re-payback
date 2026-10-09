@@ -191,7 +191,9 @@ pub(crate) fn cycle_weapon(ars: &Arsenal, d: i32) -> Option<u8> {
 
 /// Each player's device into their controls (single player:
 /// `people::read_keyboard`), through the bindings of the player's key set
-/// or of the player's gamepad column.
+/// or of the player's gamepad column. The pad's up/down drive only with
+/// the stick-drive option; the horn (`bindings::HORN`, port addition) is
+/// the shoot bit while the player is in a vehicle.
 fn read_devices(
     mode: Res<GameMode>,
     devices: Res<MpDevices>,
@@ -199,7 +201,7 @@ fn read_devices(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<(Entity, &Gamepad)>,
     (slots, axes): (Res<crate::frontend::bindings::PadSlots>, Res<crate::frontend::bindings::PadAxes>),
-    players: Query<(&Obj, &Arsenal), With<CameraTarget>>,
+    players: Query<(&Obj, &Arsenal, Has<crate::vehicles::Vehicle>), With<CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
     smooth: Res<crate::frame::Smooth>,
     mut latch: Local<(u64, [[bool; 6]; 4])>,
@@ -221,6 +223,8 @@ fn read_devices(
     for p in 0..mode.players() {
         let input = &mut inputs.0[p];
         let mut step = 0;
+        let me = players.iter().find(|(o, ..)| o.player == Some(p as u8));
+        let driving = me.is_some_and(|(.., v)| v);
         match devices.0.get(p).copied().unwrap_or(Device::Off) {
             Device::Off => {
                 input.left = false;
@@ -238,7 +242,7 @@ fn read_devices(
                 input.right = held(b::RIGHT);
                 input.accel = held(b::ACCELERATE);
                 input.reverse = held(b::REVERSE);
-                input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+                input.fire = b::fire_held(held, driving);
                 input.brake = held(b::BRAKE);
                 input.use_pressed |= just(b::IN_OUT);
                 if just(b::PREV_WEAPON) {
@@ -264,12 +268,12 @@ fn read_devices(
                 let t = &controls.pads[n as usize % 4];
                 let pad = axes.state(e, g);
                 let held = |a: usize| pad_held(&pad, t[a]);
-                let [l, r, u, d] = pad.directions();
+                let [l, r, u, d] = pad.game_directions(&controls.opts);
                 input.left = l || held(b::LEFT);
                 input.right = r || held(b::RIGHT);
                 input.accel = u || held(b::ACCELERATE);
                 input.reverse = d || held(b::REVERSE);
-                input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+                input.fire = b::fire_held(held, driving);
                 input.brake = held(b::BRAKE);
                 input.use_pressed |= pad_just(&pad, t[b::IN_OUT]);
                 if pad_just(&pad, t[b::PREV_WEAPON]) {
@@ -288,7 +292,7 @@ fn read_devices(
             }
         }
         if step != 0 {
-            let ars = players.iter().find(|(o, _)| o.player == Some(p as u8)).map(|(_, a)| a);
+            let ars = me.map(|(_, a, _)| a);
             if let Some(slot) = ars.and_then(|a| cycle_weapon(a, step)) {
                 input.weapon_pressed = Some(slot);
             }

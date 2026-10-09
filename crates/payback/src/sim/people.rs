@@ -404,18 +404,21 @@ pub fn make_player(commands: &mut Commands, e: Entity, player: u8) {
 /// Single-player controls: the keyboard and the first gamepad, through
 /// the control setup's tables (`frontend::bindings`, `DAT_012a63fc`
 /// tables 0 and 1). Digits 0..7 pick a weapon directly; next/previous
-/// weapon step through the carried ones.
+/// weapon step through the carried ones. The pad's stick and d-pad steer;
+/// their up/down drive only with the "Left stick forward/back" option
+/// (`PadOptions::game_directions`). The horn (port addition,
+/// `bindings::HORN`) is the shoot bit while the player is in a vehicle.
 fn read_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<GameMode>,
     settings: Option<Res<crate::frontend::progress::Settings>>,
     pads: Query<(Entity, &Gamepad)>,
-    player: Query<(&Obj, &crate::sim::combat::Arsenal), With<crate::camera::CameraTarget>>,
+    player: Query<(&Obj, &crate::sim::combat::Arsenal, Has<crate::vehicles::Vehicle>), With<crate::camera::CameraTarget>>,
     mut inputs: ResMut<PlayerInputs>,
     mut dialog: ResMut<crate::hud::Dialog>,
     smooth: Res<crate::frame::Smooth>,
     (slots, axes): (Res<crate::frontend::bindings::PadSlots>, Res<crate::frontend::bindings::PadAxes>),
-    mut latch: Local<(u64, [bool; 6])>,
+    (mut latch, mut logged): (Local<(u64, [bool; 6])>, Local<String>),
 ) {
     use crate::frontend::bindings::{self as b, key_held, key_just, pad_held, pad_just};
     // Multiplayer devices are read by `multiplayer::read_devices`.
@@ -434,8 +437,12 @@ fn read_keyboard(
     // The lowest-numbered connected pad (`bindings::PadSlots`).
     let pad = slots.first().and_then(|e| pads.get(e).ok()).map(|(e, g)| axes.state(e, g));
     let pad = pad.as_ref();
-    // Left stick (past the deadzone) and d-pad: left, right, up, down.
-    let [sl, sr, su, sd] = pad.map_or([false; 4], |p| p.directions());
+    // Left stick (past the deadzone) and d-pad: left, right, and up / down
+    // with the stick-drive option.
+    let [sl, sr, su, sd] = pad.map_or([false; 4], |p| p.game_directions(&controls.opts));
+    // The player's object (the vehicle while driving).
+    let me = player.iter().find(|(o, ..)| o.player.unwrap_or(0) == 0);
+    let driving = me.is_some_and(|(.., v)| v);
     let held = |a: usize| key_held(&keys, k[a], true) || pad.is_some_and(|g| pad_held(g, p[a]));
     let just = |a: usize| key_just(&keys, k[a], true) || pad.is_some_and(|g| pad_just(g, p[a]));
     let input = &mut inputs.0[0];
@@ -443,7 +450,7 @@ fn read_keyboard(
     input.right = held(b::RIGHT) || sr;
     input.accel = held(b::ACCELERATE) || su;
     input.reverse = held(b::REVERSE) || sd;
-    input.fire = held(b::SHOOT) || held(b::SHOOT_ALT);
+    input.fire = b::fire_held(held, driving);
     input.brake = held(b::BRAKE);
     // The original reads the input once per tick; here it is read every
     // frame, so a press that starts and ends between two ticks is kept
@@ -466,6 +473,18 @@ fn read_keyboard(
     }
     if just(b::IN_OUT) {
         input.use_pressed = true;
+    }
+    // `--pad-debug`: the controls as the sim gets them, on each change.
+    if b::pad_debug_enabled() {
+        let names = ["left", "right", "accel", "reverse", "fire", "brake", "in/out"];
+        let on = [input.left, input.right, input.accel, input.reverse, input.fire, input.brake, input.use_pressed];
+        let now: Vec<&str> = names.iter().zip(on).filter(|(_, o)| *o).map(|(n, _)| *n).collect();
+        let now = format!("[{}]{}", now.join(" "), if driving { " in a vehicle" } else { " on foot" });
+        if *logged != now {
+            let at = me.map(|(o, ..)| o.posf().round());
+            b::pad_log(format_args!("player 1 input {now}, at {at:?}"));
+            *logged = now;
+        }
     }
     // Repeat the last message (`FUN_01015a10`): on the key's release
     // (`FUN_0103f3d0`), on the button's press (`FUN_0103da68`). Only the
@@ -497,7 +516,7 @@ fn read_keyboard(
         0
     };
     if step != 0 {
-        let ars = player.iter().find(|(o, _)| o.player.unwrap_or(0) == 0).map(|(_, a)| a);
+        let ars = me.map(|(_, a, _)| a);
         if let Some(slot) = ars.and_then(|a| crate::multiplayer::cycle_weapon(a, step)) {
             input.weapon_pressed = Some(slot);
         }

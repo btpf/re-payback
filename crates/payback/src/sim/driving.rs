@@ -1393,7 +1393,11 @@ fn horns(
         let Ok((e, obj, veh, mut d)) = q.get_mut(e__) else { continue };
         if obj.state == State::Player && !TYPES[veh.kind].police {
             let fire = inputs.0[obj.player.unwrap_or(0).min(3) as usize].fire;
+            let was = d.horn.is_some();
             super::vehicle_ai::horn(&mut commands, &mut sounds, &mut d, e, veh, obj, fire);
+            if !was && d.horn.is_some() {
+                crate::frontend::bindings::pad_log(format_args!("player {} horn sounds", obj.player.unwrap_or(0) + 1));
+            }
         }
         if !d.honked
             && let Some(s) = d.horn.take()

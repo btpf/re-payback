@@ -507,7 +507,8 @@ fn pad_style(c: &Controls, n: usize) -> bindings::LabelStyle {
 }
 
 /// Control setup (`FUN_0102e75c`): one column of 11 bindings per device
-/// table (`bindings.rs`), scrolled sideways, then Done and Cancel.
+/// table (`bindings.rs`), scrolled sideways, then Done and Cancel. A
+/// twelfth row, Horn, is a port addition (`bindings::HORN`).
 ///
 /// The selection is `column*11 + action`, then Done (`0x79` in the
 /// original's 11 columns) and Cancel (`0x7a`, the start). Up from an
@@ -524,8 +525,8 @@ fn pad_style(c: &Controls, n: usize) -> bindings::LabelStyle {
 ///
 /// Port additions for gamepads (docs/controls.md): a "Gamepad options"
 /// line between the last row and Done opens [`PAD_ITEMS`] (stick
-/// deadzone, trigger threshold, button labels, reset to defaults, the
-/// connected pads); a pad's Start cancels the redefine prompt (so Start
+/// deadzone, trigger threshold, button labels, left stick forward/back,
+/// reset to defaults, the connected pads); a pad's Start cancels the redefine prompt (so Start
 /// cannot be bound: it pauses), X / Square (West) or Backspace clears the
 /// selected binding; pad bindings show the pad's own button names.
 pub struct ControlSetup {
@@ -543,20 +544,24 @@ pub struct ControlSetup {
     pad_page: Option<usize>,
 }
 
-const ROWS: usize = 11;
+const ROWS: usize = bindings::NUM_ACTIONS;
+/// Row pitch in virtual pixels: the original's 10 for its 11 rows, 9 so
+/// that the twelfth (Horn) fits above "Gamepad options".
+const ROW_PITCH: i32 = 9;
 /// "Gamepad options" (port addition), between the last row and Done.
 const PAD_OPTIONS: usize = COLUMNS * ROWS;
 const DONE: usize = PAD_OPTIONS + 1;
 const CANCEL: usize = DONE + 1;
 
 /// The gamepad options page.
-const PAD_ITEMS: usize = 6;
+const PAD_ITEMS: usize = 7;
 const PAD_DEADZONE: usize = 0;
 const PAD_TRIGGER: usize = 1;
 const PAD_LABELS: usize = 2;
-const PAD_RESET: usize = 3;
-const PAD_RESET_KEYS: usize = 4;
-const PAD_BACK: usize = 5;
+const PAD_STICK_DRIVE: usize = 3;
+const PAD_RESET: usize = 4;
+const PAD_RESET_KEYS: usize = 5;
+const PAD_BACK: usize = 6;
 
 impl ControlSetup {
     pub fn new(cx: &Ctx) -> ControlSetup {
@@ -650,7 +655,7 @@ impl ControlSetup {
             return Some((item + d) % PAD_ITEMS);
         }
         let o = &mut self.controls.opts;
-        let step = if input.right || (input.fire && item <= PAD_LABELS) {
+        let step = if input.right || (input.fire && item <= PAD_STICK_DRIVE) {
             1
         } else if input.left {
             -1
@@ -671,9 +676,10 @@ impl ControlSetup {
                     let i = all.iter().position(|l| *l == o.labels).unwrap_or(0) as i32;
                     o.labels = all[(i + step).rem_euclid(all.len() as i32) as usize];
                 }
+                PAD_STICK_DRIVE => o.stick_drive = !o.stick_drive,
                 _ => {}
             }
-            if item <= PAD_LABELS {
+            if item <= PAD_STICK_DRIVE {
                 cx.sound(Sfx::Move);
                 return Some(item);
             }
@@ -697,6 +703,7 @@ impl ControlSetup {
             format!("Stick deadzone: {} percent", o.deadzone),
             format!("Trigger threshold: {} percent", o.trigger),
             format!("Button labels: {}", o.labels.name()),
+            format!("Left stick forward/back: {}", if o.stick_drive { "On" } else { "Off" }),
             "Reset gamepad buttons".to_string(),
             "Reset keyboard keys".to_string(),
             "Back".to_string(),
@@ -705,7 +712,7 @@ impl ControlSetup {
             let colour = if i == item && lit { 2 } else { 1 };
             ui.centred(l, ui.hy(48 + 12 * i as i32), colour);
         }
-        let mut y = ui.hy(128);
+        let mut y = ui.hy(136);
         for n in 0..4 {
             let name = match bindings::pad_info(n) {
                 Some((name, _)) => name.chars().take(30).collect::<String>(),
@@ -717,6 +724,14 @@ impl ControlSetup {
         // How to drive it with a pad, in the first pad's names.
         let s = pad_style(&self.controls, 0);
         let b = |b: GamepadButton| bindings::pad_label(bindings::PadInput::Button(b), s);
+        if item == PAD_STICK_DRIVE {
+            let note = if o.stick_drive {
+                "Stick and d-pad up/down drive and walk"
+            } else {
+                "Up/down only in menus; the stick steers"
+            };
+            ui.centred_dim(note, ui.hy(176), 1);
+        }
         let hint = format!("{}: change   {}: back", b(GamepadButton::South), b(GamepadButton::East));
         ui.centred_dim(&hint, ui.hy(184), 1);
     }
@@ -805,7 +820,8 @@ impl Screen for ControlSetup {
         // Action names right-aligned at x = 130.
         let label_x = ui.vx(130);
         for i in 0..ROWS {
-            ui.right(&cx.g(2457 + i as u32), label_x, ui.hy(50 + 10 * i as i32), 2);
+            let label = bindings::action_phrase(i).map_or_else(|| "Horn".to_string(), |p| cx.g(p));
+            ui.right(&label, label_x, ui.hy(50 + ROW_PITCH * i as i32), 2);
         }
         // The columns, in a view from x = 135 to the right edge with the
         // selected one at 90 in it.
@@ -836,7 +852,7 @@ impl Screen for ControlSetup {
                     Table::Pad(t) => pad_name_in(pad_style(&self.controls, col - 1), t[i]),
                 };
                 let colour = if self.sel == col * ROWS + i && lit { 2 } else { 1 };
-                put(ui, &name, ui.hy(50 + 10 * i as i32), colour);
+                put(ui, &name, ui.hy(50 + ROW_PITCH * i as i32), colour);
             }
         }
         let items = [(PAD_OPTIONS, "Gamepad options".to_string(), 160), (DONE, cx.g(2148), 170), (CANCEL, cx.g(2192), 180)];
@@ -844,8 +860,12 @@ impl Screen for ControlSetup {
             let colour = if self.sel == item && lit { 2 } else { 1 };
             ui.centred(&text, ui.hy(y), colour);
         }
-        // With a pad connected: how to drive the screen with it.
-        if cx.pads > 0 {
+        // On the Horn row: what it does (no phrase; port addition), in
+        // place of the pad hint.
+        if self.sel < PAD_OPTIONS && self.sel % ROWS == bindings::HORN {
+            ui.centred_dim("Horn: works in vehicles only", ui.hy(191), 1);
+        } else if cx.pads > 0 {
+            // With a pad connected: how to drive the screen with it.
             let s = pad_style(&self.controls, 0);
             let b = |b: GamepadButton| bindings::pad_label(bindings::PadInput::Button(b), s);
             let hint = format!(

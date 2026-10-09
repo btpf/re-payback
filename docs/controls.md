@@ -1,8 +1,9 @@
 # Controls: keyboard and gamepads
 
 The game's actions are the original's eleven control-setup rows (phrases
-2457..2467, `DAT_012a63fc`; docs/re/frontend_menus.md §6), plus the fixed
-keys: digits 0..7 pick a weapon, Esc pauses. Code:
+2457..2467, `DAT_012a63fc`; docs/re/frontend_menus.md §6), a twelfth row
+added by the port (Horn, below), plus the fixed keys: digits 0..7 pick a
+weapon, Esc pauses. Code:
 `crates/payback/src/frontend/bindings.rs` (tables, options, pad input),
 `frontend/misc.rs` (`ControlSetup`), `sim/people.rs::read_keyboard` (single
 player), `multiplayer.rs::read_devices` (multiplayer).
@@ -11,30 +12,56 @@ The keyboard defaults are the Mac's and are unchanged (frontend_menus.md §6).
 The gamepad support below is a port addition: the Amiga read PSX/CD32 pads
 and the Mac any HID device, both with a plain button table.
 
-## Default gamepad layout (layout 2)
+## Default gamepad layout (layout 3)
 
 Bevy names buttons by position (`South` is the bottom face button), so the
 same table serves every pad; the control setup shows each pad's own names.
+The same buttons work on foot and in vehicles.
 
 | Action | Bevy control | Xbox | PlayStation | Switch |
 |---|---|---|---|---|
-| Accelerate / walk forward | `RightTrigger2` | RT | R2 | ZR |
-| Reverse / walk back | `LeftTrigger2` | LT | L2 | ZL |
-| Steer / turn left, right | `DPadLeft` / `DPadRight` | D-pad | D-pad | D-pad |
-| Shoot | `South` | A | Cross | B |
-| Shoot (second button) | `West` | X | Square | Y |
+| Accelerate / walk forward | `South` | A | Cross | B |
+| Reverse / walk back | `West` | X | Square | Y |
+| Steer / turn left, right | `DPadLeft` / `DPadRight` (and the left stick, fixed) | D-pad, LS | D-pad, LS | D-pad, LS |
+| Shoot (punch unarmed; horn or vehicle gun when driving) | `RightTrigger2` | RT | R2 | ZR |
+| Shoot (second slot) | unbound | – | – | – |
 | Get in / out of a vehicle | `North` | Y | Triangle | X |
-| Brake | `East` | B | Circle | A |
-| Next weapon | `RightTrigger` | RB | R1 | R |
-| Previous weapon | `LeftTrigger` | LB | L1 | L |
+| Brake (handbrake) | `RightTrigger` | RB | R1 | R |
+| Next weapon | `LeftTrigger` | LB | L1 | L |
+| Previous weapon | `LeftTrigger2` | LT | L2 | ZL |
 | Repeat last message | `Select` | Back / View | Share / Create | − |
+| Horn (vehicles only, port addition) | `East` | B | Circle | A |
 | Pause (fixed) | `Start` | Start / Menu | Options | + |
 
-Fixed, not in the table (as the original's joystick directions): the left
-stick and the d-pad always steer (left/right) and accelerate/reverse
-(up/down), on foot and in vehicles alike; the control model stays the
-original's (turn and move forward/back, digital). Weapon slots 0..7 stay on
-the keyboard digits; on a pad, LB/RB step through the carried weapons.
+Choices: the weapon steps sit on LB / LT because the left index finger
+reaches them while the left thumb steers (the d-pad would mean letting go
+of the stick); LB, the quicker press, steps forward. Shoot's second slot
+is left free on purpose: RT is the one fire button, and B is the horn.
+D-pad up / down and the stick clicks are free for the player to use.
+
+Fixed, not in the table: the left stick's left / right and the d-pad's
+left / right always steer, on foot and in vehicles. The stick's (and
+d-pad's) up / down do **not** drive by default; the gamepad option
+"Left stick forward/back" (`pad.stick_drive`, default Off) brings back the
+original's joystick directions (up accelerates, down reverses, stick and
+d-pad alike). The menus always navigate with all four directions. The
+control model stays the original's (turn and move forward/back, digital).
+Weapon slots 0..7 stay on the keyboard digits.
+
+### Horn
+
+The original has no horn key: in a vehicle the shoot key honks
+(`do_Other` @ 10146280 state 2 reads the input word's shoot bit; phrase
+2461 "Shoot/horn"; docs/re/vehicles.md §6.2). The port adds a Horn row
+(`bindings::HORN`) that sets the same per-tick shoot bit
+(`PlayerInput::fire`), but only while the player is in a vehicle; on foot
+it does nothing. So Horn is exactly what Shoot is when driving: it honks,
+and in a vehicle with a weapon (tank gun, bomb truck's RC car) it fires
+that, as Shoot does there. Shoot keeps honking in vehicles, as in the
+original. No new sim state: replays record the shoot bit as before.
+Default keys: B / Circle / A on pads, `H` on the single-player keyboard
+(free in the Mac map), unbound in the four multiplayer key sets (they
+share one keyboard).
 
 ## Menus
 
@@ -116,8 +143,12 @@ four multiplayer keyboard key sets. With a pad:
 - X / Square (or Backspace) clears the selected binding.
 - "Gamepad options" (between the last row and Done): stick deadzone, trigger
   threshold, button labels (Auto / Xbox / PlayStation / Switch; Auto picks by
-  the pad's USB vendor or name: Sony 054c, Nintendo 057e, else Xbox), reset
-  gamepad buttons, reset keyboard keys, and the connected pads by number.
+  the pad's USB vendor or name: Sony 054c, Nintendo 057e, else Xbox), left
+  stick forward/back (Off / On), reset gamepad buttons, reset keyboard keys,
+  and the connected pads by number.
+- Every action, Horn included, takes any button, trigger or stick end, on
+  each gamepad column and each keyboard column; with the Horn row selected
+  the hint line reads "Horn: works in vehicles only".
 - Done saves to `Payback.cfg`, Cancel (or B) drops the edits.
 
 Labels look like "A", "RT", "LS Left", "RS Up", "D-pad Up", "Cross", "ZR".
@@ -132,12 +163,20 @@ the pad tables:
 pad.deadzone = 50
 pad.trigger = 30
 pad.labels = auto        # auto | xbox | playstation | nintendo
-pad.layout = 2
+pad.stick_drive = off    # on: stick / d-pad up and down drive
+pad.layout = 3
 ```
 
-A file without `pad.layout` predates the modern defaults: pad tables still
-equal to the old default (no second shoot or repeat-message button) take the
-new one at start-up (`bindings::upgrade_pad_layout`); edited tables are kept.
+`key.horn`, `pad.horn`, `pad<n>.horn` and `mp<n>.key.horn` hold the Horn
+row. Upgrades at start-up (`bindings::upgrade_pad_layout`,
+`Controls::upgrade`): a file with `pad.layout` below 3 (or none, layout 1)
+has its pad tables compared with the old defaults in the original 11
+actions; tables still equal to layout 1 (no second shoot or
+repeat-message button) or layout 2 (RT/LT drive, A/X shoot, B brake,
+RB/LB weapons) take layout 3. Edited tables are kept as they were: their
+horn goes unbound if B already has an action there, and if gamepad 1's
+table is an edited one, "Left stick forward/back" is turned on so its
+stick and d-pad keep driving. The first save writes `pad.layout = 3`.
 
 ## Gamepad numbers and hot-plugging
 
@@ -172,7 +211,14 @@ axes away from rest and buttons held (`bindings::pad_debug`).
 
 `--pad-sim "<secs>:<control>[/<hold>],..."` connects a virtual pad and
 presses controls at real-time offsets (`DPadDown`, `South`, `LeftStickY-`,
-`disconnect`, `connect`); `--pad-sim-name`, `--pad-sim-vendor 054c` change
+`disconnect`, `connect`); it is then the only pad that gets a number, so a
+real pad on the test machine can't take gamepad 1. With `--pad-debug` the
+log also shows player 1's controls as the sim gets them (`player 1 input
+[accel] on foot, at ...`) and `player 1 horn sounds`. Example: `--map 0
+--park 1 --pad-debug --pad-sim "10:South/2,13:West/2,16:LeftStickY+/2,
+19:RightTrigger2/0.3,21:East/0.5,23:North,28:South/2,30.5:RightTrigger/1,
+32:East/1"` walks forward and back, ignores stick up, punches, gets into
+the parked car, drives, brakes and honks; `--pad-sim-name`, `--pad-sim-vendor 054c` change
 what it reports. `--frontend-screen controls-pad` / `controls-pad-options`
 open the control setup on gamepad 1's column / the options page.
 `--screenshot-delay <secs>` takes the `--screenshot` later (e.g. a menu

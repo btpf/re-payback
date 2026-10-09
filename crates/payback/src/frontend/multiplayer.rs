@@ -41,14 +41,16 @@ fn device_label(cx: &Ctx, d: Device) -> String {
 }
 
 /// A device's bindings in one line, e.g. "WASD F:Ctrl B:L-Shift In:Tab
-/// W:Q/E" (steering, fire, brake, in/out, previous/next weapon).
+/// W:Q/E" (steering, fire, brake, in/out, previous/next weapon); a pad
+/// shows its drive buttons instead of the steering, "Go:A/X F:RT ...".
 fn hint(cx: &Ctx, table: Table) -> String {
     let name = |a: usize| match table {
         Table::Keys(t) => key_name(cx, t[a]),
         Table::Pad(t) => pad_name(cx, t[a]),
     };
     let steer = match table {
-        Table::Pad(_) => "Stick/D-pad".to_string(),
+        // The stick steers; the drive buttons (layout 3: A / X).
+        Table::Pad(_) => format!("Go:{}/{}", name(b::ACCELERATE), name(b::REVERSE)),
         Table::Keys(t) => {
             let order = [b::ACCELERATE, b::LEFT, b::REVERSE, b::RIGHT];
             let ids: Vec<String> = order.iter().map(|&a| t[a].map(b::key_id).unwrap_or_default()).collect();

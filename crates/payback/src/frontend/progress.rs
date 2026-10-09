@@ -38,7 +38,7 @@
 //! | `police` | Rampage police aggressiveness 0..5 (`DAT_0114c2ec`) |
 //! | `city` | Rampage / multiplayer city (`DAT_0114c7c0`; 3.. = user maps) |
 //! | `unlock_all` | 0 / 1: every city and level selectable (port-added; the profile is not changed) |
-//! | `key.<action>` | single-player key, Bevy `KeyCode` name (actions: phrases 2457–2467); empty = disabled |
+//! | `key.<action>` | single-player key, Bevy `KeyCode` name (actions: phrases 2457–2467, then `horn`, a port addition); empty = disabled |
 //! | `pad.<action>`, `pad<n>.<action>` | gamepad 1 (single player and multiplayer) / gamepad n = 2..4 button, Bevy `GamepadButton` name |
 //! | `mp<n>.key.<action>` | multiplayer key set n (`bindings.rs`) |
 
