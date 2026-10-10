@@ -16,18 +16,21 @@
 #                (`pack_web_data.py --no-film`)
 #
 # Payback.exe stays in: it marks the Amiga data root and holds the palette
-# (`palette::find_in_executable`).
+# (`palette::find_in_executable`). So does `Payback (OS X)`: it holds the
+# same palette (in its PEF data section), read when the Amiga data is
+# missing (a Mac-only install, `data.rs`).
 
 # Editors and docs.
 skip-dir    docs
 skip-dir    map editor (os 9)
 skip-dir    mapeditor (os x)
 skip-file   mapeditor.exe
+skip-file   map editor (os 9)
+skip-file   mapeditor (os x)
 
-# Other executables (the WarpOS build, the Mac applications).
+# Other executables (the WarpOS build, the OS 9 Mac application).
 skip-file   paybackwos.exe
 skip-file   payback (os 9)
-skip-file   payback (os x)
 
 # The two Mac films the game does not play (`GetPaybackMovie` @ 100fcbc0
 # opens payback_high_mpeg1.mpg only).

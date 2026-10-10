@@ -329,3 +329,18 @@ fn mac_user_map_companions() {
     }
     assert_eq!((routes, vehicles), (28, 22));
 }
+
+/// Both Mac applications hold the Update 7 palette, in their PEF data
+/// section (docs/re/mac/assets.md §15).
+#[test]
+fn mac_palette_matches_update7() {
+    let Some(mac) = mac_dir() else { return };
+    let amiga = data_dir().map(|d| palette::find_in_executable(&std::fs::read(d.join("Payback.exe")).unwrap()).unwrap());
+    for exe in ["Payback (OS X)", "Payback (OS 9)"] {
+        let Ok(bytes) = std::fs::read(mac.join(exe)) else { continue };
+        let pal = palette::find_in_executable(&bytes).unwrap_or_else(|e| panic!("{exe}: {e}"));
+        if let Some(a) = &amiga {
+            assert!(pal[..] == a[..], "{exe}: palette differs from Payback.exe");
+        }
+    }
+}

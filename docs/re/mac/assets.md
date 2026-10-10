@@ -280,12 +280,11 @@ The explanation is exhaustive (`alpha_fit.py`, `alpha_fit2.py`), using the gener
   both), so the formula in rendering.md is approximate. Both builds use the same rule.
 - Table 10 = `nearest(pal[src] + (dst − 128))` is exact (dst = brightness row). This
   sharpens the rendering.md wording.
-- INFERRED side effect: the Mac game palette equals the U7 palette, including colour 65,
-  since any other palette would have changed the regenerated entries. The Mac
-  app's `clut` 128 resource ("8-bit Amiga") differs from U7 only at index 65
-  (0xB37B4B vs 0xB37347); it is a resource, not the game palette. The game palette is not
-  stored in a LoadRGB32-searchable form in the PEF (its data section is pattern-compressed),
-  so `palette::find_in_executable` finds nothing in the Mac binaries.
+- The Mac game palette equals the U7 palette, including colour 65 (CONFIRMED byte for
+  byte, §15; first inferred from the regenerated entries). The Mac app's `clut` 128
+  resource ("8-bit Amiga") differs from U7 only at index 65 (0xB37B4B vs 0xB37347); it is
+  a resource, not the game palette. The game palette sits in the PEF's pattern-initialized
+  data section, so it shows only after unpacking that section (§15).
 
 Kind: **fix** (consistency with the shipped palette). Adopt: **yes**. Either read the
 Mac `Alpha.256` or regenerate the tables from the game palette. The port already reads
@@ -526,17 +525,20 @@ handles them unchanged.
 
 ## 14. Loading the Mac data (preferring the Mac files)
 
-`GameData::locate` (`crates/payback/src/data.rs`) accepts a directory only if it contains
-`Payback.exe`, and `GameData::load` takes the palette from that exe. Code reads relative
-paths through `GameData::read`. To prefer the Mac data:
+The plan this section was written as; the port has since implemented it
+(`crates/payback/src/data.rs`, `locate.rs`). Code reads relative paths through
+`GameData::read`.
 
-1. **Two roots, Mac first.** Add an optional Mac root, found via
-   `PAYBACK_MAC_DATA` / `--mac-data <dir>` / `extracted/mac/Payback`. Detect it by
-   `Payback (OS X)`, `Payback (OS 9)` or `CubeTextures/CubeTextureList.txt`.
-   `GameData::read(rel)` tries the Mac root first, then the Amiga root (case-insensitively,
-   see 8). The Amiga root stays required.
-2. **Palette:** the Mac binaries contain no LoadRGB32 table, and the Mac game palette is
-   the U7 palette (§5.1). Keep taking it from the Amiga `Payback.exe`.
+1. **Two roots.** An Amiga root (`Payback.exe`) and a Mac root, found via
+   `PAYBACK_DATA` / `PAYBACK_MAC_DATA`, `--data` / `--mac-data <dir>`, `data/amiga` /
+   `data/mac` next to the exe, `extracted/game` / `extracted/mac/Payback`. The Mac root is
+   detected by `CubeTextures/CubeTextureList.txt` (or a Mac application next to
+   `CubeTextures`; `data::is_mac_root`). Either root alone is enough: without the Amiga
+   data the Mac folder becomes the main root and every Mac/Amiga setting resolves to the
+   Mac content (`GameData::mac_variant`); `--mac-only` ignores the Amiga data.
+2. **Palette:** the Mac game palette is the U7 palette (§15). The port takes it from the
+   Amiga `Payback.exe` when present, else from `Payback (OS X)` / `Payback (OS 9)`
+   (`palette::find_in_executable` unpacks the PEF data section, `pef.rs`).
 3. **Renamed lists:** map `CubeTextures/.CubeTextureList` → `CubeTextureList.txt` and
    `.CubeTextureRemapList` → `CubeTextureRemapList.txt` (identical contents).
 4. **Mac files to prefer** (they differ from the Amiga ones):
@@ -567,3 +569,39 @@ paths through `GameData::read`. To prefer the Mac data:
 Platform-specific items that stay optional: the PC/keyboard/joystick/disk menu props and
 the Virtual Programming credits and demo text. A "classic Amiga look" switch could restore
 the Amiga textures, models and title screens.
+
+## 15. The game palette in the Mac binaries
+
+CONFIRMED (`Payback (OS X)`, `analysis/ghidra_macx`): the palette is a static
+graphics.library `LoadRGB32` table compiled into the program, as on the Amiga, not a file
+or a resource. Nothing builds it at start-up.
+
+- TOC slot `0x1017cef0` points at the table: data-section offset `0x10030`, i.e.
+  `0x1018b470` with the data section at `0x1017b440` (directly after the 0x17b440-byte code
+  section at `0x10000000`). Layout as on the Amiga: `0x01000000` (256 colours from 0),
+  256 × 3 longwords with the component in the top byte, a 0 terminator.
+- `DoSetupColourLookup` @ 10084640 (called once from `InitAll` @ 100632a0) copies the
+  table into the per-channel int arrays (TOC `0x1017c6d0` / `d4` / `d8`, read as B / G /
+  R) and the packed `0xffRRGGBB` array (`0x1017c6cc`). `ClosestMatch` @ 10083dc0,
+  `CalcAlpha` @ 10083ec0 and the `Gouraud.256` builder read those arrays.
+- `AddBrightness` @ 10083620 (68k `FUN_0003e7e6`) and `SetBrightness` @ 100839e0
+  (68k `FUN_0003eb0c`) rewrite the table's top bytes from the channel arrays plus the
+  flash or brightness amount and pass it to the emulated `_LoadRGB32` @ 100fc000. These
+  are the only two `LoadRGB32` callers; no code writes the base colours.
+- The table lives in the PEF's data section, which is stored **pattern-initialized**
+  (section kind 2, 79985 bytes in the file expanding to 102698). The expansion
+  byte-code splits the table into runs, so no search of the raw file (raw RGB, LoadRGB32
+  longwords, ColorSpec) finds it. Unpacked, the section holds **four identical copies**
+  (offsets `0xf160`, `0x10030`, `0x10e08`, `0x16760`); `Payback (OS 9)` likewise
+  (`0xf278`, `0x10148`, `0x10f20`, `0x16898`). The low 24 bits of each component vary
+  (`1f ff ff ff`, `17 77 77 77`, ...), as in the Amiga copies.
+- **All 256 colours equal Update 7's `Payback.exe` table** in both Mac builds. The CD
+  `Payback.exe` differs from both only at colour 8 (7,7,7 instead of 0,0,0; §5). The
+  map editors' tables (`MapEditor (OS X)` at `0xdbb8` / `0xed58`) are a different
+  palette; the game does not use them.
+
+Port: `crates/payback-formats/src/pef.rs` unpacks PEF sections;
+`palette::find_in_executable` searches them when given a PEF, so the Mac application
+serves as the palette source when the Amiga data is missing (`data.rs`;
+`tests/real_data.rs` `mac_palette_matches_update7`). Since both sources are identical,
+the Amiga `Payback.exe` stays the source when present.

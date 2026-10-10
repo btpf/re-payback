@@ -915,6 +915,7 @@ pub mod testing {
     pub fn data() -> GameData {
         GameData {
             root: PathBuf::from("no-game-data"),
+            amiga: true,
             mac: None,
             palette: [0; 768],
             cube_textures: payback_formats::CubeTextureList { entries: Vec::new() },

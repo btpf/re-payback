@@ -42,6 +42,11 @@ web build see [`docs/web.md`](docs/web.md).
    python tools/extract/extract_mac.py   # -> extracted/mac (optional, recommended)
    ```
 
+   Either release alone also works: with only `PaybackMac.toast` the game
+   runs from the Mac data (Mac content; English, Deutsch and Français; no
+   Amiga variants, FLC intro or shipped replays). `--mac-only` tries that
+   setup while the Amiga data is present.
+
 2. **Build and run.**
 
    ```sh
@@ -61,9 +66,9 @@ web build see [`docs/web.md`](docs/web.md).
    `data/mac` next to the executable; the folder remembered in
    `payback-data.cfg` next to the executable; `extracted/game` and
    `extracted/mac/Payback` in the executable's folder or any folder above it,
-   then in the working directory or above. If the Amiga data is still not
-   found, a folder picker asks for it (the folder with `Payback.exe`) and
-   remembers the choice; the Mac data is optional and never asked for. The log
+   then in the working directory or above. If neither is found, a folder
+   picker asks for one (the folder with `Payback.exe`, or the Mac CD's
+   `Payback` folder) and remembers the choice. The log
    says which folders were used. `PAYBACK_NO_DIALOG=1` turns the picker and
    message boxes off (headless runs). `PAYBACK_STAGE_DATA=0` builds without
    staging the data (`=copy` copies instead of linking);

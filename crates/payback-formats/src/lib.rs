@@ -9,6 +9,7 @@ pub mod map;
 pub mod motion;
 pub mod obj;
 pub mod palette;
+pub mod pef;
 pub mod phrases;
 pub mod replay;
 pub mod route;

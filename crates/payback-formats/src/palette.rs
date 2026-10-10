@@ -10,8 +10,12 @@
 //! ```
 //!
 //! Update 7's `Payback.exe` and `PaybackWOS.exe` hold several identical
-//! copies; the original CD release has an older palette. We extract it at
-//! runtime from the user's install rather than shipping it.
+//! copies; the original CD release's differs in colour 8 only (7,7,7 for
+//! 0,0,0). The Mac release's `Payback (OS X)` and `Payback (OS 9)` hold four
+//! copies each, byte-identical to Update 7's, but inside their
+//! pattern-initialized PEF data section (`pef.rs`), so they are searched
+//! after unpacking it (`docs/re/mac/assets.md` §15). We extract the palette
+//! at runtime from the user's install rather than shipping it.
 
 use crate::{Error, Result};
 
@@ -19,8 +23,19 @@ pub type Palette = [u8; 768];
 
 const TABLE_LEN: usize = 4 + 768 * 4 + 4;
 
-/// Find the first LoadRGB32 palette table in an executable image.
+/// Find the first LoadRGB32 palette table in an executable image: an Amiga
+/// hunk file as it is, a Mac PEF container in its unpacked sections.
 pub fn find_in_executable(exe: &[u8]) -> Result<Palette> {
+    if crate::pef::is_pef(exe) {
+        return crate::pef::sections(exe)?
+            .iter()
+            .find_map(|s| find_table(&s.data).ok())
+            .ok_or_else(|| Error::Parse { what: "palette", detail: "no LoadRGB32 table in the PEF sections".into() });
+    }
+    find_table(exe)
+}
+
+fn find_table(exe: &[u8]) -> Result<Palette> {
     // Header followed by colour 0 = black.
     const SIG: [u8; 16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut start = 0;

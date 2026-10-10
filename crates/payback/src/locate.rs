@@ -2,9 +2,12 @@
 //! pack's fixed folders, `data.rs` / `vfs.rs`).
 //!
 //! The executable needs no setup: it looks for the Amiga data (the folder
-//! holding `Payback.exe`, from `tools/extract/extract.py`) and the optional
-//! Mac data (the Mac CD's `Payback` folder, from
-//! `tools/extract/extract_mac.py`) in this order, first match wins:
+//! holding `Payback.exe`, from `tools/extract/extract.py`) and the Mac data
+//! (the Mac CD's `Payback` folder, from `tools/extract/extract_mac.py`,
+//! recognised by `CubeTextures/CubeTextureList.txt` or a Mac application:
+//! `data::is_mac_root`). Either alone is enough (`data.rs`); `--mac-only`
+//! skips the Amiga search. Each is searched in this order, first match
+//! wins:
 //!
 //! 1. `PAYBACK_DATA` / `PAYBACK_MAC_DATA`, then `--data <dir>` /
 //!    `--mac-data <dir>` (a set but unusable value is logged and skipped);
@@ -18,9 +21,10 @@
 //!    or any folder above it, so `target/*/payback.exe` finds the
 //!    repository's data from any working directory;
 //! 5. the same in the working directory and the folders above it;
-//! 6. Amiga data only: a folder picker. The choice is checked (it must hold
-//!    `Payback.exe`, or be a folder with `extracted/game`) and remembered in
-//!    `payback-data.cfg`. The Mac data is never asked for.
+//! 6. only when neither is found: a folder picker. The choice is checked
+//!    (it must hold `Payback.exe` or be the Mac `Payback` folder, or a
+//!    folder with `extracted/game` or the Mac `Payback` folder in it) and
+//!    remembered in `payback-data.cfg` under its kind.
 //!
 //! Any of these folders may also be given one level up: a folder containing
 //! `extracted/game` counts as the Amiga data, one containing the Mac
@@ -30,13 +34,15 @@
 //! ([`report_error`]). `PAYBACK_NO_DIALOG=1` skips the picker and message
 //! boxes (headless runs, tests): the message goes to stderr only.
 
+use crate::data::{Roots, is_mac_root};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// The remembered data folders, next to the executable.
 pub const CONFIG: &str = "payback-data.cfg";
 
-const PICKER_TITLE: &str = "Select your Payback data folder (the folder containing Payback.exe)";
+const PICKER_TITLE: &str =
+    "Select your Payback data folder (the Amiga folder containing Payback.exe, or the Mac CD's Payback folder)";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -96,7 +102,7 @@ impl Kind {
     fn is_root(self, dir: &Path) -> bool {
         match self {
             Kind::Game => dir.join("Payback.exe").is_file(),
-            Kind::Mac => dir.join("CubeTextures").is_dir() || dir.join("Payback (OS X)").is_file(),
+            Kind::Mac => is_mac_root(dir),
         }
     }
 }
@@ -276,15 +282,41 @@ fn found(kind: Kind, root: &Path, how: Found) {
     log(false, format!("{}: {} ({})", kind.name(), root.display(), how.describe(kind)));
 }
 
-/// The Amiga data root: the search, else the folder picker.
-pub fn locate_game() -> Result<PathBuf, String> {
-    if let Some((root, how)) = search(Kind::Game) {
-        found(Kind::Game, &root, how);
-        return Ok(root);
+/// The data roots: the search for each release (the Amiga one skipped
+/// with `--mac-only`), else the folder picker, which takes either.
+pub fn locate() -> Result<Roots, String> {
+    let amiga = if crate::data::mac_only() {
+        log(false, "Payback data: ignored (--mac-only)".into());
+        None
+    } else {
+        search(Kind::Game).map(|(root, how)| {
+            found(Kind::Game, &root, how);
+            root
+        })
+    };
+    let mac = search(Kind::Mac).map(|(root, how)| {
+        found(Kind::Mac, &root, how);
+        root
+    });
+    match (&amiga, &mac) {
+        (Some(_), None) => log(false, "Mac data: not found (optional)".into()),
+        (None, Some(_)) => log(
+            false,
+            "Amiga data not found: running from the Mac data alone (Mac content only; \
+             English, Deutsch and Français)"
+                .into(),
+        ),
+        _ => {}
     }
-    if let Some(root) = pick_game() {
-        found(Kind::Game, &root, Found::Picked);
-        return Ok(root);
+    if amiga.is_some() || mac.is_some() {
+        return Ok(Roots { amiga, mac });
+    }
+    if let Some((kind, root)) = pick() {
+        found(kind, &root, Found::Picked);
+        return Ok(match kind {
+            Kind::Game => Roots { amiga: Some(root), mac: None },
+            Kind::Mac => Roots { amiga: None, mac: Some(root) },
+        });
     }
     // The logger never starts: put the skipped settings in the message.
     let skipped: String =
@@ -292,45 +324,44 @@ pub fn locate_game() -> Result<PathBuf, String> {
     Err(format!(
         "Payback data not found.\n\n\
          The game needs the files of the original Amiga release (the folder containing \
-         Payback.exe). Unpack your CD with `python tools/extract/extract.py` (it writes \
-         extracted/game) and build the game, which copies what it needs into data/amiga \
-         next to payback.exe; or set PAYBACK_DATA (or pass --data <dir>) to its location.{skipped}"
+         Payback.exe) or of the Mac release (the Payback folder of PaybackMac.toast), or both. \
+         Unpack them with `python tools/extract/extract.py` (writes extracted/game) or \
+         `python tools/extract/extract_mac.py` (writes extracted/mac) and build the game, \
+         which copies what it needs into data/amiga and data/mac next to payback.exe; or set \
+         PAYBACK_DATA / PAYBACK_MAC_DATA (or pass --data / --mac-data <dir>) to their \
+         location.{skipped}"
     ))
 }
 
-/// The Mac data root, if the search finds one (never asked for).
-pub fn locate_mac() -> Option<PathBuf> {
-    let found_mac = search(Kind::Mac);
-    match &found_mac {
-        Some((root, how)) => found(Kind::Mac, root, *how),
-        None => log(false, "Mac data: not found (optional)".into()),
-    }
-    found_mac.map(|(root, _)| root)
-}
-
-/// Asks for the Amiga data folder until a valid one is chosen or the
-/// player gives up; remembers the choice.
-fn pick_game() -> Option<PathBuf> {
+/// Asks for a data folder (Amiga or Mac) until a valid one is chosen or
+/// the player gives up; remembers the choice.
+fn pick() -> Option<(Kind, PathBuf)> {
     if no_dialog() {
         return None;
     }
     loop {
         let dir = rfd::FileDialog::new().set_title(PICKER_TITLE).pick_folder()?;
-        if let Some(root) = resolve(Kind::Game, &dir) {
+        let picked = [Kind::Game, Kind::Mac]
+            .into_iter()
+            .filter(|&k| k == Kind::Mac || !crate::data::mac_only())
+            .find_map(|k| resolve(k, &dir).map(|root| (k, root)));
+        if let Some((kind, root)) = picked {
             if let Some(exe_dir) = exe_dir() {
-                match remember(&exe_dir, Kind::Game, &root) {
+                match remember(&exe_dir, kind, &root) {
                     Ok(()) => log(false, format!("remembered in {}", exe_dir.join(CONFIG).display())),
                     Err(e) => log(true, format!("could not write {}: {e}", exe_dir.join(CONFIG).display())),
                 }
             }
-            return Some(root);
+            return Some((kind, root));
         }
         let again = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Payback")
             .set_description(format!(
-                "{} does not contain Payback.exe.\n\nChoose the folder of the original Amiga \
-                 release that holds Payback.exe (for example extracted/game).\n\n\
+                "{} holds neither Payback.exe nor the Mac release's Payback folder.\n\n\
+                 Choose the folder of the original Amiga release that holds Payback.exe \
+                 (for example extracted/game), or the Payback folder of the Mac CD \
+                 (for example extracted/mac/Payback).\n\n\
                  Choose another folder?",
                 dir.display()
             ))
@@ -376,6 +407,7 @@ mod tests {
 
     fn mac_at(dir: &Path) -> PathBuf {
         std::fs::create_dir_all(dir.join("CubeTextures")).unwrap();
+        std::fs::write(dir.join("CubeTextures/CubeTextureList.txt"), b"").unwrap();
         dir.to_path_buf()
     }
 
@@ -456,6 +488,23 @@ mod tests {
         assert_eq!(find(Kind::Mac, &s), Some((repo, Found::AboveExe)));
         let beside = mac_at(&exe.join("data/mac"));
         assert_eq!(find(Kind::Mac, &s), Some((beside, Found::BesideExe)));
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn amiga_folder_is_not_mac() {
+        let t = temp("marker");
+        let amiga = game_at(&t.join("game"));
+        std::fs::create_dir_all(amiga.join("CubeTextures")).unwrap();
+        std::fs::write(amiga.join("CubeTextures/.CubeTextureList"), b"").unwrap();
+        assert!(resolve(Kind::Mac, &amiga).is_none());
+        assert_eq!(resolve(Kind::Game, &amiga), Some(amiga.clone()));
+        // A Mac folder staged with its application but an older list name.
+        let mac = t.join("mac");
+        std::fs::create_dir_all(mac.join("CubeTextures")).unwrap();
+        std::fs::write(mac.join("Payback (OS X)"), b"").unwrap();
+        assert_eq!(resolve(Kind::Mac, &mac), Some(mac.clone()));
+        assert!(resolve(Kind::Game, &mac).is_none());
         let _ = std::fs::remove_dir_all(&t);
     }
 

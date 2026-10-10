@@ -114,12 +114,23 @@ def main() -> int:
     ap.add_argument("--copy", action="store_true", help="copy the files instead of hard-linking them")
     a = ap.parse_args()
 
-    if not os.path.isfile(os.path.join(a.game, "Payback.exe")):
-        print(f"no Payback.exe in {a.game}: run tools/extract/extract.py or pass --game", file=sys.stderr)
+    # Either release alone is enough (crates/payback/src/data.rs).
+    has_game = os.path.isfile(os.path.join(a.game, "Payback.exe"))
+    has_mac = os.path.isfile(os.path.join(a.mac, "CubeTextures", "CubeTextureList.txt"))
+    if not has_game and not has_mac:
+        print(
+            f"no game data: no Payback.exe in {a.game} and no Mac Payback folder at {a.mac}; "
+            "run tools/extract/extract.py or extract_mac.py, or pass --game / --mac",
+            file=sys.stderr,
+        )
         return 1
     rules = load_rules()
-    sources = [(a.game, "amiga")]
-    if os.path.isdir(os.path.join(a.mac, "CubeTextures")):
+    sources = []
+    if has_game:
+        sources.append((a.game, "amiga"))
+    else:
+        print(f"note: no Payback.exe in {a.game}; staging the Mac data only")
+    if has_mac:
         sources.append((a.mac, "mac"))
     else:
         print(f"note: no Mac data at {a.mac}; staging the Amiga data only")

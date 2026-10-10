@@ -273,8 +273,10 @@ impl Item {
                 n => format!("Frame limit: {n} fps"),
             },
             _ => {
-                // A Mac choice reads "Amiga" when the Mac data is missing.
-                let mac = self.variant(s).unwrap_or(false) && !self.needs_mac(cx.data);
+                // A Mac choice reads "Amiga" when the Mac data is missing,
+                // an Amiga one "Mac" when the Amiga data is.
+                let mac = self.variant(s).unwrap_or(false) && !self.needs_mac(cx.data)
+                    || self.needs_amiga(cx.data);
                 let (name, m, a) = match self {
                     Item::Textures => ("Textures", "Mac", "Amiga look"),
                     Item::Blood => ("Blood", "Mac", "Amiga"),
@@ -326,9 +328,18 @@ impl Item {
         }
     }
 
-    /// Dimmed for either reason ([`Item::dimmed`], [`Item::needs_mac`]).
+    /// A Mac/Amiga choice without the Amiga data (running from the Mac
+    /// data alone, `GameData::amiga`): greyed out and showing the Mac
+    /// content, mirroring [`Item::needs_mac`].
+    pub fn needs_amiga(self, data: &crate::data::GameData) -> bool {
+        !data.amiga
+            && matches!(self, Item::Textures | Item::Blood | Item::MenuProps | Item::Title | Item::Intro | Item::Scenery)
+    }
+
+    /// Dimmed for any of these reasons ([`Item::dimmed`],
+    /// [`Item::needs_mac`], [`Item::needs_amiga`]).
     pub fn locked(self, cx: &Ctx) -> bool {
-        self.dimmed(cx.settings) || self.needs_mac(cx.data)
+        self.dimmed(cx.settings) || self.needs_mac(cx.data) || self.needs_amiga(cx.data)
     }
 
     /// In a level the setting only takes effect at the next level load:

@@ -44,7 +44,9 @@ Output, all git-ignored:
 The data pack is the original game's data and must never be committed or
 published. It is made from the locally extracted copy (`extracted/game`
 and `extracted/mac/Payback`, or `PAYBACK_DATA` / `PAYBACK_MAC_DATA`), and
-a `Music/` folder of ripped CD tracks if there is one. Executables,
+a `Music/` folder of ripped CD tracks if there is one; either release
+alone is enough (`GameData`, `crates/payback/src/data.rs`). Executables
+(except `Payback.exe` and `Payback (OS X)`, which hold the palette),
 editors, docs, resource forks and the two Mac films the game never plays
 are left out (about 120 MB remain, 46 MB of it the Mac intro film).
 
@@ -73,7 +75,7 @@ Command-line options become query parameters: `?map=3&level=1`,
   through it. Natively it is `std::fs`. On the web the page hands the
   data pack to `vfs_load` (one blob plus a path index); the Amiga data is
   `data/game/...` and the Mac data `data/mac/...`, which
-  `GameData::locate` / `locate_mac` pick up as their defaults. Directory
+  `GameData::locate` picks up as its defaults. Directory
   listings (user maps, replays, phrases, object textures, music) come from
   the same index.
 - Saves: `frontend::progress::saves_dir()` is `saves` on the web, and the

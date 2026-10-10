@@ -14,8 +14,9 @@
 //! (`ScaleRectToFit`) on black and plays it with its own sound at full
 //! volume. Same call sites (`InitAll` @ 100632a0, `DoGameMenu` @ 100a05e0).
 //! The film is decoded with the vendored pl_mpeg (`payback-mpeg`); it is
-//! used when `Settings.variants.intro` is on and the Mac data has it,
-//! otherwise the FLC plays.
+//! used when `Settings.variants.intro` is on (or the Amiga data is missing:
+//! `GameData::mac_variant`) and the Mac data has it, otherwise the FLC
+//! plays.
 //!
 //! Any key or mouse button skips (also a pad button, our extension). Only new
 //! presses count: the Mac polls the *held* keys (`ALAnyKeyPressed`), so a key
@@ -214,7 +215,7 @@ fn start(
     if requests.read().count() == 0 || playing.is_some() {
         return;
     }
-    let mac = settings.is_none_or(|s| s.variants.intro);
+    let mac = data.mac_variant(settings.is_none_or(|s| s.variants.intro));
     let (video, size) = match mac.then(|| open_film(&data)).flatten() {
         Some((mpeg, audio)) => {
             let size = (mpeg.width(), mpeg.height());

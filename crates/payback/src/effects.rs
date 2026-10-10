@@ -1108,9 +1108,9 @@ fn setup(
 /// What the blood slot (atlas tiles `BLOOD_TILE` and its night
 /// replacement `BLOOD_DARK_TILE`) shows. `mac` (`Variants::blood`): the Mac
 /// `Blood`, smaller and darker, day and night: the Mac ships no
-/// `Blood.dark` and `InitAll` @ 100632a0 loads only `Blood`. Otherwise (or
-/// without Mac data) the Amiga `Blood` with `Blood.dark` at night
-/// (`FUN_01035250`). `gas` (`Variants::gas` with the language Deutsch):
+/// `Blood.dark` and `InitAll` @ 100632a0 loads only `Blood`; also without
+/// the Amiga data (`GameData::mac_variant`). Otherwise (or without Mac
+/// data) the Amiga `Blood` with `Blood.dark` at night (`FUN_01035250`). `gas` (`Variants::gas` with the language Deutsch):
 /// `Gas` instead, day and night, as the Mac `InitAll` and `DoSetLanguage`
 /// @ 1008c2b0 load it for German (Amiga `FUN_0104feb0` always loads
 /// `Blood`).
@@ -1134,8 +1134,8 @@ impl BloodSlot {
     fn file(self, tile: usize, name: &'static str, data: &GameData) -> (&'static str, bool) {
         match tile {
             BLOOD_TILE | BLOOD_DARK_TILE if self.gas => ("Gas", false),
-            BLOOD_TILE => ("Blood", self.mac),
-            BLOOD_DARK_TILE if self.mac && data.mac_path("EffectTextures/Blood").is_some() => {
+            BLOOD_TILE => ("Blood", data.mac_variant(self.mac)),
+            BLOOD_DARK_TILE if data.mac_variant(self.mac) && data.mac_path("EffectTextures/Blood").is_some() => {
                 ("Blood", true)
             }
             _ => (name, false),

@@ -1,17 +1,24 @@
 //! Locating and loading the original game data.
 //!
 //! The reimplementation ships no original assets. It reads them from an
-//! installed copy (CD contents + Update 7). Natively it is searched for
-//! (`PAYBACK_DATA`, `--data <dir>`, a remembered folder, next to the
-//! executable, `extracted/game` above the executable or the working
-//! directory, else a folder picker: `locate.rs`); the web build reads its
-//! pack's `data/game`.
+//! installed copy: the Amiga release (CD contents + Update 7), the Mac
+//! release (`docs/re/mac_version.md`), or both. Natively each is searched
+//! for (`PAYBACK_DATA` / `PAYBACK_MAC_DATA`, `--data` / `--mac-data <dir>`,
+//! a remembered folder, next to the executable, `extracted/game` /
+//! `extracted/mac/Payback` above the executable or the working directory,
+//! else a folder picker that takes either: `locate.rs`); the web build
+//! reads its pack's `data/game` and `data/mac`.
 //!
-//! The Mac release (`docs/re/mac_version.md`) is an optional second root,
-//! searched the same way (`PAYBACK_MAC_DATA`, `--mac-data <dir>`,
-//! `extracted/mac/Payback`, ...) but never asked for. Where
-//! the Mac and Amiga content differ, the player picks per item in the
-//! settings (`frontend::progress::Variants`); `read_variant` serves either.
+//! Either release alone is enough. With both, the Amiga install is the
+//! main root and the Mac folder a second one; where their content differs,
+//! the player picks per item in the settings
+//! (`frontend::progress::Variants`); `read_variant` serves either. With the
+//! Mac data alone (or `--mac-only`, which ignores the Amiga data) the Mac
+//! folder is the main root and every Mac/Amiga choice is the Mac one
+//! ([`GameData::mac_variant`]). The Amiga-only content is then missing:
+//! the FLC intro (the Mac film plays), `Blood.dark` (the Mac `Blood` serves
+//! at night too), the eleven languages beyond English, Deutsch and
+//! Français, the two shipped replays and the `Payback.info` icon.
 //! A changed variant takes effect when that content is next loaded: the
 //! cube textures at the next level load, the title screen at the next
 //! start, the blood slot at once.
@@ -26,8 +33,10 @@
 //!   and the extractor's `*.rsrc` resource forks are skipped in directory
 //!   scans;
 //! - short cube textures are zero-padded (`TentRoof.chunky`);
-//! - the palette still comes from the Amiga `Payback.exe` (the Mac binaries
-//!   hold no LoadRGB32 table; the Mac palette is the Update 7 one).
+//! - the palette: from the Amiga `Payback.exe` when present, else from
+//!   `Payback (OS X)` (or `Payback (OS 9)`), whose pattern-initialized PEF
+//!   data section holds the same LoadRGB32 table, byte-identical to Update
+//!   7's (`palette::find_in_executable`, `docs/re/mac/assets.md` §15).
 
 use bevy::prelude::*;
 use payback_formats::{CubeTextureList, CustomTextures, IndexedImage, Palette, palette};
@@ -54,9 +63,30 @@ pub fn log_data_roots() {
     }
 }
 
+/// The Mac applications that hold the palette, in the order tried.
+const MAC_EXES: [&str; 2] = ["Payback (OS X)", "Payback (OS 9)"];
+
+/// The data roots the search found: the Amiga install and the Mac
+/// `Payback` folder, at least one of them.
+#[derive(Clone, Debug, Default)]
+pub struct Roots {
+    pub amiga: Option<PathBuf>,
+    pub mac: Option<PathBuf>,
+}
+
+/// `--mac-only`: ignore the Amiga data and run from the Mac data alone
+/// (to try a Mac-only install).
+pub fn mac_only() -> bool {
+    crate::args().any(|a| a == "--mac-only")
+}
+
 #[derive(Resource, Clone)]
 pub struct GameData {
+    /// The main root: the Amiga install, or the Mac folder without it.
     pub root: PathBuf,
+    /// The Amiga data is present (`root` holds `Payback.exe`); false when
+    /// running from the Mac data alone (`root` = `mac`).
+    pub amiga: bool,
     /// The Mac release's `Payback` folder, if present.
     pub mac: Option<PathBuf>,
     pub palette: Palette,
@@ -70,64 +100,59 @@ pub struct GameData {
 }
 
 impl GameData {
-    /// The Amiga data root (`locate.rs`; may show a folder picker).
+    /// The Amiga and Mac data roots (`locate.rs`; shows a folder picker
+    /// when neither is found).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn locate() -> Result<PathBuf, String> {
-        crate::locate::locate_game()
+    pub fn locate() -> Result<Roots, String> {
+        crate::locate::locate()
     }
 
-    /// The Mac data folder (`Payback` in `PaybackMac.toast`, extracted by
-    /// `tools/extract/extract_mac.py`), if the search finds one.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn locate_mac() -> Option<PathBuf> {
-        crate::locate::locate_mac()
-    }
-
+    /// The web build's data: the pack's folders (or `PAYBACK_DATA`,
+    /// `--data`, ... as natively), either may be missing.
     #[cfg(target_arch = "wasm32")]
-    pub fn locate() -> Result<PathBuf, String> {
-        let from_args = crate::args()
-            .skip_while(|a| a != "--data")
-            .nth(1)
-            .map(PathBuf::from);
-        let candidates = std::env::var_os("PAYBACK_DATA")
-            .map(PathBuf::from)
+    pub fn locate() -> Result<Roots, String> {
+        let given = |env: &str, arg: &str, default: &str| {
+            std::env::var_os(env)
+                .map(PathBuf::from)
+                .into_iter()
+                .chain(crate::arg(arg).map(PathBuf::from))
+                .chain([PathBuf::from(default)])
+                .collect::<Vec<_>>()
+        };
+        let amiga = given("PAYBACK_DATA", "--data", DEFAULT_DATA)
             .into_iter()
-            .chain(from_args)
-            .chain([PathBuf::from(DEFAULT_DATA)]);
-        for dir in candidates {
-            if crate::vfs::is_file(dir.join("Payback.exe")) {
-                return Ok(dir);
-            }
+            .find(|d| crate::vfs::is_file(d.join("Payback.exe")))
+            .filter(|_| !mac_only());
+        let mac = given("PAYBACK_MAC_DATA", "--mac-data", DEFAULT_MAC_DATA)
+            .into_iter()
+            .find(|d| is_mac_root(d));
+        if amiga.is_none() && mac.is_none() {
+            return Err("Payback data not found: the data pack holds neither the Amiga release \
+                        (Payback.exe) nor the Mac release's Payback folder (docs/web.md)."
+                .into());
         }
-        Err(
-            "Payback data not found. Set PAYBACK_DATA or pass --data <dir> pointing at an \
-             install containing Payback.exe (run `python tools/extract/extract.py` to unpack the CD)."
-                .into(),
-        )
+        Ok(Roots { amiga, mac })
     }
 
-    /// The web build's Mac data, if the pack has it.
-    #[cfg(target_arch = "wasm32")]
-    pub fn locate_mac() -> Option<PathBuf> {
-        let from_args = crate::args()
-            .skip_while(|a| a != "--mac-data")
-            .nth(1)
-            .map(PathBuf::from);
-        std::env::var_os("PAYBACK_MAC_DATA")
-            .map(PathBuf::from)
-            .into_iter()
-            .chain(from_args)
-            .chain([PathBuf::from(DEFAULT_MAC_DATA)])
-            .find(|d| crate::vfs::is_file(d.join("Payback (OS X)")) || crate::vfs::is_dir(d.join("CubeTextures")))
-    }
-
-    pub fn load(root: &Path) -> Result<GameData, String> {
-        let exe = crate::vfs::read(root.join("Payback.exe"))
-            .map_err(|e| format!("{}: {e}", root.join("Payback.exe").display()))?;
-        let palette = palette::find_in_executable(&exe).map_err(|e| e.to_string())?;
+    pub fn load(roots: &Roots) -> Result<GameData, String> {
+        let (root, amiga) = match (&roots.amiga, &roots.mac) {
+            (Some(a), _) => (a.clone(), true),
+            (None, Some(m)) => (m.clone(), false),
+            (None, None) => return Err("Payback data not found.".into()),
+        };
+        // Both releases hold the same palette (`palette.rs`); the Amiga
+        // data, when present, stays the source as before.
+        let palette = if amiga {
+            let exe = crate::vfs::read(root.join("Payback.exe"))
+                .map_err(|e| format!("{}: {e}", root.join("Payback.exe").display()))?;
+            palette::find_in_executable(&exe).map_err(|e| e.to_string())?
+        } else {
+            mac_palette(&root)?
+        };
         let mut data = GameData {
-            root: root.to_path_buf(),
-            mac: Self::locate_mac(),
+            root: root.clone(),
+            amiga,
+            mac: roots.mac.clone(),
             palette,
             cube_textures: CubeTextureList { entries: Vec::new() },
             mac_cube_textures: true,
@@ -138,6 +163,12 @@ impl GameData {
         })?;
         data.cube_textures = CubeTextureList::parse(&list).map_err(|e| e.to_string())?;
         Ok(data)
+    }
+
+    /// The effective value of a Mac/Amiga choice (`Variants`): the
+    /// setting, or always the Mac one without the Amiga data.
+    pub fn mac_variant(&self, setting: bool) -> bool {
+        setting || !self.amiga
     }
 
     /// `rel` from the Amiga data (names matched case-insensitively when the
@@ -234,6 +265,35 @@ impl GameData {
         }
         out
     }
+}
+
+/// `dir` is the Mac release's `Payback` folder: it has the Mac names of
+/// the texture lists (`CubeTextures/CubeTextureList.txt`; the Amiga data
+/// has `.CubeTextureList`), or one of the Mac applications.
+pub fn is_mac_root(dir: &Path) -> bool {
+    crate::vfs::is_file(dir.join("CubeTextures").join("CubeTextureList.txt"))
+        || MAC_EXES.iter().any(|e| crate::vfs::is_file(dir.join(e)) && crate::vfs::is_dir(dir.join("CubeTextures")))
+}
+
+/// The palette from a Mac application in `mac`: the LoadRGB32 table in its
+/// PEF data section, identical to Update 7's (`MAC_EXES`).
+fn mac_palette(mac: &Path) -> Result<Palette, String> {
+    let mut errors = String::new();
+    for name in MAC_EXES {
+        let Some(path) = find_in(mac, Path::new(name)) else { continue };
+        let found = crate::vfs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| palette::find_in_executable(&b).map_err(|e| e.to_string()));
+        match found {
+            Ok(p) => return Ok(p),
+            Err(e) => errors.push_str(&format!("\n{}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "No palette: the Amiga data (Payback.exe) is missing and the Mac data at {} has no \
+         usable `Payback (OS X)` or `Payback (OS 9)` application to read it from.{errors}",
+        mac.display()
+    ))
 }
 
 /// Mac Finder and Sherlock files (`.DS_Store`, `.FBCIndex`,

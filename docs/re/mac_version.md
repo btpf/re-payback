@@ -109,7 +109,11 @@ with 8-bit masks; `payback_formats::icon::mac_app_icon`), embedded by
 ## Data loading in the port
 
 `GameData` (`crates/payback/src/data.rs`) keeps the Amiga data as the
-required root and the Mac `Payback` folder as an optional second one.
+main root and the Mac `Payback` folder as a second one. Either alone is
+enough: without the Amiga data the Mac folder is the main root
+(`GameData::amiga` false) and every Mac/Amiga choice gives the Mac content
+(`GameData::mac_variant`; the settings grey those items out, as they do
+the Mac ones without the Mac data). `--mac-only` ignores the Amiga data.
 - `read` takes the Amiga file, matching names case-insensitively when the
   exact one is missing, then a Mac-only file (`ObjectTextures/tanne`, the
   new prop textures). `read_variant(rel, prefer_mac)` serves a Mac-or-Amiga
@@ -118,7 +122,9 @@ required root and the Mac `Payback` folder as an optional second one.
 - Texture lists: the Amiga `.CubeTextureList` / `.CubeTextureRemapList`,
   else the Mac `CubeTextureList.txt` / `CubeTextureRemapList.txt`
   (byte-identical; CONFIRMED, Mac strings `1018a4f9` / `10193015`).
-- Palette: always from the Amiga `Payback.exe`.
+- Palette: from the Amiga `Payback.exe` when present, else from the Mac
+  `Payback (OS X)` / `Payback (OS 9)` PEF data section; the tables are
+  identical (CONFIRMED, `docs/re/mac/assets.md` §15).
 - Cube textures (`Variants::textures`): the Mac set as a whole, else the
   Amiga set. Short files are zero-padded to 64x64: the Mac
   `TentRoof.chunky` is 4032 bytes and the Mac loader reads 0x1000 with no
