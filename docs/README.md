@@ -14,6 +14,7 @@ exports are made.
 | [`status.md`](status.md) | state of the port per area, roadmap, where the open questions are |
 | [`sources.md`](sources.md) | the original media, versions and binaries; landmark functions |
 | [`decompiling.md`](decompiling.md) | the Ghidra workflow: `tools/ghidra/decompile_all.sh`, what `analysis/` holds, lookup tools |
+| [`required_files.html`](required_files.html) | which original files are needed to compile, run and decompile (open in a browser) |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | CONFIRMED / INFERRED, citation format, quoting limits, adding a finding |
 | [`port_engineering.md`](port_engineering.md) | the port's determinism rules, performance checks, frame pacing |
 | [`controls.md`](controls.md) | keyboard and gamepad bindings |
