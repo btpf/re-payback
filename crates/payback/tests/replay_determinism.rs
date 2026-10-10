@@ -44,7 +44,8 @@ fn data_present(root: &Path) -> bool {
 /// Run the game and return its `replay hash` lines.
 fn hashes(root: &Path, args: &[&str]) -> Vec<String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_payback"));
-    cmd.current_dir(root).args(args);
+    // Test runs open in a normal window, never the user's fullscreen setting.
+    cmd.current_dir(root).args(args).args(["--window-mode", "windowed", "--resolution", "1280x800"]);
     if let Ok(n) = std::env::var("REPLAY_FAST") {
         cmd.args(["--fast", &n]);
     }

@@ -19,9 +19,9 @@ D=${REPLAY_OUT:-target/replay_check}
 [ -f "$PAYBACK_EXE" ] || { echo "$PAYBACK_EXE: not found"; exit 2; }
 mkdir -p "$D"
 name=$1; ticks=$2; shift 2
-"$PAYBACK_EXE" --record "$D/$name" --script-input --ticks "$ticks" "$@" 2>&1 \
+"$PAYBACK_EXE" --record "$D/$name" --script-input --ticks "$ticks" --window-mode windowed --resolution 1280x800 "$@" 2>&1 \
     | grep "replay hash" | sed 's/.*hash: //' > "$D/$name.rec.log"
-"$PAYBACK_EXE" --play "$D/$name" --ticks "$ticks" 2>&1 \
+"$PAYBACK_EXE" --play "$D/$name" --ticks "$ticks" --window-mode windowed --resolution 1280x800 2>&1 \
     | grep "replay hash" | sed 's/.*hash: //' > "$D/$name.play.log"
 if [ ! -s "$D/$name.rec.log" ]; then
     echo "$name: FAILED (no hashes logged)"

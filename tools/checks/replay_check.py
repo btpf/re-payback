@@ -64,9 +64,13 @@ def default_exe() -> Path:
     return ROOT / "target" / "debug" / name
 
 
+# Test runs open in a normal window, never the user's fullscreen setting.
+WINDOWED = ["--window-mode", "windowed", "--resolution", "1280x800"]
+
+
 def run(exe: Path, args: list[str]) -> list[str] | None:
     """Run the game, return its `replay hash` lines (None if it failed)."""
-    p = subprocess.run([str(exe), *args], cwd=ROOT, capture_output=True,
+    p = subprocess.run([str(exe), *args, *WINDOWED], cwd=ROOT, capture_output=True,
                        text=True, errors="replace")
     lines = [m.group(1).strip() for line in (p.stdout + p.stderr).splitlines()
              if (m := HASH.search(line))]

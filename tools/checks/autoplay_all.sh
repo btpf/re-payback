@@ -26,7 +26,7 @@ for ml in $levels; do
     m=${ml%.*}; l=${ml#*.}
     log=$out/l$m$l.log
     timeout "${AUTOPLAY_TIMEOUT:-1500}" "$exe" --map "$m" --level "$l" --autoplay \
-        --fast "${AUTOPLAY_FAST:-20}" --seed "${AUTOPLAY_SEED:-1234}" > "$log" 2>&1
+        --fast "${AUTOPLAY_FAST:-20}" --seed "${AUTOPLAY_SEED:-1234}"         --window-mode windowed --resolution 1280x800 > "$log" 2>&1
     echo "level $m.$l:"
     grep -E "RESULT|panicked" "$log" | sed 's/.*autoplay: //' | cut -c1-200
     echo "   missions: $(grep -cE 'message 2022' "$log") complete, $(grep -cE 'message 2028' "$log") failed"

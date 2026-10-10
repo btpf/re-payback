@@ -22,7 +22,7 @@ fi
 secs=${1:-30}
 [ $# -gt 0 ] && shift
 [ $# -gt 0 ] || set -- --map 0
-out=$("$PAYBACK_EXE" --perf-check "$secs" --autoplay "$@" 2>&1)
+out=$("$PAYBACK_EXE" --perf-check "$secs" --autoplay --window-mode windowed --resolution 1280x800 "$@" 2>&1)
 status=$?
 echo "$out" | grep -E "perf-check|perf whole run" | sed 's/^.*\(perf\)/\1/'
 echo "$out" | grep -q "perf-check: PASS" && exit 0
