@@ -32,3 +32,4 @@ __pycache__/
 
 # Web build output (tools/web/build_web.sh); data/ holds the packed original data.
 /web/dist/
+/docs/required_files.html
