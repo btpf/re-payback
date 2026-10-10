@@ -278,7 +278,7 @@ removed (`0xa653a`). `0xa653a` takes a **script id** and is called only from the
   (`mission/eval.rs`). With several live actors sharing an id the Mac watches only the
   first; the shipped scripts never do that (INFERRED), so the port keeps the fan-out.
 * **Add time (`SetTrigger_Long`, all 69 cases; the Amiga agrees unless marked).** The
-  port follows these (scratch_followup/triggers.md):
+  port follows these (`docs/re/mac/triggers.md`):
   * 0x33–0x36 with a = −1 become 0x1e–0x21 **and** move the threshold b into a
     (cases 101075b4, 101074f4, 10107494, 10107554).
   * 0x02 records each matching actor's x, y and floor once; the trigger then tests that

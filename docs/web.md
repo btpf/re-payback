@@ -33,11 +33,20 @@ The build uses the `web` cargo profile (release with `opt-level = "s"`,
 thin LTO, stripped; root `Cargo.toml`), then `wasm-opt -O2` when present.
 A first build takes 15-30 minutes.
 
+Cache-busting: the script replaces `__BUILD__` and `__DATA__` in the loader
+with content hashes of `payback.js` + `payback_bg.wasm` and of the data
+index, so the page asks for `payback.js?v=…`, `payback_bg.wasm?v=…` and
+`data/payback.*?v=…`. A browser therefore never runs a cached `payback.js`
+against a newer `.wasm` (the wasm-bindgen glue names change on every build,
+and a mismatch fails with "wasm.__wasm_bindgen_func_elem_… is not a
+function"). Serve `web/dist/`, not `web/`: the committed `web/index.html`
+still holds the placeholders.
+
 Output, all git-ignored:
 
 | file | what |
 |---|---|
-| `web/dist/index.html` | copy of the committed loader `web/index.html` |
+| `web/dist/index.html` | the committed loader `web/index.html` with `?v=<hash>` on every URL (below) |
 | `web/dist/payback.js`, `payback_bg.wasm` | wasm-bindgen output (about 48 MB, 12.7 MB gzipped) |
 | `web/dist/data/payback.pak`, `payback.json` | **your** game data, packed by `tools/web/pack_web_data.py` |
 
@@ -48,7 +57,8 @@ a `Music/` folder of ripped CD tracks if there is one; either release
 alone is enough (`GameData`, `crates/payback/src/data.rs`). Executables
 (except `Payback.exe` and `Payback (OS X)`, which hold the palette),
 editors, docs, resource forks and the two Mac films the game never plays
-are left out (about 120 MB remain, 46 MB of it the Mac intro film).
+are left out (about 130 MB remain with both releases, 46 MB of it the Mac
+intro film).
 
 ## Serving
 

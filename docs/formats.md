@@ -213,7 +213,11 @@ lighting is on (`FUN_010766c8`; `rendering.md` §4).
 Not a file. It is a `LoadRGB32` table in the executable: `u32 0x01000000`,
 256 × (`u32` R, G, B) with the component in the top byte, `u32 0`. Update 7's
 `Payback.exe` has four identical copies; the CD release's palette differs.
-Found by signature (`payback-formats/src/palette.rs`).
+The Mac programs (`Payback (OS X)`, `Payback (OS 9)`) hold four copies each,
+byte-identical to Update 7's, inside their pattern-initialized PEF data section
+(`DoSetupColourLookup` @ 10084640; `re/mac/assets.md` §15), so a Mac-only install
+has the palette too. Found by signature (`payback-formats/src/palette.rs`, PEF
+sections unpacked by `pef.rs`).
 
 `General/64->256.dat` (64 bytes; extracted as `64-_256.dat` on Windows, where
 `>` is illegal) maps the 64 flat-colour indices of object faces to palette

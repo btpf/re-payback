@@ -4,7 +4,8 @@ Line-by-line comparison of the AI driving code: traffic, police, scripted drives
 Sources: Mac OS X `analysis/ghidra_macx/decompiled.c` (original C++ names; the more
 definitive copy), 68k Update 7 `analysis/ghidra_68k`, OS4 `analysis/ghidra_os4` (the OS4
 main update `FUN_0105f594` does not decompile; its AI is identical to the 68k one wherever
-`analysis/ghidra_os4/long_timeout.c` shows it). Scratch extracts: `analysis/scratch/aidrive/`.
+`analysis/ghidra_os4/long_timeout.c` shows it). Scratch extracts were in `analysis/scratch/aidrive/` (local working files, not kept;
+`docs/CONVENTIONS.md` "Paths in the notes").
 
 Port line numbers are from `HEAD` (commit 978a0ac) before this pass.
 

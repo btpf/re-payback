@@ -1230,7 +1230,7 @@ pub fn order_trigger(ty: u8) -> bool {
 }
 
 /// Types the Mac keys by the script id alone (one trigger, resolved every
-/// frame; missions.md §1.1, scratch_followup/triggers.md §5).
+/// frame; docs/re/mac/gameplay_missions.md §1.1, docs/re/mac/triggers.md §5).
 fn id_trigger(ty: u8) -> bool {
     use kind::*;
     matches!(

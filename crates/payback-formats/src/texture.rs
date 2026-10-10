@@ -8,7 +8,8 @@
 //! | `Backgrounds/*.chunky`    | 81920     | 320x256    |
 //! | `Maps/*.thumb`            | 65536     | 256x256    |
 //!
-//! `#Water.chunky` is 4160 bytes: 64x64 plus 64 trailing bytes (purpose TBD).
+//! `#Water.chunky` is 4160 bytes: 64x64 plus a copy of row 0 (64 bytes, for the
+//! scrolling reflection; docs/re/rendering.md "Reflect / water").
 //! Update 4+ adds `Backgrounds/*.chunky2` (320x256 24-bit RGB).
 //!
 //! Textures use a single global 256-colour palette laid out in ramps: shades
@@ -83,8 +84,9 @@ pub struct CubeTextureList {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CubeTextureEntry {
-    /// Per-texture flags; observed values 4, 34, 35, 36, 50, 51, 52, 65.
-    /// Probably surface material (footstep sound, drivability). TBD.
+    /// Per-texture flags; values 4, 34, 35, 36, 50, 51, 52, 65: the footstep
+    /// sound id and the vehicle grip class (stored at texture `+0x1040`,
+    /// OS4 `FUN_0106dfcc`; docs/formats.md, docs/re/rendering.md §8).
     pub flags: u32,
     pub file: String,
 }

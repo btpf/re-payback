@@ -456,7 +456,7 @@ Same phrases and logic; only code factoring differs:
 - **Record words keep the Amiga bit layout** (`ReadInput` `10064bf0` builds them as `FUN_01051a10`), but the body is a run-length bit stream with 4-bit change codes and no comments (correction, `input_movie.md` §1).
 - The Mac rejects versions 3, 10 and 0x3F2 (2116 "WRONG VERSION NUMBER"), so the Amiga replays cannot be played on the Mac.
 - **Shipped replays:** none. `Replays/` holds only `.FBCIndex`/`.FBCLockFolder`, mentioning development names "test", "test2", "trav…". "Race for the prize" and "Tanks a lot" are not on the Mac CD.
-- **Impact (adopt):** add read support for 0x3F3 (variable path, then level, then u32 length, then data) and **write 0x3F3** for new replays. Keep reading 3, 10 and 0x3F2. Check replay determinism (`check.sh`) still matches (the port writes the stream losslessly).
+- **Impact (adopt):** add read support for 0x3F3 (variable path, then level, then u32 length, then data) and **write 0x3F3** for new replays. Keep reading 3, 10 and 0x3F2. Check replay determinism (`tools/checks/replay_check.py --suite`) still matches (the port writes the stream losslessly).
 
 ### 7.3 High scores: `LoadHiscores` `1009e8a0`, `SaveHiscores` `1009eaa0`, `CalcHiscoreChecksum` `1009e7a0`, `InitHiscores` `1009e6a0` ↔ `FUN_01029b3c` / `FUN_0102a0fc` — C
 

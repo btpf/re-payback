@@ -605,7 +605,7 @@ replaces the 25 Hz suggested for the 68k Update 7 in `docs/re/people.md` §1.1.
 - The tick *source* must stay outside the simulation: wall clock when live, recorded value in
   replays.
 - Do not introduce any Mac-only per-tick rate change into the simulation without
-  re-recording the reference replays; `check.sh` must still report MATCH.
+  re-recording the reference replays; `tools/checks/replay_check.py --suite` must still report MATCH.
 
 **Not adopted [artefact]:** the busy-wait on `TickCount`, the absence of vsync and the
 single-threaded event pumping. Rendering faster than the tick with interpolation is not in

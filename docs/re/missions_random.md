@@ -84,4 +84,5 @@ the plain name (2330–2355).
   the setting is part of the replay header. The money goal (the high-score file) and the
   story progress (vehicle choice) are read at level start from the local files (INFERRED
   sufficient: replays are played back on the machine that recorded them).
-* No HUD arrows exist in the port yet, so the random phone is found by its flashing and ring.
+* The ringing phone is a phone trigger (type 1), so the HUD direction arrow (`arrow.rs`,
+  `Trigger::has_arrow`) points at it as at any phone, besides its flashing and ring.

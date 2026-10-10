@@ -25,24 +25,26 @@ in the corresponding `decompiled.c`.
 | Document | Items | Resolved | Open / INFERRED |
 |---|---|---|---|
 | `research.md` (old list) | 7 | 7 | 0 |
-| `formats.md` | 16 | 14 | 2 |
-| `rendering.md` | 6 | 5 | 1 |
-| `vehicles.md` | 4 | 3 | 1 |
+| `formats.md` | 16 | 16 | 0 |
+| `rendering.md` | 6 | 6 | 0 |
+| `vehicles.md` | 4 | 4 | 0 |
 | `people.md` | 10 | 7 | 3 |
-| `combat_police.md` | 17 | 15 | 2 |
-| `frontend_menus.md` | 14 | 11 | 3 |
-| `frontend_audio.md` | 17 | 12 | 5 |
-| `script_api.md` | 25 | 23 | 2 |
+| `combat_police.md` | 17 | 16 | 1 |
+| `frontend_menus.md` | 14 | 13 | 1 |
+| `frontend_audio.md` | 17 | 15 | 2 |
+| `script_api.md` | 25 | 24 | 1 |
 | `missions_00.md` | 16 | 13 | 3 |
 | `missions_01.md` | 17 | 14 | 3 |
 | `missions_10.md` | 12 | 6 | 6 |
-| `missions_11.md` | 13 | 6 | 7 |
-| `missions_20.md` | 10 | 7 | 3 |
+| `missions_11.md` | 13 | 10 | 3 |
+| `missions_20.md` | 10 | 8 | 2 |
 | `missions_21.md` | 17 | 14 | 3 |
-| **Total** | **201** | **157** | **44** |
+| **Total** | **201** | **173** | **28** |
 
-"Resolved" counts every CONFIRMED row: applied here, merged from §1, or already fixed
-by another agent in the same pass.
+"Resolved" counts every CONFIRMED row: applied here, merged from §1, already fixed
+by another agent in the same pass, or resolved later (counts as of 2026-10-09; the
+OPEN rows left are §2 `people.md` feet offset and river banks, `missions_10.md` the CD
+race helpers, and the CD audio track contents in `frontend_audio.md`).
 
 ## 1. Findings held back, now merged
 
@@ -181,7 +183,8 @@ two open items. Original notes:
   original; relabel it "Port deviations" instead of (I). The original-behaviour facts it
   repeats are already C in §6.1; the port (`sim/vehicle_ai.rs` ~457–475) matches the text.
 - **§6.2** could cite the new `Actor_SetAggro` reader list (`script_api.md` §5).
-- Still OPEN: §2.10 Slopes (I) (`FUN_010cbc7c`). Not investigated in this pass.
+- §2.10 Slopes (I) (`FUN_010cbc7c`), open in this pass, was resolved later: Mac
+  `PositionUnit` @ 10081450 = 68k `FUN_000a1758`, CONFIRMED in `vehicles.md` §2.10 and ported.
 
 ### 1.4 `combat_police.md` §2.2, §2.3, §2.5
 
@@ -270,7 +273,7 @@ respawn defaults.
 | §5 `.vehicles` placeholder | CONFIRMED, merged | `FUN_0106dbbc` |
 | `+0x4928` offset (OS4 vs 68k) | CONFIRMED, merged | 68k `+0x4926` / `+0x4928` |
 | §6.3 Port notes (I) | CONFIRMED, merged | relabel as port deviations |
-| §2.10 Slopes (I) | OPEN | trace `FUN_010cbc7c` against the 68k twin |
+| §2.10 Slopes (I) | CONFIRMED, applied (later) | Mac `PositionUnit` @ 10081450 = 68k `FUN_000a1758` (`vehicles.md` §2.10) |
 
 ### `docs/re/people.md`
 
@@ -449,7 +452,7 @@ respawn defaults.
 | Q3 M3 `SetCube` at (56..57,114..115) | CONFIRMED (data) | (56,115) cube 1 is a front-fence piece (`Fence2` genlocked south face) right in front of the house's doorway at (56,114) cube 1; removing it opens the fence at the door |
 | Q4 M1 texture 0x1dd ring | CONFIRMED (data) | 0x1dd = `Snow.chunky`; the ring squares carry the block's painted shadow (`Snow.Dark`, `SnowShad1/3`), so the edit removes the demolished block's shadow |
 | Q5 speaker ids | CONFIRMED, applied | icon only |
-| Q6 Kill-frenzy clock vs mission timers | OPEN | run RC bonus during M2/M6 |
+| Q6 Kill-frenzy clock vs mission timers | CONFIRMED, applied (later) | first type-5 trigger in table order shows (`GetTimerVal` @ 100f6b10; `missions_11.md` §8 item 6); not yet seen in game |
 | Q7 helper `default:` branches | INFERRED, kept | design note for the port |
 | Q8 ped skins | CONFIRMED, applied | load order `0xd7874`; colours per limb group from the `.Obj` files (`missions_11.md` §8 item 8) |
 | Zone A = hotel (INFERRED) | INFERRED, kept | coordinates |

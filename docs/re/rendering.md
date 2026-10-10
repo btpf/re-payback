@@ -990,8 +990,8 @@ Status (port): 1–7 are implemented (`world.rs`, `city.rs`, `water.rs`, `camera
 Also done: weather and the palette flash including explosions (§4), lens flares with
 ghosts (§7), Gouraud lighting with the static lamps and the dynamic lights
 (`lighting.rs`, §4), the night headlight polygon, Blood.dark, mode 3/4/5 object faces,
-vehicle colour textures and the object details of §10. Still missing: the rotating
-view.
+vehicle colour textures and the object details of §10, the rotating view and motion
+blur (`camera.rs` `RotatingView`, `postfx.rs`).
 
 ---
 
@@ -1167,7 +1167,8 @@ Additive blending happens in linear colour rather than palette space.
   bilinearly. Port approximation: depth-tested horizontal triangles 1 h-unit above the
   ground instead of the draw order; the subtraction is exact on the gamma-encoded
   palette bytes (§3).
-* Not done: debris (`DrawPart` @ 100794c0, the part list of `FUN_01035438`).
+* Debris (`DrawPart` @ 100794c0, the part list of `FUN_01035438`): ported in `debris.rs`
+  (§7 "Debris").
 * **Scenery below its origin.** `DrawMap` @ 1005a260 calls `DrawScenery` with the cube
   top (`height << 4`) and no offset, after that square's cubes, so a model reaching
   below its origin still shows whole (painter's order). Only the tumbling `Info` sign

@@ -537,7 +537,7 @@ pub fn view_fov(players: usize, rotating: bool) -> f32 {
 }
 
 /// [`view_fov`] for a window of `size` physical pixels. With `original`
-/// (`Settings::original_aspect`, the default) the horizontal field of view
+/// (`Settings::original_aspect`; off by default, a port choice) the horizontal field of view
 /// is the original's at any size: `ReadScreenParams__Fv` @ 10051fc0 (OS4
 /// `FUN_0104107c`) scales fx = (W+8)·16/320 with the width, so one view
 /// always spans 2·atan(160/256) ≈ 64° (two side by side: fx =

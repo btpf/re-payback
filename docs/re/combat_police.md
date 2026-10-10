@@ -781,7 +781,8 @@ Code: collect 68k `FUN_000d0988` / OS4 `FUN_01048ee4`; respawn 68k `FUN_000d079e
   `FUN_000384e8`): `Split` (the crate.obj fragments), then max(2, min(6, 5>>1)) = **2** Dust puffs
   at centre ± 400 (z ± 150), v = r(500) − 250 per axis (÷3), size 1500 + r(1000). All draws come
   from the cosmetic **`random3`** stream (port: `VisualRng`), so a crate break does not move the
-  game's sequence [C]. The port does not draw the fragments yet.
+  game's sequence [C]. The port draws the fragments too (`debris.rs` `Parts::bang`, from
+  `sim/combat.rs` `break_crate_at`).
 - Weapon selection by number key needs health > 0 **and** the stun timer at 0 [C: Mac
   `UpdateInputStatus` @ 100f8490; the Amiga agrees].
 - The scenery then becomes the contents given by the square's 5-bit `special`: 1→9 bazooka,

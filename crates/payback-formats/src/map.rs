@@ -6,7 +6,7 @@
 //! u8   0xFF
 //! u32  1               (version?)
 //! u32  night           1 = night textures/lighting (map 2)
-//! u32  variant         0/1/2 for maps 0/1/2; weather or map id, TBD
+//! u32  variant         weather: 0 none, 1 snow, 2 rain (maps 0/1/2; docs/formats.md)
 //! 128 x 128 squares, x-major (outer loop x, inner loop y):
 //!   u8 kinds           2 bits per cube, cube 0 in bits 0-1
 //!   3 cubes, bottom to top, each by kind:
@@ -126,8 +126,9 @@ pub struct Cube {
     pub rotation: u8,
     /// Scenery object id, 0 = none. 14 = phone.
     pub scenery: u8,
-    /// Square flags. 0x20 = pedestrians may walk here; low bits are probably
-    /// traffic flow (N/E/S/W/straight) and the roadblock flag. TBD.
+    /// Square flags: 0x01/0x02/0x04/0x08 traffic may leave N/E/S/W, 0x10
+    /// straight on, 0x20 pedestrians walk here, 0x40 roadblock allowed, 0x80
+    /// unused (docs/formats.md "flags").
     pub flags: u8,
     pub faces: [Face; 5],
 }

@@ -12,9 +12,11 @@ missions driven by per-level scripts, vehicles, pedestrians and police.
 | `PaybackUpdate7.lha` | last official update; **the version we target** |
 | `paybackupdateOS4Native.lha` | community AmigaOS 4 PPC port (ELF) |
 | `Warp3D-42.lha` | Warp3D driver; not needed |
+| `PaybackMac.toast` | Mac OS 9 / OS X release (HFS image); the reference for behaviour; enough on its own to run the port |
 
-`python tools/extract/extract.py` unpacks all of it into `extracted/` and builds the
-merged install in `extracted/game/`.
+`python tools/extract/extract.py` unpacks the Amiga media into `extracted/` and builds
+the merged install in `extracted/game/`; `python tools/extract/extract_mac.py` reads
+the Mac image into `extracted/mac/`.
 
 ## Amiga binaries
 

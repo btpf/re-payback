@@ -137,7 +137,7 @@ Sources compared:
   knocked down changes the weapon.
 - **Recommendation:** add `person.stun == 0` (`Person::stun`, `sim/people.rs:69`) to the
   condition. Re-record any baseline that happens to press a weapon key while stunned. The
-  current scripted input selects at `t % 400 == 100`, so check `check.sh` afterwards.
+  current scripted input selects at `t % 400 == 100`, so run `tools/checks/replay_check.py --suite` afterwards.
 - **Status:** CONFIRMED.
 
 ### 4. Digit weapon keys don't work for keyboard players in multiplayer (port gap; Amiga agrees with the Mac)

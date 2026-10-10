@@ -494,14 +494,14 @@ AP = [
     ('1. Data and render only', 8, 'Front end: Mac defaults (music Radio, volume 50, P1 Keyboard, P2 Gamepad 1, FX 2, Gouraud on); "Music setup"/"Difficulty:" texts; rotating `controlsetup` and `cd` models; refuse F1 / allow P; devices Off/Gamepad 1-4/Keyboard; keyboard + pad 1 together; intro stops music unless Disabled; save settings on quit; settings apply live.', '`frontend/*.rs`, `frontend/bindings.rs`, `frontend/progress.rs`', 'Input mapping only; replays record inputs, so unaffected.', 'frontend §15'),
     ('1. Data and render only', 9, 'Mac phrases as the English/Deutsch/Francais baseline (global, level, credits); accept `Francais` and `Français`; keep the 11 other Amiga languages.', '`frontend/mod.rs`, `hud/mod.rs` phrase loading', 'None.', 'frontend §6, assets §8'),
     ('1. Data and render only', 10, 'German `Gas` in the blood slot when the language is Deutsch, as a setting (default off); reload on language change.', '`effects.rs`, `frontend/menus.rs`', 'None.', 'frontend §14.1'),
-    ('2. Simulation (re-record baselines)', 11, '30 Hz tick: `Time::<Fixed>::from_hz(30.0)`, camera smoothing, replay tick units, `END_DELAY` 4.0 to 5.0 s (150 ticks); update `docs/re/people.md` §1.1.', '`main.rs` l.79, `camera.rs`, `replay.rs`, `frontend/mod.rs` l.66', 'Per-tick rules are unchanged, so simulated results per tick stay identical; only wall-clock speed changes. Re-record the replay baselines (`check.sh <name> <ticks> --map 0 --seed 1234` must report MATCH afterwards).', 'gameplay §1.4, audio §4.1'),
+    ('2. Simulation (re-record baselines)', 11, '30 Hz tick: `Time::<Fixed>::from_hz(30.0)`, camera smoothing, replay tick units, `END_DELAY` 4.0 to 5.0 s (150 ticks); update `docs/re/people.md` §1.1.', '`main.rs` l.79, `camera.rs`, `replay.rs`, `frontend/mod.rs` l.66', 'Per-tick rules are unchanged, so simulated results per tick stay identical; only wall-clock speed changes. Re-record the replay baselines (`tools/checks/replay_check.py --suite` must report MATCH afterwards).', 'gameplay §1.4, audio §4.1'),
     ('2. Simulation (re-record baselines)', 12, 'Vehicle changes V1-V7: pursuit radius, junction look-ahead, low-skill steering, traffic spawn speed, tank reverse -220, map-edge wall hit, light-bar reset.', '`sim/vehicle_ai.rs`, `sim/pursuit.rs`, `sim/traffic.rs`, `vehicles.rs` l.217, `sim/collide.rs`, `sim/driving.rs`', 'Changes the sim: re-record baselines (one batch with item 11 is cheapest).', 'gameplay §4'),
     ('2. Simulation (re-record baselines)', 12.5, 'Pedestrians: Mac pavement wander (per-person re-aim timer +0x900 and anchor; anchor set in `spawn_peds`, (-1,-1) elsewhere), on-foot velocity smoothing `(v + (sin*speed>>7))/3` so contact pushes persist, punch crate bounds.', '`sim/people.rs` `ped_ai`, `move_people`, `Person`; `sim/contact.rs`; `docs/re/people.md` §7.3', 'Changes the sim RNG call pattern (`rand(50)`, `rand(1000)`) and movement: re-record replay baselines.', 'people.md M1, M2, M4'),
     ('2. Simulation (re-record baselines)', 13, 'Destroyed remote bomb detonates at 50000 and clears the owner\'s bomb slot (C1).', '`sim/combat.rs`, `sim/people.rs`', 'Sim change: re-record.', 'gameplay §5.1'),
     ('2. Simulation (re-record baselines)', 14, 'Level 21 "car 50 destroyed" trigger and failure (M1); trigger actor binding by current script id (M2).', '`mission/levels/level_21.rs`, `mission/api.rs`, `mission/eval.rs`; `docs/re/missions_21.md`', 'Level-21 replays and any replay with released actors change.', 'gameplay_part2 §6'),
     ('3. New features', 15, 'Mac model set with matching placement: people origin at the feet (per-model offsets; Mac render code unchanged), vehicles bottom at z = 0 after a placement check, door quads; settings for Mac/Amiga menu props and scenery heights (phones, traffic lights, trees).', '`objects.rs`, `world.rs`, people/vehicle placement code', 'Render only, unless any sim code reads model extents (check `+0x48c8` front extent etc.).', 'assets §4.2'),
     ('3. New features', 16, 'Random phone missions in Rampage (M4) with triggers in Rampage on maps with phones (M3), `GetSafePos`, `EstimateTime`, random phone, formatted say, Mac phrases 1400-1470 / 1800-1842.', 'new `mission/levels/random.rs`, `mission/mod.rs`, `mission/eval.rs`, `frontend/rampage.rs`, `rampage.rs`; a Rampage setup setting (default on) recorded in the replay header', 'Uses the game `random`: Rampage replays diverge from the current baselines; record new Rampage baselines.', 'gameplay_part2 §6, missions.md §3'),
-    ('3. New features', 17, 'Replays: read and write version 0x3F3 (variable map path, level, u32 length); keep reading 3, 10, 0x3F2.', '`replay.rs`, `frontend/replays.rs`', 'Records unchanged: check.sh must still MATCH.', 'frontend §7.2'),
+    ('3. New features', 17, 'Replays: read and write version 0x3F3 (variable map path, level, u32 length); keep reading 3, 10, 0x3F2.', '`replay.rs`, `frontend/replays.rs`', 'Records unchanged: `tools/checks/replay_check.py --suite` must still MATCH.', 'frontend §7.2'),
     ('3. New features', 18, 'Mac MPEG-1 intro as default when present, decoded at run time with vendored `pl_mpeg` (setting: Mac film or Amiga FLC; FLC fallback); skip on new key/click.', '`intro.rs`, `tools/extract/extract_mac.py`, Cargo deps', 'None.', 'audio §3, frontend §9'),
     ('3. New features', 19, 'Replay TV camera, when the rotating view lands.', '`camera.rs`', 'Render-only RNG required.', 'rendering §2.3'),
     ('3. New features', 20, 'Music module with the Mac modes (user-ripped tracks; menus 13, game over 16, complete 8; Radio per vehicle; Continuous sequential).', 'new music module, `audio.rs`, `frontend/menus.rs`', 'None.', 'audio §2'),
@@ -534,7 +534,7 @@ OPEN_DECIDED = [
     'Adopt the Mac models: people with per-model offsets; vehicles and doors after a placement check. Phone, traffic-light and tree heights also get a Mac/Amiga setting.',
     'Mac textures are the default; "Amiga look" is a setting.',
     'Judgement call: decode at run time with vendored `pl_mpeg` (MIT, one C file, built with `cc`); no ffmpeg needed; FLC fallback. Mac film / Amiga FLC is a setting.',
-    'Judgement call: yes. Fold the SwitchOverride pass into `tools/ghidra/` and re-export `ghidra_macx` and `ghidra_mac9`; the Amiga exports stay as they are.',
+    'Judgement call: yes. Fold the SwitchOverride pass into `tools/ghidra/` and re-export `ghidra_macx` and `ghidra_mac9`; the Amiga exports stay as they are. Done: `tools/ghidra/MacJumpTables.java` (commit 85f0976), run by `tools/ghidra/decompile_all.sh`.',
     'A setting in the Rampage setup, default on, recorded in the replay header (it changes the simulation).',
     'Judgement call: compute from the loaded palette (port today); the shipped file was built from the stale CD palette, and the computation follows whichever palette is loaded.',
     'A setting, default off.',
@@ -886,7 +886,7 @@ gave us real names for <b>648</b> Amiga functions (580 of 685 OS4 non-runtime fu
     meth = f'''
 {ul([
     '**Extraction.** `tools/extract/extract_mac.py` (needs `machfs`) reads the HFS volume `PaybackMac.toast` into `extracted/mac/`: data forks under their HFS paths, resource forks as `<name>.rsrc`, type/creator codes in `extracted/mac/_finder_info.tsv`.',
-    '**Decompile.** Ghidra headless in the `payback-re` Docker image with the language forced to `PowerPC:BE:32:default` (the PEF loader guesses VLE), exported with `ExportAll.java` to `analysis/ghidra_macx/` and `analysis/ghidra_mac9/` (`decompiled.c`, `functions.tsv`, `strings.tsv`), the same layout as the Amiga exports. PEF data and TOC (r2 = 0x10183440, data base 0x1017b440) are decoded by `scratch_render/pef.py`.',
+    '**Decompile.** Ghidra headless in the `payback-re` Docker image with the language forced to `PowerPC:BE:32:default` (the PEF loader guesses VLE), exported with `ExportAll.java` to `analysis/ghidra_macx/` and `analysis/ghidra_mac9/` (`decompiled.c`, `functions.tsv`, `strings.tsv`), the same layout as the Amiga exports. PEF data and TOC (r2 = 0x10183440, data base 0x1017b440) were decoded by a local script during the review; `crates/payback-formats/src/pef.rs` now unpacks the PEF sections (the palette is read from the data section).',
     '**Known gap.** 36 TOC jump tables were not followed by Ghidra, so most level-script, `SetTrigger_Long`, input and movie code is missing from the export. The gameplay agent recovered them with SwitchOverride-style overrides in a temporary project outside the repo.',
     '**Name recovery.** Three pairwise matchers (Mac-OS4, OS4-68k, Mac-68k) using unique shared strings (TOC resolved), call-graph alignment, structural similarity and address order, then triangulation and manual anchors for the mission dispatchers. Result: 648 Mac functions matched (492 high, 98 medium, 58 low confidence); 306 of 343 OS4 and 84 of 101 68k addresses cited in `docs/` resolved.',
     '**Comparison.** Six research passes compared the Mac against OS4 and 68k and against our port: rendering, gameplay (two files), front end, assets and audio/platform. Data were compared byte for byte (`tools/re/mac_datadiff.py`, provenance against CD/U7/OS4), with renders of the differences. Tables like `InitStructures` were diffed field by field.',
@@ -948,7 +948,7 @@ The tables below are the Mac differences in this area; the full research note fo
 {details('Quirks shared by all builds and port deviations (people.md §2-3)', md(section(PEOPLE, '2. Quirks', True) + chr(10) + chr(10) + section(PEOPLE, '3. Port deviations', True), shift=1))}
 <h3 id="g-missions">Missions, including the random phone missions</h3>
 {md(section(g2, 'M4. Random missions'))}
-{details('Random-mission job table (scratch_gameplay/missions.md §3)', md(section(MISSIONS, '3. NEW: Random missions')))}
+{details('Random-mission job table (docs/re/mac/gameplay_missions.md §3)', md(section(MISSIONS, '3. NEW: Random missions')))}
 {details('Level 21, trigger binding, Rampage triggers (gameplay_part2.md §6)', md(section(g2, '6. Mission engine'), shift=1))}
 <h3 id="g-combat">Combat and police</h3>
 {md(section(g2, '7. Combat, police'))}
@@ -1117,7 +1117,7 @@ Mac comparison. These apply whatever build is the reference. Ordered by priority
 {filter_bar('tbl-pf', False)}
 {table(['#', 'Priority', 'Area', 'Fix', 'Files (crates/payback/src unless noted)', 'Source'], pfrows, cls='data', tid='tbl-pf', raw=True)}
 <p class="note">Any simulation change here (vehicles, combat, boarding, collisions, RNG) needs the replay baselines
-re-recorded: <code>tools/checks/replay_check.sh &lt;name&gt; &lt;ticks&gt; --map 0 --seed 1234</code> must report MATCH afterwards.</p>
+re-recorded: <code>python tools/checks/replay_check.py --suite</code> must report MATCH afterwards.</p>
 '''
     S.append(('portfixes', 'Port fixes', pf, 2))
 
@@ -1131,7 +1131,7 @@ phase 2 changes the simulation and must be done together with re-recorded replay
 {ul([
     '**Render-only RNG.** The Mac draws all cosmetic randomness (`random3`: DrawMap 71 calls, UpdateEffects 64, start-level weather 12, text wobble ...) from a second counter over the same table. Give the port a second `Rng` index for effects, weather, chimneys, the TV camera and HUD wobble. Splitting it off changes the simulation sequence once (cosmetic draws stop consuming sim numbers): re-record the baselines in that change, then never let render code touch the sim `Rng`.',
     '**30 Hz tick.** The simulation consumes per-frame `ticks`, which replays store (bits 2..0). Per-tick rules are identical in all builds, so switching the fixed timestep to 30 Hz changes the wall-clock speed, not the per-tick results; but camera smoothing, `END_DELAY` and the tick-unit assumptions in `replay.rs` change, so re-record the replay baselines.',
-    '**Simulation changes** (V1-V7, C1, M1, M2, pedestrian wander and velocity smoothing, random missions): batch them, re-record once, and keep `check.sh ... --map 0 --seed 1234` reporting MATCH.',
+    '**Simulation changes** (V1-V7, C1, M1, M2, pedestrian wander and velocity smoothing, random missions): batch them, re-record once, and keep `tools/checks/replay_check.py --suite` reporting MATCH.',
     '**Audio-only and data-only changes** (slot clock, gain law, textures, models without extents) do not touch the simulation.',
 ])}
 {table(['#', 'Phase', 'Change', 'Touches', 'Determinism', 'Source'], aprows, cls='data', raw=True)}
@@ -1372,7 +1372,7 @@ def main():
 <p class="note">Generated {today} by <code>tools/reports/mac_differences.py</code>.</p></nav>
 <main><header class="top"><h1>Payback: the Mac release compared with the Amiga builds</h1>
 <p>Payback (Apex Designs, 2001) - Mac OS 9 / OS X edition 1.0 (Virtual Programming, 2002) vs Amiga 68k Update 7 and OS4, and vs our Bevy reimplementation.</p>
-<p>Sources: <code>docs/xref/symbols.md</code>, <code>rendering.md</code>, <code>gameplay.md</code>, <code>gameplay_part2.md</code>, <code>frontend.md</code>, <code>assets.md</code>, <code>audio_platform.md</code>, <code>scratch_gameplay/people.md</code>, <code>scratch_gameplay/missions.md</code>; <code>docs/re/mac_version.md</code>.</p></header>
+<p>Sources: <code>docs/xref/symbols.md</code>, <code>rendering.md</code>, <code>gameplay.md</code>, <code>gameplay_part2.md</code>, <code>frontend.md</code>, <code>assets.md</code>, <code>audio_platform.md</code>, <code>gameplay_people.md</code>, <code>gameplay_missions.md</code>; <code>docs/re/mac_version.md</code>.</p></header>
 {''.join(body)}
 </main></div><script>{JS}</script></body></html>'''
     with open(OUT, 'w', encoding='utf-8', newline='\n') as fh:

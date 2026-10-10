@@ -31,8 +31,8 @@ divergences:
 - **The fixed-tick schedules run single-threaded**, so systems without an
   explicit order still run in the same order every run.
 
-The checks: `python tools/checks/replay_check.py --suite` (story, rampage,
-multiplayer, cheats) or `cargo test -p payback --test replay_determinism -- --ignored`
+The checks: `python tools/checks/replay_check.py --suite` (story, story2,
+rampage, multiplayer, cheats) or `cargo test -p payback --test replay_determinism -- --ignored`
 record a run and play it back with the same build; every checkpoint hash must
 MATCH. They compare the port with itself, never with the original.
 
