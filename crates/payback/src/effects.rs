@@ -441,12 +441,29 @@ impl Effects {
         layer: u8,
         blend: Blend,
     ) {
+        self.add_frame(kind, tex, 0, pos, vel, size, layer, blend);
+    }
+
+    /// [`Effects::add`] with a start frame: the original passes one of the
+    /// four Flame textures (`Flame.1`..`Flame.4`) for a flame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_frame(
+        &mut self,
+        kind: u8,
+        tex: Tex,
+        frame: u8,
+        pos: Vec3,
+        vel: Vec3,
+        size: f32,
+        layer: u8,
+        blend: Blend,
+    ) {
         let list = &mut self.lists[(layer as usize).min(LAYERS - 1)];
         if list.len() < MAX_PER_LAYER {
             let e = Effect::new(
                 kind,
                 tex,
-                0,
+                frame,
                 pos.as_ivec3(),
                 vel.as_ivec3(),
                 size as i32,

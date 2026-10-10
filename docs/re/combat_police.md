@@ -713,12 +713,39 @@ never hits its own shooter.
   15 LongAaah (5e6, 6000), murder +1. A burning person dies when the timer runs out (§6).
 - **Grenade / bomb:** no damage; they bounce off.
 
-**Hits on scenery.** A projectile entering a square with a scenery object stops there. Bullets,
-pellets, missiles and petrol also break a crate on that square. A missile hitting scenery is
-removed **without exploding** (68k `FUN_000cdfdc` ~111148, OS4 `FUN_01045288` ~36606 only set
-state 6, which `FUN_000dc5ac` removes before its explosion pass); a missile explodes only on a
-cube wall/ground (`FUN_000e3a58` ~121863 → health 0 → `FUN_000cda5e`) or an object. [C] Vehicles driving into a **snowman**
-(+0x4908 0xfe) destroy it.
+**Hits on scenery** (CONFIRMED, Mac `AddCollideObj` @ 10055c70, 68k `FUN_000cdfdc`, OS4
+`FUN_01045288`; port `combat.rs` `move_projectiles`). Projectiles meet scenery through the same circle
+test as people and vehicles (people.md §5.2), not the square: `object_MainLoop` @ 1014a670 runs
+`MoveObject_General` @ 1006e4f0, then `do_Weapon` @ 1013e390 (walls and ground), then
+`RemoveCollideObj`/`AddCollideObj` on the new position. `CheckForCubeCollision` @ 100af980 never
+reads the scenery byte.
+
+- Every scenery object (any non-zero id, pickups included) on the projectile's cube level in the
+  squares under its model box is a circle at the square centre + the rotated model mean, radius
+  `scenery.0x8174/2 + projectile.0x8120`. Class 2 takes the non-person box (0x8120 wide, −0x8128 ..
+  +0x8124 long) for the squares but only one circle, at the projectile's position (the extra three
+  are set up for class 0 only).
+- 0x8120 is the model's max |X| (`LoadStructure` @ 10074630): bullet and pellet 192, petrol and
+  missile 320, bomb 240, grenade 96. A pistol bullet is therefore stopped within 240 + 192 = 432
+  of a lamp post's base, 272 + 192 of a crossing beacon's.
+- Height: only while |+0x8c8 − z| ≤ 500, +0x8c8 being the ground under the projectile. Shots
+  leave the muzzle 50 above the ground, so they always test; there is no top-of-model check.
+- A hit pushes position and velocity out by half the overlap (+0x890 = 0). Then, if the scenery is
+  the **snowman** (+0x8164 = 0xfe): 5 type-1 Dust puffs from the ground ± 150 and the square is
+  cleared; the projectile flies on. Otherwise by model: missile: state 6 and `CheckForCrate` (no
+  explosion; state 6 is removed before the explosion pass of `FUN_000dc5ac`, so a missile that also
+  reached a wall that tick does not explode either); petrol: state 6, one type-1 flame (size 800,
+  random Flame.1-4, v = (r(20), r(20) − 10, r(20) − 100), pos ± (200, 200, 50); draws vz, vy, vx,
+  z, y, x, frame) and `CheckForCrate`; grenade / bomb: only 18 GrenadeBounce (4e6, 8000 / 5000);
+  bullet, minigun bullet and pellet alike: `CheckForCrate`, 29 Ricochet (pitch 11500 + r(1000)
+  drawn first, vol 4e6 + r(2e6)), 2 Flare sparks of r(150) + 150 at the circle position, z of the
+  projectile, v from the pushed velocity, state 6, health 1. Sounds and sparks are at the circle's
+  position at the hit, before the push.
+- The old reading here ("a projectile entering a square with a scenery object stops there") was
+  wrong and made shots burst in the air up to a square away from lamp posts.
+
+A missile explodes only on a cube wall/ground (`FUN_000e3a58` ~121863 → health 0 →
+`FUN_000cda5e`) or an object. [C] Vehicles driving into a **snowman** (+0x4908 0xfe) destroy it.
 
 ### 3.4 Flamethrower and buildings
 

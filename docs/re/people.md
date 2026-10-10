@@ -720,7 +720,10 @@ Details from the Mac `AddCollideObj` @ 10055c70 (CONFIRMED; port: `collide.rs` `
 - A hit pushes position and velocity out by half the overlap, and sets **speed = 0** for every class.
 - Vehicle damage = `(px² + py²) >> 12` of the half push; below 11 Thud (5) at volume dmg·100000, pitch 8000; else
   Thud2 (0x4b), the crash flag, and the bus scream. The snowman instead throws 5 snow effects and is removed.
-- Projectiles (class 2): the crate, missile and bullet cases are in `combat_police.md`.
+- Projectiles (class 2) take the same test: the non-person box picks the squares, one circle at the
+  projectile's position of its model's 0x8120 (bullet 192), dz = +0x8c8 − z. The responses (crate,
+  missile, petrol, bullet, grenade) are in combat_police.md §3.3; port: `combat.rs`
+  `move_projectiles` with `Body::projectile`.
 
 Pickups (`0x4908` ∈ weapon IDs, 0x50 info, 0x51 key, 100 radar) are collected by walking over them. That logic
 is in combat_police.md.

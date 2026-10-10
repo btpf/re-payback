@@ -806,6 +806,7 @@ fn move_people(
                 rear: 0,
                 vehicle: false,
                 rc: false,
+                projectile: false,
                 dz: [obj.floor_z - next.z, 0, 0, 0],
             };
             let mut vel = obj.vel;

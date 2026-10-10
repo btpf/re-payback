@@ -689,7 +689,10 @@ pub fn smash_glass(
 
 /// Shape of an object for the scenery test (`AddCollideObj`): a person is
 /// one circle of its radius; a vehicle four along its heading at
-/// {0, r − rear, front − r, front/2 − r} with the half-width as radius.
+/// {0, r − rear, front − r, front/2 − r} with the half-width as radius; a
+/// projectile one circle of its model's half-width at its position, over
+/// the vehicle footprint (class 2 takes the non-person box, but only class
+/// 0 sets up the extra circles).
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub radius: i32,
@@ -698,6 +701,8 @@ pub struct Body {
     pub vehicle: bool,
     /// The RC car's footprint is one square larger on every side.
     pub rc: bool,
+    /// A projectile: the vehicle footprint, one circle.
+    pub projectile: bool,
     /// Per circle: its ground height minus the object's z. Circles 500 or
     /// more above (or below) their ground are not tested.
     pub dz: [i32; 4],
@@ -710,6 +715,8 @@ pub struct SceneryBump {
     pub sy: usize,
     pub level: usize,
     pub id: u8,
+    /// The circle's position when it hit (before this push).
+    pub at: IVec2,
     /// Half the overlap, taken off the position and the velocity.
     pub push: IVec2,
 }
@@ -737,7 +744,7 @@ pub fn scenery_collide(
     let (s, c) = (trig.sin(heading), trig.cos(heading));
     let p0 = *pos;
     let along = |d: i32| IVec2::new(p0.x + (d * s >> 8), p0.y + (d * c >> 8));
-    let mut circles: Vec<IVec2> = if body.vehicle {
+    let mut circles: Vec<IVec2> = if body.vehicle && !body.projectile {
         let r = body.radius;
         [0, r - body.rear, body.front - r, (body.front >> 1) - r]
             .into_iter()
@@ -747,7 +754,7 @@ pub fn scenery_collide(
         vec![p0.xy()]
     };
     // Footprint: the rotated body box, in squares.
-    let (w, back, front) = if body.vehicle {
+    let (w, back, front) = if body.vehicle || body.projectile {
         (body.radius, -body.rear, body.front)
     } else {
         (body.radius, -body.radius, body.radius)
@@ -790,6 +797,7 @@ pub fn scenery_collide(
                     continue;
                 }
                 let dist = ((d2 as f64).sqrt() as i32).max(1);
+                let at = circles[i];
                 let push = IVec2::new((d.x * r / dist - d.x) >> 1, (d.y * r / dist - d.y) >> 1);
                 vel.x -= push.x;
                 vel.y -= push.y;
@@ -803,6 +811,7 @@ pub fn scenery_collide(
                     sy: sy as usize,
                     level: layer,
                     id: cube.scenery,
+                    at,
                     push,
                 });
             }

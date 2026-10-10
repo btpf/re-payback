@@ -756,6 +756,7 @@ fn drive<const MOVE: bool>(
             rear,
             vehicle: true,
             rc: veh.kind == vk::RC_CAR,
+            projectile: false,
             dz: [h[4] - obj.pos.z, h[3] - obj.pos.z, h[5] - obj.pos.z, h[5] - obj.pos.z],
         };
         let (mut pos, mut vel) = (obj.pos, obj.vel);

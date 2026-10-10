@@ -805,11 +805,16 @@ pub(crate) fn dust_puff(effects: &mut Effects, r: &mut impl FnMut(i32) -> i32, b
     );
 }
 
-/// Projectile flight and contact with the city (§3.3).
+/// Projectile flight and contact with the city (§3.3): the move and the
+/// wall/ground handling of `do_Weapon` @ 1013e390, then the scenery test of
+/// `AddCollideObj` @ 10055c70 (`object_MainLoop` @ 1014a670 runs them in
+/// that order for every object).
 #[allow(clippy::too_many_arguments)]
 fn move_projectiles(
     mut commands: Commands,
     city: Option<Res<City>>,
+    library: Option<Res<ObjectLibrary>>,
+    trig: Res<Trig>,
     mut rng: ResMut<Rng>,
     mut effects: ResMut<Effects>,
     mut explode: MessageWriter<Explode>,
@@ -821,8 +826,10 @@ fn move_projectiles(
     mut q: Query<(Entity, &mut Obj, &Projectile)>,
 ) {
     let Some(city) = city else { return };
-    // Snowmen knocked down this tick (the map edit lands later).
+    // Snowmen knocked down and crates broken this tick (the map edits land
+    // later; the original clears the square at once).
     let mut snowmen: Vec<(usize, usize, usize)> = Vec::new();
+    let mut crates: Vec<(usize, usize, usize)> = Vec::new();
     for e__ in crate::sim::table_order(q.iter().map(|(e, o, ..)| (e, o))) {
         let Ok((e, mut obj, p)) = q.get_mut(e__) else { continue };
         let kind = p.kind;
@@ -833,6 +840,11 @@ fn move_projectiles(
         let prev = obj.pos;
         let mut next = obj.pos + obj.vel;
         let floor = super::collide::floor(&city, next.x, next.y, prev.z);
+        // +0x8c8, the ground under the projectile (`MoveObject_General` @
+        // 1006e4f0; the last one is kept when there is none).
+        if let Some((fz, ..)) = floor {
+            obj.floor_z = fz;
+        }
         // Projectiles smash glass (`GetCollideInfo` @ 100af0e0: any
         // class but people).
         let mut glass = Vec::new();
@@ -842,58 +854,8 @@ fn move_projectiles(
         let layer = obj.level as u8 + 1;
         let at = SoundPos::At(prev.as_vec3());
         let mut remove = false;
-
-        // Scenery stops projectiles and breaks crates.
-        let (sx, sy) = ((next.x >> 11) as usize, (next.y >> 11) as usize);
-        let on_map = sx < MAP_SIZE && sy < MAP_SIZE;
-        // A snowman is knocked down by any non-person that reaches it,
-        // projectiles too, which fly on (Mac `AddCollideObj` @ 10055c70:
-        // the 0xfe test comes before the class-2 branch that removes the
-        // shot; 68k `FUN_000cdfdc`): 5 type-1 Dust puffs as for a car
-        // (`driving.rs`), from the projectile's height (CB-6).
-        let snowman = on_map && city.map.square(sx, sy).cubes[obj.level].scenery == super::driving::SNOWMAN;
-        if snowman && !snowmen.contains(&(sx, sy, obj.level)) {
-            snowmen.push((sx, sy, obj.level));
-            for _ in 0..5 {
-                let size = 600 + rng.rand(300);
-                let vz = rng.rand(100) - 50;
-                let vy = rng.rand(100) - 50;
-                let vx = rng.rand(300) - 150;
-                let z = obj.pos.z + rng.rand(300) - 150;
-                let y = (sy * 2048 + 0x270) as i32 + rng.rand(800);
-                let x = (sx * 2048 + 0x39c) as i32 + rng.rand(200);
-                effects.add(
-                    1,
-                    Tex::Dust,
-                    Vec3::new(x as f32, y as f32, z as f32),
-                    Vec3::new(vx as f32, vy as f32, vz as f32),
-                    size as f32,
-                    layer,
-                    Blend::Add,
-                );
-            }
-            set_scenery.write(SetScenery {
-                sx,
-                sy,
-                level: obj.level,
-                scenery: 0,
-                special: None,
-                rotation: None,
-            });
-        }
-        let scenery_hit = on_map
-            && !snowman
-            && city.map.square(sx, sy).cubes[obj.level].scenery != 0
-            && !kind.gravity();
-        if scenery_hit {
-            break_crate_at(
-                &city,
-                next,
-                obj.level,
-                &mut set_scenery,
-                &mut debris,
-            );
-        }
+        // A missile's explosion, written unless scenery removes it first.
+        let mut blast = None;
 
         match kind {
             ProjectileKind::Grenade | ProjectileKind::Bomb => {
@@ -961,12 +923,10 @@ fn move_projectiles(
                 }
             }
             ProjectileKind::Missile => {
-                // Scenery only stops it (and breaks a crate): it explodes on
-                // walls, the ground and objects (68k `FUN_000cdfdc`).
-                if scenery_hit && !(hit.x || hit.y || on_ground) {
-                    remove = true;
-                } else if hit.x || hit.y || on_ground || floor.is_none() {
-                    explode.write(Explode {
+                // It explodes on walls, the ground and objects (68k
+                // `FUN_000cdfdc`); scenery only removes it (below).
+                if hit.x || hit.y || on_ground || floor.is_none() {
+                    blast = Some(Explode {
                         pos: prev,
                         power: 1000 * 25000,
                         layer: obj.level,
@@ -978,7 +938,7 @@ fn move_projectiles(
                 }
             }
             ProjectileKind::Petrol => {
-                if hit.x || hit.y || on_ground || scenery_hit || obj.health <= 0 {
+                if hit.x || hit.y || on_ground || obj.health <= 0 {
                     effects.add(
                         0xf,
                         Tex::Flame,
@@ -1002,7 +962,7 @@ fn move_projectiles(
                 }
             }
             _ => {
-                if hit.x || hit.y || on_ground || scenery_hit {
+                if hit.x || hit.y || on_ground {
                     // Ricochet and sparks (Mac `do_Weapon` @ 1013e390, 68k
                     // ~121690-121800): the pitch is drawn before the volume;
                     // bullets make 2 sparks of size rand(150)+150, pellets 3
@@ -1025,6 +985,144 @@ fn move_projectiles(
                     remove = true;
                 }
             }
+        }
+
+        // Scenery (Mac `AddCollideObj` @ 10055c70, 68k `FUN_000cdfdc`;
+        // combat_police.md §3.3): every scenery object on the projectile's
+        // cube level is a circle (`collide::scenery_collide`, the test
+        // people and vehicles use) of radius scenery size / 2 + the
+        // projectile model's half-width (+0x8120), tested only while the
+        // projectile is within 500 of its ground (+0x8c8 − z). Not the
+        // whole square: a lamp post stops a bullet (half-width 192) within
+        // 240 + 192 of its base.
+        // A hit pushes the projectile out by half the overlap, then by
+        // kind: a snowman is knocked down (the shot flies on), a missile is
+        // removed without exploding, petrol leaves a flame, bullets and
+        // pellets ricochet with 2 sparks, grenades and bombs only bounce
+        // off with a sound; all but those two break a crate. The wall
+        // branch above runs first, as in `object_MainLoop` @ 1014a670.
+        if let Some(library) = &library {
+            let info = &library.model(obj.model).info;
+            let mut pos = if remove { prev } else { next };
+            let body = super::collide::Body {
+                radius: info.radius,
+                front: info.max_y,
+                rear: info.min_y,
+                vehicle: false,
+                rc: false,
+                projectile: true,
+                dz: [obj.floor_z - pos.z, 0, 0, 0],
+            };
+            let mut vel = obj.vel;
+            let bumps = super::collide::scenery_collide(
+                &city, library, &trig, &mut pos, &mut vel, obj.heading, obj.level, &body,
+            );
+            if !bumps.is_empty() {
+                obj.vel = vel;
+                if !remove {
+                    next = pos;
+                }
+            }
+            for b in bumps {
+                let key = (b.sx, b.sy, b.level);
+                let hit_at = IVec3::new(b.at.x, b.at.y, pos.z);
+                let snd = SoundPos::At(hit_at.as_vec3());
+                let square = IVec3::new((b.sx * 2048 + 0x400) as i32, (b.sy * 2048 + 0x400) as i32, pos.z);
+                let mut break_crate = |set: &mut MessageWriter<SetScenery>, debris: &mut Parts| {
+                    if !crates.contains(&key) && break_crate_at(&city, square, b.level, set, debris).is_some() {
+                        crates.push(key);
+                    }
+                };
+                if b.id == super::driving::SNOWMAN {
+                    // 5 type-1 Dust puffs as for a car (`driving.rs`), from
+                    // the ground under the projectile (+0x8c8) ± 150 (CB-6).
+                    if snowmen.contains(&key) {
+                        continue;
+                    }
+                    snowmen.push(key);
+                    for _ in 0..5 {
+                        let size = 600 + rng.rand(300);
+                        let vz = rng.rand(100) - 50;
+                        let vy = rng.rand(100) - 50;
+                        let vx = rng.rand(300) - 150;
+                        let z = obj.floor_z + rng.rand(300) - 150;
+                        let y = (b.sy * 2048 + 0x270) as i32 + rng.rand(800);
+                        let x = (b.sx * 2048 + 0x39c) as i32 + rng.rand(200);
+                        effects.add(
+                            1,
+                            Tex::Dust,
+                            Vec3::new(x as f32, y as f32, z as f32),
+                            Vec3::new(vx as f32, vy as f32, vz as f32),
+                            size as f32,
+                            layer,
+                            Blend::Add,
+                        );
+                    }
+                    set_scenery.write(SetScenery {
+                        sx: b.sx,
+                        sy: b.sy,
+                        level: b.level,
+                        scenery: 0,
+                        special: None,
+                        rotation: None,
+                    });
+                    continue;
+                }
+                match kind {
+                    ProjectileKind::Missile => {
+                        break_crate(&mut set_scenery, &mut debris);
+                        blast = None;
+                        remove = true;
+                    }
+                    ProjectileKind::Petrol => {
+                        // One type-1 flame of size 800 in a random Flame
+                        // frame; drawn last argument first: vz = r(20) −
+                        // 100, vy = r(20) − 10, vx = r(20), z ± 50, y and
+                        // x ± 200, then the frame.
+                        remove = true;
+                        let vz = rng.rand(20) - 100;
+                        let vy = rng.rand(20) - 10;
+                        let vx = rng.rand(20);
+                        let z = hit_at.z + rng.rand(100) - 50;
+                        let y = hit_at.y + rng.rand(400) - 200;
+                        let x = hit_at.x + rng.rand(400) - 200;
+                        let frame = rng.rand(4) as u8;
+                        effects.add_frame(
+                            1,
+                            Tex::Flame,
+                            frame,
+                            Vec3::new(x as f32, y as f32, z as f32),
+                            Vec3::new(vx as f32, vy as f32, vz as f32),
+                            800.0,
+                            layer,
+                            Blend::Add,
+                        );
+                        break_crate(&mut set_scenery, &mut debris);
+                    }
+                    ProjectileKind::Grenade => {
+                        commands.spawn(Sound::once(id::GRENADE_BOUNCE, 4e6, 8000.0, snd));
+                    }
+                    ProjectileKind::Bomb => {
+                        commands.spawn(Sound::once(id::GRENADE_BOUNCE, 4e6, 5000.0, snd));
+                    }
+                    ProjectileKind::Bullet | ProjectileKind::MinigunBullet | ProjectileKind::Pellet => {
+                        // Crate, Ricochet (pitch drawn first), 2 sparks of
+                        // rand(150) + 150 for every bullet kind (pellets
+                        // too), thrown back along the pushed velocity.
+                        break_crate(&mut set_scenery, &mut debris);
+                        let hz = 11500.0 + rng.rand(1000) as f32;
+                        let vol = 4e6 + rng.rand(2_000_000) as f32;
+                        commands.spawn(Sound::once(id::RICOCHET, vol, hz, snd));
+                        for _ in 0..2 {
+                            spark(&mut effects, &mut rng, hit_at, obj.vel, 150, layer);
+                        }
+                        remove = true;
+                    }
+                }
+            }
+        }
+        if let Some(b) = blast {
+            explode.write(b);
         }
         if remove {
             commands.entity(e).despawn();

@@ -185,8 +185,11 @@ None of these are Mac changes. The Mac and 68k/OS4 agree; our note is wrong.
   harmless; note the quirk in §2.3.
 - **Missile into scenery:** state 6 and a crate break, but no explosion (Mac `AddCollideObj`
   @10055c70).
-- **Snowman:** any non-person entering a snowman square (+0x4908 == 0xfe) destroys it,
+- **Snowman:** any non-person touching a snowman's circle (+0x4908 == 0xfe) destroys it,
   projectiles included (Mac `AddCollideObj`, 68k `FUN_000cdfdc` ~300). §3.3 says "vehicles".
+- **Projectiles vs scenery** are circles, not squares: the same `AddCollideObj` test as people
+  and vehicles, radius scenery size / 2 + the projectile's 0x8120, within 500 of its ground
+  (combat_police.md §3.3).
 - **Punch:** it pays 500 × multiplier and calls Crime whenever the victim is an NPC, without
   checking that the puncher is on the player's side (Mac `do_Person` punch, 68k ~123640).
 - **Pursuit:** pursuit selection overwrites script states 0x14/0x15, and there is no return from
