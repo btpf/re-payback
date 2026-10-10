@@ -313,7 +313,9 @@ impl Plugin for HudPlugin {
             .add_systems(OnEnter(crate::level::AppState::Playing), load_level_texts.in_set(crate::level::LevelLoaded))
             .add_systems(OnExit(crate::level::AppState::Playing), reset_hud)
             .add_systems(FixedUpdate, (collect, tick_dialog, tick_title, tick_banner, tick_frame))
-            .add_systems(PostUpdate, (draw, upload_plane).chain());
+            // After transform propagation: the labels and the checkpoint marker
+            // are projected through this frame's camera, not last frame's.
+            .add_systems(PostUpdate, (draw, upload_plane).chain().after(TransformSystems::Propagate));
     }
 }
 

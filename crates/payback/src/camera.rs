@@ -497,6 +497,11 @@ impl Plugin for CameraPlugin {
                     separators,
                 )
                     .chain()
+                    // `tv_camera` blends the eyes by this frame's
+                    // `Smooth::alpha`, set in `SmoothSet`: read before it,
+                    // last frame's value put the camera out of step with
+                    // the objects (shaking while driving).
+                    .after(crate::frame::SmoothSet)
                     .before(TransformSystems::Propagate),
             );
     }

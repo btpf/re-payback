@@ -79,7 +79,11 @@ port draws at the display rate and adds, all render-side:
   entities; the simulation never reads `Transform`, so replays are
   unaffected. Off shows the original's one picture per tick. Render code
   that draws an object from its `Obj` (the object shadows) adds
-  `frame::SmoothOffsets`.
+  `frame::SmoothOffsets`; render code that follows an object (the direction
+  arrows, `objects::follow_owners`) reads its transform after
+  `frame::SmoothSet`, and the camera systems (which read `Smooth::alpha`)
+  run after it too. An arrow placed at the tick position ran up to a tick
+  ahead of the drawn car and shook against it at 30 Hz.
 - Per-tick HUD counters (`hud::Canvas::frame`, the blinks and spins) and
   the motion blur's previous frame (`postfx::FrameParity`, swapped only when
   a tick has run) keep the original's per-frame speeds at any rate.

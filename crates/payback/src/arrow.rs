@@ -11,6 +11,8 @@
 //!   model units in front of its origin, placed at the followed object
 //!   (the vehicle when driving) and turned to `GetAngle(obj − target)`, i.e.
 //!   pointing at the target; drawn after the map with `DrawObject(…, 100)`.
+//!   The port places it at the followed object as drawn this frame (its
+//!   transform after smooth motion, `crate::frame`).
 //! * **Deathmatch arrows**: in each view, one per other live player in that
 //!   player's colour (red, green, yellow, blue), pointing at them.
 //! * **White arrow**: with every cube layer drawn, a white arrowhead centred
@@ -31,7 +33,7 @@ use crate::level::{AppState, GameMode, LevelEntity};
 use crate::mission::LevelClock;
 use crate::mission::triggers::{Trigger, kind};
 use crate::objects::{ObjectLibrary, ObjectMaterial, static_vertex};
-use crate::sim::{Obj, heading_of};
+use crate::sim::Obj;
 use crate::world::{City, heading_to_render, object_to_render, stack_height, to_render, z_of_h};
 use bevy::{
     camera::visibility::RenderLayers,
@@ -74,7 +76,14 @@ impl Plugin for ArrowPlugin {
             .init_resource::<Seek>()
             .add_systems(OnEnter(AppState::Playing), reset_seek)
             .add_systems(OnExit(AppState::Playing), reset_seek)
-            .add_systems(Update, draw.run_if(in_state(AppState::Playing)));
+            // After smooth motion placed the objects (`crate::frame`), so the
+            // arrows sit on the vehicle or person as drawn this frame.
+            .add_systems(
+                PostUpdate,
+                draw.run_if(in_state(AppState::Playing))
+                    .after(crate::frame::SmoothSet)
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -248,8 +257,38 @@ fn arrow_mesh(library: &mut ObjectLibrary, data: &GameData, meshes: &mut Assets<
     Some(meshes.add(mesh))
 }
 
-/// What a view shows this frame: (model, object position, heading).
-type Shown = Vec<(usize, IVec3, i32)>;
+/// What a view shows this frame: (model, render position, heading).
+type Shown = Vec<(usize, Vec3, f32)>;
+
+/// Where the followed object is drawn this frame: its transform (the last
+/// tick's state, or with smooth motion on the one between the last two
+/// ticks that `crate::frame` shows), as a render position and the original's
+/// (x, y) and heading. The arrows are placed there rather than at the
+/// object's tick position, which would run up to a tick ahead of the
+/// drawn vehicle and shake against it.
+struct Drawn {
+    at: Vec3,
+    xy: Vec2,
+    heading: f32,
+}
+
+fn drawn(tf: &Transform) -> Drawn {
+    use crate::world::SQUARE;
+    // The sync systems turn by `heading_to_render` first (then pitch and
+    // roll for vehicles): the Y of a YXZ decomposition.
+    let (yaw, ..) = tf.rotation.to_euler(EulerRot::YXZ);
+    Drawn {
+        at: tf.translation,
+        xy: Vec2::new(tf.translation.x, tf.translation.z) * SQUARE,
+        heading: yaw / std::f32::consts::TAU * crate::world::ANGLE_TURN,
+    }
+}
+
+/// `GetAngle(target − from)` in original heading units, unrounded.
+fn bearing(from: Vec2, to: Vec2) -> f32 {
+    let d = to - from;
+    d.x.atan2(d.y) / std::f32::consts::TAU * crate::world::ANGLE_TURN
+}
 
 #[allow(clippy::too_many_arguments)]
 fn draw(
@@ -260,7 +299,7 @@ fn draw(
     object_materials: Res<Assets<ObjectMaterial>>,
     mut materials: ResMut<Assets<ArrowMaterial>>,
     mut kit: Local<Option<Kit>>,
-    mut sprites: Query<(&ArrowSprite, &mut Transform, &mut Visibility)>,
+    mut sprites: Query<(&ArrowSprite, &mut Transform, &mut Visibility), Without<CameraTarget>>,
     world: (
         Res<Seek>,
         Res<GameMode>,
@@ -272,7 +311,7 @@ fn draw(
         Res<RotatingView>,
         Res<crate::render_mode::RenderMode>,
     ),
-    followed: Query<&Obj, With<CameraTarget>>,
+    followed: Query<(&Obj, &Transform), (With<CameraTarget>, Without<ArrowSprite>)>,
     mut hud: ResMut<HudData>,
 ) {
     let (seek, mode, game, replay, clock, render, city, rotating, render_mode) = world;
@@ -329,20 +368,20 @@ fn draw(
     let mut shown: Vec<Shown> = vec![Vec::new(); views];
     hud.checkpoint_at = None;
     if on {
-        let objs: Vec<&Obj> = followed.iter().collect();
-        let view_obj = |v: usize| -> Option<&Obj> {
+        let objs: Vec<(&Obj, Drawn)> = followed.iter().map(|(o, tf)| (o, drawn(tf))).collect();
+        let view_obj = |v: usize| -> Option<&(&Obj, Drawn)> {
             if mode.is_multiplayer() {
-                objs.iter().copied().find(|o| o.player == Some(v as u8))
+                objs.iter().find(|(o, _)| o.player == Some(v as u8))
             } else {
-                objs.first().copied()
+                objs.first()
             }
         };
         for (v, list) in shown.iter_mut().enumerate() {
-            let Some(me) = view_obj(v) else { continue };
+            let Some((me, at)) = view_obj(v) else { continue };
             if !mode.is_multiplayer() {
                 // Single player: the red arrow at the seek target.
                 if let Some(t) = seek.target {
-                    list.push((0, me.pos, heading_of(t.x - me.pos.x, t.y - me.pos.y)));
+                    list.push((0, at.at, bearing(at.xy, t.truncate().as_vec2())));
                     if hud.checkpoint
                         && let Some(city) = &city
                     {
@@ -356,8 +395,8 @@ fn draw(
                     if j == v || game.as_ref().is_some_and(|g| g.respawn[j] > 0) {
                         continue;
                     }
-                    let Some(other) = view_obj(j) else { continue };
-                    list.push((j, me.pos, heading_of(other.pos.x - me.pos.x, other.pos.y - me.pos.y)));
+                    let Some((_, other)) = view_obj(j) else { continue };
+                    list.push((j, at.at, bearing(at.xy, other.xy)));
                 }
             }
             // The white arrow when a cube with a top face is over the
@@ -366,7 +405,7 @@ fn draw(
                 && let Some(city) = &city
                 && roofed(city, me)
             {
-                list.push((WHITE, me.pos, me.heading));
+                list.push((WHITE, at.at, at.heading));
             }
         }
     }
@@ -375,8 +414,8 @@ fn draw(
             .get(sprite.view)
             .and_then(|l| l.iter().find(|s| s.0 == sprite.model));
         let want = if let Some(&(_, pos, heading)) = hit {
-            tf.translation = object_to_render(pos.as_vec3());
-            tf.rotation = heading_to_render(heading as f32);
+            tf.translation = pos;
+            tf.rotation = heading_to_render(heading);
             Visibility::Visible
         } else {
             Visibility::Hidden
