@@ -602,6 +602,18 @@ and pitch are drawn on the vehicle model. Nothing limits the slope other than `a
 roll beside a wall depends on the box never reaching into the wall's square, which the §2.7 edge tests guarantee
 (no step clamp, no level filter, no wall-cube skip in `GetCubeInfo2`).
 
+**Drawn tilt (CONFIRMED, Mac `DrawObject` @ 10075880).** The heights are z (16 per h-unit) over lengths in x/y
+units (2048 per square = 256 h), so `tan(roll|pitch)` is **twice** the slope of the ground as drawn. The original
+still draws the body flush with the slope in the top-down view: it turns the model vertices in uniform model
+units (roll, pitch, heading) and only then adds the turned z to the depth at 1 z-unit per model unit (half the
+horizontal scale, rendering.md §0), which halves the drawn tangent again. The port's meshes carry that vertical
+squash already, so `objects.rs` `tilt_squashed_models` gives vehicles, props and their parts the world matrix
+`T · squash · R · squash⁻¹ · S` (after transform propagation) instead of `T · R · S`. With a plain `R` the body
+tilted twice as steeply as the slope and its downhill side sank into the ground (user report, 2026-10). In the
+original rotating view the models are uniform (depth halved, model z not), so there a car does tilt twice as
+steeply as the slope, half of it below the surface, and is still drawn whole (no z-buffer; painter's order); the
+port keeps the squashed models and the top-down tilt in both views.
+
 ### 2.11 Vehicle ↔ vehicle, people, scenery
 
 See §3 (damage and collisions). Object contacts (Mac `CheckForCollisions` @ 1006a150) are reviewed item by item in

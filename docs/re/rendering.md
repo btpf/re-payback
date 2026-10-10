@@ -51,6 +51,10 @@ model's z gets the same 2 h-units (all depths are halved there), i.e. models are
 uniform. In the default top-down view object depth is *not* halved, so model z is
 drawn at **1 h-unit per model unit — models appear squashed 2× vertically** relative
 to the cubes (a quirk; only visible as slightly weaker perspective on tall objects).
+Since the squash comes after the model's roll and pitch (Mac `DrawObject` @ 10075880: vertex turned by
+roll, pitch, heading with the `>> 8` trig tables, depth `= +0x08 + param_4 + turned z`, x/y `= (pos + cam)·256 +
+turned·256`), a tilted model is sheared, not rotated, in the drawn world: the port applies `squash · R · squash⁻¹`
+to vehicles and props (`objects.rs` `tilt_squashed_models`; vehicles.md §2.10). CONFIRMED.
 
 Port mapping with 1 square = 256 world units (as `crates/payback/src/city.rs`):
 `world = (x_sq·256, H, y_sq·256)`, models scaled uniformly ×2 (×1 on the vertical

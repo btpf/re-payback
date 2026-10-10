@@ -1180,6 +1180,56 @@ fn follow_owners(
     }
 }
 
+/// Vertical scale of the object meshes relative to the horizontal
+/// ([`static_vertex`]: 1 h-unit per model unit up, 2 across).
+const MODEL_SQUASH: Vec3 = Vec3::new(1.0, 0.5, 1.0);
+
+/// World matrix of a tilted model: the original turns the vertices in
+/// uniform model units (roll, pitch, heading) and only then maps model z
+/// at 1 h-unit per unit (Mac `DrawObject` @ 10075880: depth `+0x08 +
+/// rotated z`, x/y `pos·256 + rotated·256`; rendering.md §0). The meshes
+/// carry that squash already, so the rotation is applied as
+/// `squash · R · squash⁻¹` instead of `R`; a pure heading commutes with
+/// the squash and is unchanged. The sim's pitch and roll are
+/// `arctan(Δz / length)` with z at 16 per h-unit, twice the h-scale of
+/// x/y, so a plain `R` tilts a car twice as steeply as the slope it
+/// stands on and buries its downhill end.
+fn tilted_affine(tf: &Transform) -> bevy::math::Affine3A {
+    use bevy::math::Affine3A;
+    Affine3A::from_translation(tf.translation)
+        * Affine3A::from_scale(MODEL_SQUASH)
+        * Affine3A::from_quat(tf.rotation)
+        * Affine3A::from_scale(MODEL_SQUASH.recip())
+        * Affine3A::from_scale(tf.scale)
+}
+
+/// Replace the propagated world matrix of vehicles and props (the objects
+/// whose pitch and roll come from the ground) and of their [`Follow`]
+/// parts with [`tilted_affine`]. Render-only (after transform
+/// propagation; writes `GlobalTransform` values only).
+#[allow(clippy::type_complexity)]
+fn tilt_squashed_models(
+    mut owners: Query<
+        (&Transform, &mut GlobalTransform),
+        (Or<(With<Vehicle>, With<crate::vehicles::Prop>)>, Without<Follow>),
+    >,
+    mut parts: Query<(&Follow, &mut GlobalTransform), Without<Vehicle>>,
+) {
+    for (tf, mut g) in &mut owners {
+        let want = GlobalTransform::from(tilted_affine(tf));
+        if *g != want {
+            *g = want;
+        }
+    }
+    for (f, mut g) in &mut parts {
+        let Ok((otf, _)) = owners.get(f.owner) else { continue };
+        let want = GlobalTransform::from(tilted_affine(otf) * f.local.compute_affine());
+        if *g != want {
+            *g = want;
+        }
+    }
+}
+
 /// Keep each object's overlay parts (additive faces, lines) in step with
 /// its mesh.
 #[allow(clippy::type_complexity)]
@@ -1376,6 +1426,14 @@ impl Plugin for SceneryPlugin {
             .add_systems(
                 FixedUpdate,
                 spawn_damage_check.run_if(in_state(AppState::Playing)),
+            )
+            .add_systems(
+                PostUpdate,
+                tilt_squashed_models
+                    .after(TransformSystems::Propagate)
+                    .before(bevy::camera::visibility::VisibilitySystems::CalculateBounds)
+                    .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility)
+                    .before(collect_flares),
             )
             .add_systems(
                 PostUpdate,
