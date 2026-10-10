@@ -1392,9 +1392,17 @@ section were local working files).
   top edges, which at the original's screen sizes hardly reaches a pixel centre. Port
   (`shaders/effects.wgsl`): the 0…63 span, bilinear clamped inside the tile; wrapping
   there, magnified on a large window, drew the opposite edge as thin lines along every
-  quad (a box and a cross around the four-quarter traffic-light glows). The thin lines
-  that remain (a streak above each glow, a line beside the rings) are in the textures'
-  edge texels and show in software too.
+  quad (a box and a cross around the four-quarter traffic-light glows). Port departure
+  (a clean hardware image at modern resolutions): the remaining thin lines (a streak
+  beside each beacon or traffic-light glow, a line through the centre of each flare
+  ring, a cross in a square while the rotating view turns) did not come from the
+  textures, whose outer edges are black. They came from multisampling. A pixel on a
+  quad's edge is shaded at its centre, which can lie just outside the quad, where the
+  interpolated UV has already left the tile. Taking the tile from that UV sampled the
+  next sprite in the atlas (the solid white tile beside the glow, the ghost row under
+  the rings). Each quad now carries its tile's origin as a per-vertex attribute (`UV_1`,
+  `effects.rs` `Quads`), and the shader clamps to that tile. Software still picks the
+  tile from the UV (unchanged), so the faint lines can still show there.
 * Shadows: people the black `Shad` sprite (alpha = max); vehicles 8 triangles of the
   `shadow` page, black, alpha = max, `(7, 8)`; model shadows black at alpha 0.3, tree
   faces through `Tree2.clone` / `tanne.clone` (`c3c0`, alpha 0x32, index 0
@@ -1437,7 +1445,7 @@ Approximate or not done:
   INFERRED) once, before the HUD (`resolve.wgsl`), not after every primitive;
 * textures are filtered inside their own atlas tile: the effect sprites (each 64×64
   sprite or quarter its own texture, `GL_REPEAT` on the Mac, docs/re/mac/rendering.md
-  §5) span texels 0…63 and are clamped to the tile instead of wrapping (§11.5); object textures are clamped half a texel inside their
+  §5) span texels 0…63 and are clamped to their tile (given per vertex, not taken from the UV) instead of wrapping (§11.5); object textures are clamped half a texel inside their
   256×128 slot (clamp rather than repeat at the very edge); tree-shadow clones wrap;
 * fades are hudplat's (`frontend/`): still drawn as in software;
 * rotating-view hardware water (OS4 `FUN_01081ba4` / `FUN_0108a2a0` hardware branch,

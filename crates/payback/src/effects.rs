@@ -1212,6 +1212,9 @@ const WHITE: [f32; 4] = [1.0; 4];
 struct Quads {
     positions: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    /// The atlas tile's top-left texel, the same at every corner
+    /// (`shaders/effects.wgsl`, hardware: the tile the quad samples).
+    tiles: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
@@ -1240,6 +1243,7 @@ impl Quads {
         for (corner, (i, j)) in corners.into_iter().zip([(0, 0), (1, 0), (1, 1), (0, 1)]) {
             self.positions.push(corner.to_array());
             self.uvs.push([u[i], v[j]]);
+            self.tiles.push([col, row]);
             self.colors.push(color);
         }
         self.indices.extend([0, 1, 2, 0, 2, 3].map(|k| base + k));
@@ -1322,6 +1326,7 @@ impl Quads {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, self.tiles)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
         .with_inserted_indices(Indices::U32(self.indices))
     }

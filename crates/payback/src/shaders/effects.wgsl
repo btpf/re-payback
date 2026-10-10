@@ -51,12 +51,17 @@ fn texel_tile(origin: vec2<i32>, p: vec2<f32>) -> vec4<f32> {
 
 // Bilinear filtering inside the sprite's own tile (hardware). The mesh
 // UVs span the whole tile (0…64, as software draws it); the hardware
-// quad maps texel coordinates 0…63 instead.
-fn sample_tile(uv: vec2<f32>) -> vec4<f32> {
+// quad maps texel coordinates 0…63 instead. `tile` is the tile's top-left
+// texel, the same at every corner of the quad (`effects.rs` `Quads`):
+// with multisampling a pixel along the quad's edge is shaded at its
+// centre, outside the quad, where the interpolated UV has left the tile;
+// taking the tile from the UV there sampled the neighbouring sprite (a
+// box along every edge and a cross along the quarters' seams). Port
+// departure, docs/re/rendering.md §11.5.
+fn sample_tile(uv: vec2<f32>, tile: vec2<f32>) -> vec4<f32> {
     let size = vec2<f32>(textureDimensions(atlas));
-    let p = uv * size;
-    let origin = vec2<i32>(floor(p / 64.0)) * 64;
-    let q = (p - vec2<f32>(origin)) * (63.0 / 64.0) - vec2<f32>(0.5);
+    let origin = vec2<i32>(round(tile));
+    let q = clamp(uv * size - tile, vec2(0.0), vec2(64.0)) * (63.0 / 64.0) - vec2<f32>(0.5);
     let i = floor(q);
     let f = q - i;
     return mix(
@@ -69,7 +74,11 @@ fn sample_tile(uv: vec2<f32>) -> vec4<f32> {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef EFFECT_HARDWARE
-    var t = sample_tile(in.uv);
+#ifdef VERTEX_UVS_B
+    var t = sample_tile(in.uv, in.uv_b);
+#else
+    var t = sample_tile(in.uv, floor(in.uv * vec2<f32>(textureDimensions(atlas)) / 64.0) * 64.0);
+#endif
 #else
     var t = textureSample(atlas, atlas_sampler, in.uv);
 #endif
