@@ -10,9 +10,15 @@
 // channel masks of tables 5-8 and the screen flash.
 // EFFECT_HARDWARE: the Warp3D look (`effects.rs`), blend set per material;
 // every 64x64 sprite (and every quarter of a 128x128 one) is its own
-// texture there, filtered bilinearly with GL_REPEAT wrapping (Mac
-// `W3D_AllocTexObj` on OpenGL, docs/re/mac/rendering.md §5), so the
-// filter wraps inside the atlas tile instead of reading its neighbours.
+// texture there, filtered bilinearly (Mac `W3D_AllocTexObj` on OpenGL,
+// docs/re/mac/rendering.md §5), so the filter stays inside the atlas tile
+// instead of reading its neighbours. The quad spans texels 0…63 of the
+// 64 (Mac `drawGroundAlpha` @ 100a6720, OS4 `FUN_01033d50`: u, v = 0.0
+// and 63.0). The texture wraps (GL_REPEAT), but the port clamps at the
+// tile edge: the wrap only reaches the first half texel, which at the
+// original's resolutions hardly covers a pixel; magnified on a big
+// screen it drew the opposite edge as thin lines along every quad's
+// border (a box and a cross through the four-quarter flare glows).
 // GAMMA_TARGET (the game views): the output is gamma-encoded palette RGB,
 // so the blends add, subtract and average the palette bytes as the
 // Alpha.256 tables do (clamped per channel by the target only at the end).
@@ -37,18 +43,20 @@ fn out_colour(c: vec3<f32>) -> vec3<f32> {
 #endif
 }
 
-// One texel of the 64x64 tile at `origin`, wrapping (hardware).
+// One texel of the 64x64 tile at `origin`, clamped to the tile (hardware).
 fn texel_tile(origin: vec2<i32>, p: vec2<f32>) -> vec4<f32> {
-    let q = origin + (vec2<i32>(floor(p)) % vec2<i32>(64) + vec2<i32>(64)) % vec2<i32>(64);
+    let q = origin + clamp(vec2<i32>(floor(p)), vec2<i32>(0), vec2<i32>(63));
     return textureLoad(atlas, q, 0);
 }
 
-// Bilinear filtering inside the sprite's own tile (hardware).
+// Bilinear filtering inside the sprite's own tile (hardware). The mesh
+// UVs span the whole tile (0…64, as software draws it); the hardware
+// quad maps texel coordinates 0…63 instead.
 fn sample_tile(uv: vec2<f32>) -> vec4<f32> {
     let size = vec2<f32>(textureDimensions(atlas));
     let p = uv * size;
     let origin = vec2<i32>(floor(p / 64.0)) * 64;
-    let q = p - vec2<f32>(origin) - vec2<f32>(0.5);
+    let q = (p - vec2<f32>(origin)) * (63.0 / 64.0) - vec2<f32>(0.5);
     let i = floor(q);
     let f = q - i;
     return mix(
