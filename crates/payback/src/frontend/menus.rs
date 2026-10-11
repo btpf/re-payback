@@ -562,8 +562,8 @@ pub struct PauseMenu {
     person: i32,
     /// Background `options.obj` angle (`[3] += 0x40` per frame).
     back: i32,
-    /// Volume item: the added Music row is selected (port addition; fire
-    /// switches rows, up/down change the selected one).
+    /// Volume item: the added Music bar is selected (port addition; fire
+    /// switches bars, up/down change the selected one).
     music_row: bool,
 }
 
@@ -644,21 +644,17 @@ impl Screen for PauseMenu {
         }
         let s = &mut *cx.settings;
         match self.sel {
-            // Port addition: fire switches between the sound bar and the
-            // Music row (`Settings::music_volume`); the original's fire
-            // stepped the volume, wrapping 100 to 0.
+            // Port addition: fire switches between the Sound and the Music
+            // bar (`Settings::music_volume`); the original's fire stepped
+            // the volume, wrapping 100 to 0.
             4 if input.fire => {
                 self.music_row = !self.music_row;
                 cx.sound(Sfx::Select);
             }
-            4 if (input.up || input.down) && self.music_row => {
-                s.music_volume = crate::music::step_volume(s.music_volume, input.up);
-                cx.sound(Sfx::Move);
-            }
             4 if input.up || input.down => {
                 // Volume 0..100 in steps of 10 (`FUN_01006558`/`64`).
-                let v = s.volume as i32 + if input.down { -10 } else { 10 };
-                s.volume = v.clamp(0, 100) as u8;
+                let v = if self.music_row { &mut s.music_volume } else { &mut s.volume };
+                *v = (*v as i32 + if input.down { -10 } else { 10 }).clamp(0, 100) as u8;
                 cx.sound(Sfx::Move);
             }
             5 if input.up || input.down => {
@@ -743,17 +739,22 @@ impl Screen for PauseMenu {
                 ui.centred(&format!("{}{}", cx.g(2059), hmm(minutes)), y2, 2);
             }
             4 => {
-                // Ten LoadingPiece segments, filled up to the volume.
-                let n = cx.settings.volume as i32 / 10;
+                // Ten LoadingPiece segments, filled up to the volume. Port
+                // addition: a second bar for the music at 0x7c/200, each
+                // labelled on the left, the selected label flashing.
                 let x0 = ui.cx() - 40;
-                for i in 0..10 {
-                    let fe = ui.fe;
-                    ui.icon(if i < n { &fe.piece } else { &fe.piece_empty }, x0 + 8 * i, y1);
+                let bars = [
+                    ("Sound", cx.settings.volume, y1, !self.music_row),
+                    ("Music", cx.settings.music_volume, ui.hy(0x7c), self.music_row),
+                ];
+                for (label, v, y, sel) in bars {
+                    let n = v as i32 / 10;
+                    for i in 0..10 {
+                        let fe = ui.fe;
+                        ui.icon(if i < n { &fe.piece } else { &fe.piece_empty }, x0 + 8 * i, y);
+                    }
+                    ui.right(label, x0 - 6, y, if sel { ui.flash() } else { 1 });
                 }
-                // The added Music row; the selected row's line flashes.
-                let music = format!("Music : {}", crate::music::volume_label(cx.settings.music_volume));
-                let c = if self.music_row { ui.flash() } else { 1 };
-                ui.centred(&music, ui.hy(0x84), c);
             }
             5 => {
                 // 1601 at 0x6e/200 and 1602 at 0x79/200 as in the

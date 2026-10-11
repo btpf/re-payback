@@ -23,7 +23,7 @@
 //! |---|---|
 //! | `language` | phrase-file language token, e.g. `English` |
 //! | `volume` | sound volume 0..100 |
-//! | `music_volume` | `linked` (default: the Mac's, the music follows `volume` and is silent at 100; `FxVolume::music`) or 0..100, a level of its own (port-added; `crate::music::level`) |
+//! | `music_volume` | music volume 0..100, independent of `volume` (port-added, default 100; `crate::music::level`) |
 //! | `fx` | lens-flare FX 0 off, 1 flares, 2 flares and artifacts |
 //! | `motion_blur`, `gouraud`, `rotating_view` | 0 / 1 |
 //! | `smooth_motion` | 0 / 1: render-only interpolation between game ticks (port-added, default 1; `frame.rs`) |
@@ -427,10 +427,9 @@ pub struct Settings {
     /// Empty = ask at start (`DAT_012a63d4`).
     pub language: String,
     pub volume: u8,
-    /// Music volume (port-added): None = linked to `volume` as on the
-    /// Mac (`FxVolume::music`), Some(0..=100) = its own level
-    /// (`crate::music::level`).
-    pub music_volume: Option<u8>,
+    /// Music volume 0..100 (port-added; the Mac ties the music to
+    /// `volume`, see `crate::music::level`).
+    pub music_volume: u8,
     pub fx: u8,
     pub motion_blur: bool,
     pub gouraud: bool,
@@ -550,7 +549,7 @@ impl Default for Settings {
             language: String::new(),
             // The Mac default (`ClearPreference` @ 100508c0); the Amiga's is 100.
             volume: 50,
-            music_volume: None,
+            music_volume: 100,
             fx: 2,
             motion_blur: false,
             gouraud: true,
@@ -610,9 +609,7 @@ impl Settings {
             match k {
                 "language" => s.language = v.to_string(),
                 "volume" => s.volume = num(100).unwrap_or(s.volume),
-                "music_volume" => {
-                    s.music_volume = if v == "linked" { None } else { num(100).map(|n| n / 10 * 10).or(s.music_volume) }
-                }
+                "music_volume" => s.music_volume = num(100).unwrap_or(s.music_volume),
                 "fx" => s.fx = num(2).unwrap_or(s.fx),
                 "motion_blur" => s.motion_blur = v == "1",
                 "gouraud" => s.gouraud = v == "1",
@@ -682,10 +679,7 @@ impl Settings {
         let b = |v: bool| if v { 1 } else { 0 };
         t += &format!("language = {}\n", self.language);
         t += &format!("volume = {}\n", self.volume);
-        match self.music_volume {
-            None => t += "music_volume = linked\n",
-            Some(v) => t += &format!("music_volume = {v}\n"),
-        }
+        t += &format!("music_volume = {}\n", self.music_volume);
         t += &format!("fx = {}\n", self.fx);
         t += &format!("motion_blur = {}\n", b(self.motion_blur));
         t += &format!("gouraud = {}\n", b(self.gouraud));

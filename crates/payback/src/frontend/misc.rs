@@ -894,8 +894,8 @@ impl Screen for ControlSetup {
 ///
 /// Added rows: "One-shot cut" (`Variants::oneshot_cut`, the Mac's cut-off of
 /// one-shot sounds; docs/re/mac_version.md decision 2) and "Music volume"
-/// (`Settings::music_volume`: Linked to the sound volume as on the Mac, or
-/// 0..100; left/right step it, fire steps up and wraps to Linked).
+/// (`Settings::music_volume`, 0..100 in tens; left/right step it, fire
+/// steps up and wraps 100 to 0 like the pause menu's volume).
 pub struct CdSetup {
     sel: usize,
     obj: Bobbing,
@@ -936,7 +936,7 @@ impl Screen for CdSetup {
         }
         if self.sel == CD_VOL && (input.left || input.right) {
             let v = &mut cx.settings.music_volume;
-            *v = crate::music::step_volume(*v, input.right);
+            *v = if input.right { (*v + 10).min(100) } else { v.saturating_sub(10) };
             cx.sound(Sfx::Move);
             return Step::Stay;
         }
@@ -953,7 +953,7 @@ impl Screen for CdSetup {
                 }
                 CD_VOL => {
                     let v = &mut cx.settings.music_volume;
-                    *v = if *v == Some(100) { None } else { crate::music::step_volume(*v, true) };
+                    *v = if *v >= 100 { 0 } else { *v + 10 };
                     cx.sound(Sfx::Select);
                 }
                 _ => cx.sound(Sfx::Refuse),
@@ -966,7 +966,7 @@ impl Screen for CdSetup {
         ui.picture(0, true);
         ui.title(&cx.g(2131));
         let on_off = cx.g(if cx.settings.variants.oneshot_cut { 2081 } else { 2080 });
-        let music = crate::music::volume_label(cx.settings.music_volume);
+        let music = cx.settings.music_volume;
         let x = ui.vx(30);
         let lines = [
             (cx.g(2138), ui.hy(50)),

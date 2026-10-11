@@ -269,16 +269,6 @@ impl Default for FxVolume {
     }
 }
 
-impl FxVolume {
-    /// The CD music volume tied to the slider (Mac `SetSoundVolume`
-    /// @ 100f24f0 → `UCDAudio::SetVolume`): 200/256 up to FX 50, then
-    /// `200 − 4·(FX − 50)`, silent at 100. 0..1.
-    pub fn music(self) -> f32 {
-        let fx = self.0.min(100) as f32;
-        (200.0 - 4.0 * (fx - 50.0).max(0.0)) / 256.0
-    }
-}
-
 pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
