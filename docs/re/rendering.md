@@ -1141,7 +1141,11 @@ Additive blending happens in linear colour rather than palette space.
   (at the next level load), menu props per `variants.menu_props`. The simulation reads
   model extents (radius `+0x48c4`, front `+0x48c8`, back `+0x48cc`, ground mean: door
   points, contact circles, AI), so `ModelInfo` always comes from the Amiga file and the
-  replays do not depend on the model set; the drawn model's own extents (`shape`) place
+  replays do not depend on the model set. With the Mac data alone (`--mac-only`, no Amiga
+  root) there is no Amiga file, so `ModelInfo` comes from the Mac models: identical for 81 of
+  the 132 models, but the 23 re-pivoted people and the 4 shifted cars (`Pug`, `Pug Racer`,
+  `Taxi`, `Vapour`) then collide with their Mac extents. The replay suite matched across both
+  setups, but a Mac-only game is not guaranteed to play identically to an Amiga+Mac one; the drawn model's own extents (`shape`) place
   the headlight polygon, door and shadows, as the Mac computes them from its models.
   Amiga people are drawn shifted by the Mac's per-model amounts, also before the lying
   +1500 (`sim/people.rs` `standing`/`lying`). Mac-only object textures (PC, Keyboard,

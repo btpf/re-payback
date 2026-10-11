@@ -1075,6 +1075,14 @@ OS4 `FUN_01046778`; `RemoveAllCollideObj` OS4 `FUN_01047848`):
   it (port table `sim/tests/contact.rs` `vehicle_shape_table`: 12-25 of 71 aimed points on the
   bus, 24-29 of 87 on the truck, any heading). Bullets do not pass these gaps: a hit needs only
   one touching circle (both circles are within R at the gap's middle).
+  The same in both releases: `Vehicles/Bus.Obj` and the truck model are byte-identical in the
+  Amiga and Mac data (only the door quad `Doors/bus.obj` differs), so the circles and gaps are
+  the Mac's too. How this was established: the rule from the Mac decompile (@ 1006a150),
+  cross-checked with OS4 `FUN_01056c58`; the numbers from the Amiga model extents; the walk-through
+  count from the port's implementation of that rule. Not observed in a running original (no
+  emulator or Mac here), so CONFIRMED for the code, INFERRED for the in-game feel. Open decision
+  (2026-10-11): keep the gap (faithful) or block walkers along the whole side of the bus and truck
+  (a port departure, people only; bullets and vehicles would keep the original rule).
 
 **Masses T** (`+0x48ec`):
 
