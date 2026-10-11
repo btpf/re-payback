@@ -11,7 +11,7 @@ git-ignored `out/`, `analysis/` or `extracted/`, never into git.
 | Tool | Does |
 |---|---|
 | `extract.py` | unpacks `Payback Game + Updates/` (`Payback.iso`, `Updates/*.lha`; needs `7z`) into `extracted/`, and builds the merged CD + Update 7 install `extracted/game/` |
-| `rip_cd_tracks.py` | splits the music (CD audio tracks 2–16) out of a BIN/CUE image of the CD (default `Payback Game + Updates/cd/Payback-CD.cue`) into `NN.wav`/`NN.flac` files, by default into `target/release/Music/` (`--flac` needs `ffmpeg`) |
+| `rip_cd_tracks.py` | splits the music (CD audio tracks 2–16) out of a BIN/CUE image of the CD, one `.bin` per disc or per track, or a `.zip` holding one (default `Payback Game + Updates/Payback (Europe).zip`, the Redump set, else `Payback Game + Updates/cd/Payback-CD.cue`) into `NN.wav`/`NN.flac` files, by default into `target/release/Music/` (`--flac` needs `ffmpeg`) |
 | `extract_mac.py` | reads the HFS volume `PaybackMac.toast` into `extracted/mac/` (needs `pip install machfs`) |
 | `hunk.py` | AmigaOS hunk parser; `--flat EXE OUT.bin` lays the hunks out at 0x10000 for Ghidra |
 

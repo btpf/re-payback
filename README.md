@@ -124,10 +124,12 @@ Music setup screen, and the Sound and Music bars in the pause menu (fire
 switches bars, up/down change the selected one). (On the Mac the music
 followed the sound volume and went silent with the sound at 100.)
 
-From a raw BIN/CUE image of the CD (2352-byte sectors),
-`python tools/extract/rip_cd_tracks.py <cue> <Music dir> [--flac]` splits
-the tracks out (defaults: `Payback Game + Updates/cd/Payback-CD.cue` into
-`target/release/Music`; `--flac` needs `ffmpeg`).
+From a raw BIN/CUE image of the CD (2352-byte sectors; one `.bin` for the
+disc or one per track, as in the Redump set), or a `.zip` holding one,
+`python tools/extract/rip_cd_tracks.py <cue or zip> <Music dir> [--flac]`
+splits the tracks out (defaults: `Payback Game + Updates/Payback (Europe).zip`,
+else `Payback Game + Updates/cd/Payback-CD.cue`, into `target/release/Music`;
+`--flac` needs `ffmpeg`).
 
 | CD track | Plays |
 |---|---|
