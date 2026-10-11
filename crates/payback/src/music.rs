@@ -81,7 +81,9 @@
 //!   station keeps playing only while player 1 drives, until the track
 //!   ends (then player 1's loops), and stops at once while player 1 is on
 //!   foot. CONFIRMED (Mac l.24524, 24644-24801, 115952, 117982).
-//! - Volume is tied to the FX slider ([`FxVolume::music`]); the "under
+//! - Volume is tied to the FX slider ([`FxVolume::music`]), silent at FX
+//!   100; the port-added `music_volume` setting can give the music a level
+//!   of its own instead ([`level`]). The "under
 //!   cover" duck is not heard on the Mac (`CD_SetVolume` @ 100fb100 is an
 //!   empty stub), so there is none.
 
@@ -116,6 +118,32 @@ pub fn available() -> bool {
 
 /// The mode in force: Disabled while no tracks are found; a stored 3 (the
 /// old default, or a CD that was missing) reads as Radio once there are.
+/// The music level, 0..1: linked to the FX slider as on the Mac
+/// ([`FxVolume::music`]), or the `music_volume` setting (port-added), where
+/// 100 is the Mac's loudest CD volume (200/256).
+pub fn level(settings: &Settings, fx: FxVolume) -> f32 {
+    match settings.music_volume {
+        None => fx.music(),
+        Some(v) => 200.0 / 256.0 * v.min(100) as f32 / 100.0,
+    }
+}
+
+/// One step of the music volume setting (port-added): Linked, then 0..=100
+/// in tens.
+pub fn step_volume(v: Option<u8>, up: bool) -> Option<u8> {
+    match (v, up) {
+        (None, true) => Some(0),
+        (None, false) | (Some(0), false) => None,
+        (Some(n), true) => Some((n + 10).min(100)),
+        (Some(n), false) => Some(n - 10),
+    }
+}
+
+/// The music volume as shown in the menus.
+pub fn volume_label(v: Option<u8>) -> String {
+    v.map_or_else(|| "Linked".to_string(), |n| n.to_string())
+}
+
 pub fn effective_mode(stored: u8) -> u8 {
     if !available() {
         mode::DISABLED
@@ -396,7 +424,7 @@ fn run_music(
     mut sinks: Query<&mut AudioSink, With<MusicTrack>>,
     players: Query<(Entity, &Obj, Option<&Vehicle>), With<CameraTarget>>,
 ) {
-    let volume = fx.music();
+    let volume = level(&settings, *fx);
     for mut sink in &mut sinks {
         sink.set_volume(Volume::Linear(volume));
     }
@@ -487,5 +515,18 @@ mod tests {
         assert_eq!(FxVolume(50).music(), 200.0 / 256.0);
         assert_eq!(FxVolume(70).music(), 120.0 / 256.0);
         assert_eq!(FxVolume(100).music(), 0.0);
+    }
+
+    #[test]
+    fn own_music_volume_ignores_the_fx_slider() {
+        let mut s = Settings::default();
+        assert_eq!(level(&s, FxVolume(100)), 0.0);
+        s.music_volume = Some(100);
+        assert_eq!(level(&s, FxVolume(100)), 200.0 / 256.0);
+        s.music_volume = Some(50);
+        assert_eq!(level(&s, FxVolume(0)), 100.0 / 256.0);
+        assert_eq!(step_volume(None, true), Some(0));
+        assert_eq!(step_volume(Some(0), false), None);
+        assert_eq!(step_volume(Some(100), true), Some(100));
     }
 }

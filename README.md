@@ -119,6 +119,12 @@ named by its CD track number: `13.ogg`, `13 - anything.flac` or
 `Track13.wav`. Track 1 is the data track: rip tracks 2–16. Without
 tracks the Music setup shows the mode as Disabled.
 
+As on the Mac, the music volume is linked to the sound volume by default:
+full up to 50, then quieter, and silent at 100. "Music volume" on the
+Music setup screen, or the Music line under the sound bar in the pause
+menu (fire switches rows, up/down change the value), gives it a level of
+its own.
+
 From a raw BIN/CUE image of the CD (2352-byte sectors),
 `python tools/extract/rip_cd_tracks.py <cue> <Music dir> [--flac]` splits
 the tracks out (defaults: `Payback Game + Updates/cd/Payback-CD.cue` into

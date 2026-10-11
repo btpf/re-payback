@@ -892,8 +892,10 @@ impl Screen for ControlSetup {
 /// indented so the colons line up), Done centred; the Mac spins the `cd`
 /// model behind the screen and starts on Done.
 ///
-/// Added row: "One-shot cut" (`Variants::oneshot_cut`, the Mac's cut-off of
-/// one-shot sounds; docs/re/mac_version.md decision 2).
+/// Added rows: "One-shot cut" (`Variants::oneshot_cut`, the Mac's cut-off of
+/// one-shot sounds; docs/re/mac_version.md decision 2) and "Music volume"
+/// (`Settings::music_volume`: Linked to the sound volume as on the Mac, or
+/// 0..100; left/right step it, fire steps up and wraps to Linked).
 pub struct CdSetup {
     sel: usize,
     obj: Bobbing,
@@ -901,7 +903,8 @@ pub struct CdSetup {
 
 const CD_MODE: usize = 2;
 const CD_CUT: usize = 3;
-const CD_DONE: usize = 4;
+const CD_VOL: usize = 4;
+const CD_DONE: usize = 5;
 
 impl CdSetup {
     pub fn new() -> CdSetup {
@@ -931,6 +934,12 @@ impl Screen for CdSetup {
             cx.settings.save();
             return Step::Pop(Outcome::Done);
         }
+        if self.sel == CD_VOL && (input.left || input.right) {
+            let v = &mut cx.settings.music_volume;
+            *v = crate::music::step_volume(*v, input.right);
+            cx.sound(Sfx::Move);
+            return Step::Stay;
+        }
         if input.fire {
             match self.sel {
                 CD_MODE => {
@@ -940,6 +949,11 @@ impl Screen for CdSetup {
                 CD_CUT => {
                     let v = &mut cx.settings.variants;
                     v.oneshot_cut = !v.oneshot_cut;
+                    cx.sound(Sfx::Select);
+                }
+                CD_VOL => {
+                    let v = &mut cx.settings.music_volume;
+                    *v = if *v == Some(100) { None } else { crate::music::step_volume(*v, true) };
                     cx.sound(Sfx::Select);
                 }
                 _ => cx.sound(Sfx::Refuse),
@@ -952,6 +966,7 @@ impl Screen for CdSetup {
         ui.picture(0, true);
         ui.title(&cx.g(2131));
         let on_off = cx.g(if cx.settings.variants.oneshot_cut { 2081 } else { 2080 });
+        let music = crate::music::volume_label(cx.settings.music_volume);
         let x = ui.vx(30);
         let lines = [
             (cx.g(2138), ui.hy(50)),
@@ -959,6 +974,7 @@ impl Screen for CdSetup {
             (cx.g(2142 + crate::music::effective_mode(cx.settings.cd_mode) as u32), ui.hy(80)),
             // No phrase: the colon in line with the Mac labels'.
             (format!("{:>12} : {on_off}", "One-shot cut"), ui.hy(91)),
+            (format!("{:>12} : {music}", "Music volume"), ui.hy(102)),
         ];
         // Colour 1, the selected line flashing 2 (Mac `DisplayTextAlpha`,
         // dimmed Disabled with `DisplayTextAlpha3`; OS4 `FUN_0100bb94` /
@@ -974,7 +990,7 @@ impl Screen for CdSetup {
         // No tracks: say where they go (`music::NO_MUSIC_HINT`).
         if !crate::music::available() {
             for (i, l) in crate::music::NO_MUSIC_HINT.iter().enumerate() {
-                ui.centred(l, ui.hy(112) + 11 * i as i32, 2);
+                ui.centred(l, ui.hy(120) + 11 * i as i32, 2);
             }
         }
         let c = if self.sel == CD_DONE { ui.flash() } else { 1 };

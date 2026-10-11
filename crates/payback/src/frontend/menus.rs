@@ -562,6 +562,9 @@ pub struct PauseMenu {
     person: i32,
     /// Background `options.obj` angle (`[3] += 0x40` per frame).
     back: i32,
+    /// Volume item: the added Music row is selected (port addition; fire
+    /// switches rows, up/down change the selected one).
+    music_row: bool,
 }
 
 impl PauseMenu {
@@ -573,6 +576,7 @@ impl PauseMenu {
             sub: 0,
             person: 0,
             back: 0,
+            music_row: false,
         }
     }
 
@@ -633,16 +637,28 @@ impl Screen for PauseMenu {
             let d = if input.right { 1 } else { -1 };
             self.sel = (self.sel as i32 + d).rem_euclid(6) as usize;
             self.sub = display::first_item(cx.settings);
+            self.music_row = false;
             self.obj.change(PAUSE_MODELS[self.sel], d);
             cx.sound(Sfx::Move);
             return Step::Stay;
         }
         let s = &mut *cx.settings;
         match self.sel {
-            4 if input.up || input.down || input.fire => {
+            // Port addition: fire switches between the sound bar and the
+            // Music row (`Settings::music_volume`); the original's fire
+            // stepped the volume, wrapping 100 to 0.
+            4 if input.fire => {
+                self.music_row = !self.music_row;
+                cx.sound(Sfx::Select);
+            }
+            4 if (input.up || input.down) && self.music_row => {
+                s.music_volume = crate::music::step_volume(s.music_volume, input.up);
+                cx.sound(Sfx::Move);
+            }
+            4 if input.up || input.down => {
                 // Volume 0..100 in steps of 10 (`FUN_01006558`/`64`).
                 let v = s.volume as i32 + if input.down { -10 } else { 10 };
-                s.volume = if input.fire && v > 100 { 0 } else { v.clamp(0, 100) as u8 };
+                s.volume = v.clamp(0, 100) as u8;
                 cx.sound(Sfx::Move);
             }
             5 if input.up || input.down => {
@@ -734,6 +750,10 @@ impl Screen for PauseMenu {
                     let fe = ui.fe;
                     ui.icon(if i < n { &fe.piece } else { &fe.piece_empty }, x0 + 8 * i, y1);
                 }
+                // The added Music row; the selected row's line flashes.
+                let music = format!("Music : {}", crate::music::volume_label(cx.settings.music_volume));
+                let c = if self.music_row { ui.flash() } else { 1 };
+                ui.centred(&music, ui.hy(0x84), c);
             }
             5 => {
                 // 1601 at 0x6e/200 and 1602 at 0x79/200 as in the

@@ -887,7 +887,9 @@ Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_ver
   Continuous → Off and leaves Disabled alone (C, `DoCDAudioSetup` @ 100a1500). Default mode
   Radio. The port reads ripped tracks from `Music/` next to the executable (then `Music/` in
   the working directory, which is also the web build's packed folder), numbered by CD track
-  (§4.6 track list); with none the mode is Disabled.
+  (§4.6 track list); with none the mode is Disabled. The music level follows the sound
+  slider as on the Mac (`SetSoundVolume` @ 100f24f0, silent at 100) unless the port-added
+  `music_volume` setting gives it its own (docs/re/frontend_menus.md, pause menu).
 
 ## 5. Intro video — `Videos/intro.video` + `intro.audio`
 
