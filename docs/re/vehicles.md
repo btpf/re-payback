@@ -620,6 +620,9 @@ See §3 (damage and collisions). Object contacts (Mac `CheckForCollisions` @ 100
 `docs/re/reviews/2026-10-08-driving.md` (items 34-42: speed damping `(8s + s·m_self/(mi+mj))/9` per touching pair, z push,
 integer distance, live positions, the RC car excluded, sparks per touching circle pair between two vehicles,
 vehicle-vehicle Thud/Thud2 for both, run-over blood with droplets); the port follows them (`sim/contact.rs`).
+Item 37 ("live positions") is corrected: the pair test places each object at `pos + vel` (where this tick's move
+takes it) and the push goes on the velocity only, never the position (CONFIRMED, Mac @ 1006a150, OS4
+`FUN_01056c58`; combat_police.md §6 pair test, which also gives the circle gaps of the bus and truck).
 
 Also in `CheckForCollisions` (C, Mac @ 1006a150), now in the port:
 

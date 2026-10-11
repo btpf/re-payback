@@ -2181,13 +2181,22 @@ fn spawn_damage_check(world: &mut World, mut done: Local<bool>) {
     let Some(pos) = player else { return };
     *done = true;
     // `--park 13,9,3`: those vehicle types in a row (wide spacing for
-    // buses); otherwise a red Mundaneo and a blue Evo.
-    let kinds: Vec<i32> = park
-        .map(|p| p.split(',').filter_map(|k| k.trim().parse().ok()).collect())
-        .unwrap_or_else(|| vec![0, 12]);
-    for (i, &kind) in kinds.iter().enumerate() {
+    // buses), `3@30` turned 30 degrees; otherwise a red Mundaneo and a
+    // blue Evo.
+    let kinds: Vec<(i32, i32)> = park
+        .map(|p| {
+            p.split(',')
+                .filter_map(|k| {
+                    let (k, deg) = k.split_once('@').unwrap_or((k, "0"));
+                    Some((k.trim().parse().ok()?, deg.trim().parse().unwrap_or(0)))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![(0, 0), (12, 0)]);
+    for (i, &(kind, deg)) in kinds.iter().enumerate() {
         let at = pos + IVec3::new(700 + 1100 * i as i32, 0, 0);
-        crate::vehicles::spawn_vehicle_world(world, kind, at, 0, [4, 1][i % 2]);
+        let heading = deg.rem_euclid(360) * crate::sim::TURN / 360;
+        crate::vehicles::spawn_vehicle_world(world, kind, at, heading, [4, 1][i % 2]);
     }
 }
 

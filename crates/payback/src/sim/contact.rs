@@ -42,16 +42,37 @@ impl Plugin for ContactPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContactSet;
 
-/// Collision circles (centre offsets along the heading) of an object.
-fn circles(trig: &Trig, o: &Obj, is_vehicle: bool, radius: i32, front: i32, rear: i32) -> Vec<IVec3> {
+/// Collision circles of an object centred at `at`: one for anything but a
+/// vehicle (class 0, `+0x8165`), four along the heading for a vehicle at
+/// `{0, hw − rear, front − hw, 2·front/3 − hw}` (`+0x8120`, `+0x8128`,
+/// `+0x8124`; Mac `CheckForCollisions` @ 1006a150, `local_260`/`local_250`
+/// rotated by `sin/cos[heading] >> 8`).
+pub(super) fn circles_at(
+    trig: &Trig,
+    at: IVec3,
+    heading: i32,
+    is_vehicle: bool,
+    radius: i32,
+    front: i32,
+    rear: i32,
+) -> Vec<IVec3> {
     if !is_vehicle {
-        return vec![o.pos];
+        return vec![at];
     }
-    let (s, c) = (trig.sin(o.heading), trig.cos(o.heading));
+    let (s, c) = (trig.sin(heading), trig.cos(heading));
     [0, radius - rear, front - radius, 2 * front / 3 - radius]
         .into_iter()
-        .map(|d| o.pos + IVec3::new(s * d >> 8, c * d >> 8, 0))
+        .map(|d| at + IVec3::new(s * d >> 8, c * d >> 8, 0))
         .collect()
+}
+
+/// Where the contact test places an object: its position plus one tick of
+/// its velocity in x and y, i.e. where this tick's move will take it (Mac
+/// `CheckForCollisions` @ 1006a150: `pos + vel·ticks`, `ticks` = 1 per
+/// fixed tick; z stays, plus the pushes object `i` took earlier in its own
+/// pair loop, `z_push`).
+fn predicted(o: &Obj, z_push: i32) -> IVec3 {
+    IVec3::new(o.pos.x + o.vel.x, o.pos.y + o.vel.y, o.pos.z + z_push)
 }
 
 struct Body {
@@ -97,8 +118,9 @@ struct Touch {
 
 /// Object-object contact (Mac `CheckForCollisions` @ 1006a150, OS4
 /// `FUN_01056c58`, 68k `FUN_000de0b6`), one tick per frame. Each object
-/// `i` in table order against every earlier `j`, from their current
-/// positions (pushes from earlier pairs included):
+/// `i` in table order against every earlier `j`, at the positions this
+/// tick's move will reach, `pos + vel` in x and y (velocity pushes from
+/// earlier pairs included; [`predicted`]):
 /// - circles at `{0, hw − rear, front − hw, 2·front/3 − hw}` along the
 ///   heading for vehicles, one for anything else; contact below
 ///   `R = (hwA + hwB)·17 >> 4` in 3D with the z difference halved (pairs
@@ -109,8 +131,10 @@ struct Touch {
 ///   pair (type 9 `Flare`, between the circles ± 200, flying with the
 ///   mass-weighted velocity, size 100 + r(50), j's level + 1);
 /// - j gets `+push·min(m)/m_j` on its velocity (z too) and i `−push·min(m)/
-///   m_i`, a vehicle never by a person; the same goes on the positions
-///   (the original moves its predicted position);
+///   m_i`, a vehicle never by a person; the positions are not touched,
+///   the move that follows carries the push (testing the current position
+///   and pushing it as well let a walker or a car end each tick a step
+///   inside the other: user reports 2026-10, the player inside a bus);
 /// - damage `((px² + py² + (pz/2)²) >> 7)·min(m)/m_victim >> s`, s = 5 for
 ///   a vehicle, 3 for the player on foot, 1 for other people, only with
 ///   the damage filter −1.
@@ -196,20 +220,23 @@ fn contacts(
     for i in 0..bodies.len() {
         let a = &bodies[i];
         let mut touches: Vec<Touch> = Vec::new();
+        // z pushes i took so far in its own pair loop (`local_d4`).
+        let mut z_push = 0;
         for j in 0..i {
             let b = &bodies[j];
-            let Ok([(_, mut oa, _, _, _, mut da, ..), (_, mut ob, _, _, _, mut db, ..)]) = q.get_many_mut([a.e, b.e])
+            let Ok([(_, mut oa, ..), (_, mut ob, ..)]) = q.get_many_mut([a.e, b.e])
             else {
                 continue;
             };
-            let dzh = (ob.pos.z - oa.pos.z) >> 1;
+            let (pa, pb) = (predicted(&oa, z_push), predicted(&ob, 0));
+            let dzh = (pb.z - pa.z) >> 1;
             if dzh.abs() >= 20000 {
                 continue;
             }
             let r = (a.radius + b.radius) * 17 >> 4;
             let r2 = r as i64 * r as i64;
-            let ca = circles(&trig, &oa, a.vehicle, a.radius, a.front, a.rear);
-            let cb = circles(&trig, &ob, b.vehicle, b.radius, b.front, b.rear);
+            let ca = circles_at(&trig, pa, oa.heading, a.vehicle, a.radius, a.front, a.rear);
+            let cb = circles_at(&trig, pb, ob.heading, b.vehicle, b.radius, b.front, b.rear);
             let sparks = a.vehicle && b.vehicle && (ob.speed.abs() > 50 || oa.speed.abs() > 50);
             let (mut push, mut n) = (IVec3::ZERO, 0);
             for c in &ca {
@@ -233,7 +260,7 @@ fn contacts(
                         let vz = rng.rand(80) - 40 - ((oa.vel.z + ob.vel.z) >> 1);
                         let vy = rng.rand(80) - 40 - (ob.vel.y * mb + oa.vel.y * ma) / (ma + mb);
                         let vx = rng.rand(80) - 40 - (ob.vel.x * mb + oa.vel.x * ma) / (ma + mb);
-                        let z = oa.pos.z + (dzh >> 1) + rng.rand(400) - 200;
+                        let z = pa.z + (dzh >> 1) + rng.rand(400) - 200;
                         let y = c.y + (dy >> 1) + rng.rand(400) - 200;
                         let x = c.x + (dx >> 1) + rng.rand(400) - 200;
                         effects.add(
@@ -262,29 +289,23 @@ fn contacts(
             }
             let p = push / n;
             let m = a.mass.min(b.mass);
-            // A push is not a teleport: the car keeps its last clear
-            // position for the wall test (`+0x8f0`, never written here).
-            let shift = |d: &mut Option<Mut<Drive>>, dv: IVec3| {
-                if let Some((_, left)) = d.as_deref_mut().and_then(|d| d.clear.as_mut()) {
-                    *left += dv;
-                }
-            };
-            // The dummy takes no push and its partner takes all of it,
-            // unscaled; the bullet prop exchanges none (only the barrier,
-            // cone and dummy of the class-2 objects are pushed; Mac
-            // `CheckForCollisions` @ 1006a150).
+            // The push goes on the velocity only: the positions stay, and
+            // this tick's move carries the objects apart (Mac
+            // `CheckForCollisions` @ 1006a150 writes `+0x7dc..+0x7e4` and
+            // its predicted positions, never `+0x0..+0x8`). The dummy
+            // takes no push and its partner takes all of it, unscaled; the
+            // bullet prop exchanges none (only the barrier, cone and dummy
+            // of the class-2 objects are pushed).
             let pushed = !a.is_prop(prop::BULLET) && !b.is_prop(prop::BULLET);
             if pushed && !b.is_prop(prop::DUMMY) && !(b.vehicle && a.person) {
-                let dv = if a.is_prop(prop::DUMMY) { p } else { p * m / b.mass };
-                ob.vel += dv;
-                ob.pos += dv;
-                shift(&mut db, dv);
+                ob.vel += if a.is_prop(prop::DUMMY) { p } else { p * m / b.mass };
             }
             if pushed && !a.is_prop(prop::DUMMY) && !(a.vehicle && b.person) {
                 let dv = if b.is_prop(prop::DUMMY) { -p } else { -p * m / a.mass };
                 oa.vel += dv;
-                oa.pos += dv;
-                shift(&mut da, dv);
+                // i's predicted z follows its pushes, by `+p.z` against
+                // the dummy (sic: `local_d4 += local_bc` there).
+                z_push += if b.is_prop(prop::DUMMY) { p.z } else { dv.z };
             }
             // Damage from the push, z halved, for every victim with the
             // damage filter −1.

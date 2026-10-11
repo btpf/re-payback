@@ -1156,7 +1156,15 @@ fn spark(effects: &mut Effects, rng: &mut Rng, at: IVec3, vel: IVec3, base: i32,
     );
 }
 
-/// Projectiles hitting people and vehicles (68k `FUN_000de0b6`).
+/// Projectiles hitting people and vehicles (Mac `CheckForCollisions` @
+/// 1006a150, 68k `FUN_000de0b6`): the projectile is one circle, a vehicle
+/// the four circles along its heading of the contact pass
+/// ([`super::contact::circles_at`]), anything else one; a hit when a pair
+/// is closer than `(hwA + hwB)·17 >> 4` with the z difference halved (`dz
+/// >> 1`, pairs 20000 or more apart skipped). The RC car (`+0x8160`) takes
+/// no part. With only the centre circle a car's front and back let shots
+/// through, more of them the more it stands across the line of fire (user
+/// report 2026-10).
 #[allow(clippy::type_complexity)]
 fn projectile_hits(
     mut commands: Commands,
@@ -1168,7 +1176,8 @@ fn projectile_hits(
     mut hurt: MessageWriter<Hurt>,
     session: Res<super::people::PlayerSession>,
     projectiles: Query<(Entity, &Obj, &Projectile)>,
-    mut targets: Query<(Entity, &mut Obj, Has<Person>), Without<Projectile>>,
+    trig: Res<Trig>,
+    mut targets: Query<(Entity, &mut Obj, Has<Person>, Option<&crate::vehicles::Vehicle>), Without<Projectile>>,
 ) {
     let (Some(library), Some(city)) = (library, city) else {
         return;
@@ -1181,14 +1190,18 @@ fn projectile_hits(
             continue;
         }
         for e__ in crate::sim::table_order(targets.iter().map(|(e, o, ..)| (e, o))) {
-            let Ok((te, mut t, is_person)) = targets.get_mut(e__) else { continue };
+            let Ok((te, mut t, is_person, vehicle)) = targets.get_mut(e__) else { continue };
             if Some(te) == p.shooter || t.state == State::Removed {
                 continue;
             }
+            if vehicle.is_some_and(|v| v.kind == crate::vehicles::kind::RC_CAR) {
+                continue;
+            }
             let info = &library.model(t.model).info;
-            let r = (info.radius + library.model(po.model).info.radius) as i64 * 17 / 16;
-            let d = (t.pos - po.pos).as_i64vec3();
-            if d.x * d.x + d.y * d.y + (d.z / 2) * (d.z / 2) >= r * r {
+            // The radius the contact pass gives the target (`Body`).
+            let hw = if is_person { 192 } else { info.radius };
+            let shape = (vehicle.is_some(), hw, info.max_y, info.min_y);
+            if !projectile_touches(&trig, &t, shape, po.pos, library.model(po.model).info.radius) {
                 continue;
             }
             let mass = info.mass.max(1);
@@ -1295,10 +1308,29 @@ fn projectile_hits(
         }
     }
     for (pl, money) in pay {
-        if let Some((_, mut o, _)) = targets.iter_mut().find(|(_, o, _)| o.player == Some(pl) && o.state == State::Player) {
+        if let Some((_, mut o, ..)) = targets.iter_mut().find(|(_, o, ..)| o.player == Some(pl) && o.state == State::Player) {
             o.score += money * session.multiplier.max(1);
         }
     }
+}
+
+/// Whether a projectile at `at` (its model's half-width `phw`) touches
+/// target `t` of shape `(vehicle, hw, front, rear)`: one of the target's
+/// circles ([`super::contact::circles_at`]) closer than `(hw + phw)·17 >>
+/// 4` with the z difference halved and below 20000 (Mac
+/// `CheckForCollisions` @ 1006a150; circle pairs 25001 or more apart on an
+/// axis are skipped).
+fn projectile_touches(trig: &Trig, t: &Obj, shape: (bool, i32, i32, i32), at: IVec3, phw: i32) -> bool {
+    let (vehicle, hw, front, rear) = shape;
+    let r = ((hw + phw) * 17 >> 4) as i64;
+    let dzh = (t.pos.z - at.z) >> 1;
+    if dzh.abs() >= 20000 {
+        return false;
+    }
+    super::contact::circles_at(trig, t.pos, t.heading, vehicle, hw, front, rear).iter().any(|c| {
+        let (dx, dy) = ((c.x - at.x) as i64, (c.y - at.y) as i64);
+        dx.abs() < 25001 && dy.abs() < 25001 && dx * dx + dy * dy + (dzh as i64).pow(2) < r * r
+    })
 }
 
 /// Report a player-side blast's hit on every NPC, even at zero damage, as

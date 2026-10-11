@@ -699,8 +699,17 @@ bombs do.
 | grenade | fuse −1/tick from 80 | thrown | walls reflect vx/vy with 18 GrenadeBounce (4e6, 8000); ground: vz = −vz/4 (sound if vz > 500); friction 8·ticks on ground, 1·ticks in air; trailing smoke; fuse < 2 → `Destroy(self, 3000)` (P = 6e7) |
 | bomb | none | – | bounces like a grenade (sound at 5000 Hz) |
 
-**Hits on objects.** The object pair loop is 68k `FUN_000de0b6` / OS4 `FUN_01056c58`. A projectile
-never hits its own shooter.
+**Hits on objects.** The object pair loop is 68k `FUN_000de0b6` / OS4 `FUN_01056c58` / Mac
+`CheckForCollisions` @ 1006a150. A projectile never hits its own shooter. It is one circle of its
+model's half-width (bullet and pellet 192) against the target's contact shape (§6 pair test): a
+vehicle's **four circles along its heading**, a person's one circle of 192; a hit when any pair is
+closer than `(rA + rB)·17 >> 4` with the z difference halved. The RC car (`+0x8160`) takes no part.
+CONFIRMED (Mac @ 1006a150). The port tested only the target's centre circle (and a pose model's
+raw half-width for armed people), so shots passed through a car's front and back, the more the
+car stood across the line of fire (user report 2026-10: Mundaneo at 45°, 100 of 146 shots through
+the body hit; all 146 now; `sim/combat.rs` `projectile_touches`). A bullet moves 256 a tick
+against circles at least 2·(r + 192)·17/16 ≈ 1600 across, so the per-tick point test does not
+tunnel; only a line just past a box corner (outside every circle) misses.
 - **Minigun bullet:** health −= **10000 / T** (filter +0x3ca ∈ {−1, 4}).
 - **Pistol bullet:** health −= **5000 / T** (filter {−1, 7}; Mac `CheckForCollisions` @ 1006a150 and 68k. The OS4 "only −1" reading is a decompiler rendering of the same mask test [I]).
 - **Shotgun pellet:** health −= **20000 / T**, only if `LOS(shooter, target)` (filter {−1, 5}).
@@ -1038,11 +1047,34 @@ OS4 `FUN_01046778`; `RemoveAllCollideObj` OS4 `FUN_01047848`):
 
 **Pair test.**
 - Object i ORs the masks over its AABB ±1 and tests only objects j < i.
-- Shapes: a person or projectile is 1 circle. A vehicle is 3 circles along its heading at
-  {r − rear, front − r, 2·front/3 − r}.
-- Contact when `dx²+dy²+(dz/2)² < ((rA+rB)·17/16)²` and |dz|/2 < 20000.
-- Motion is sub-stepped per tick (finer when |v·ticks| ≥ 30).
+- Shapes: a person, prop or projectile is 1 circle (people r = 192). A vehicle (class byte 0) is
+  **4** circles along its heading at {0, r − rear, front − r, 2·front/3 − r}, rotated by
+  `sin/cos[heading] >> 8` (CONFIRMED: Mac `CheckForCollisions` @ 1006a150 `local_260`/`local_250`;
+  OS4 `FUN_01056c58` `local_168[0]` = the class byte 0. The old "3 circles" reading missed the
+  centre one).
+- Contact when `dx²+dy²+(dz/2)² < ((rA+rB)·17 >> 4)²` and |dz|/2 < 20000.
+- **Where:** each object at `pos + vel·ticks` in x and y (where this frame's move will take it),
+  z at `pos.z` (plus, for i, the z pushes it took earlier in its own loop). The sub-steps go
+  from `ticks − 1` down to 0 when any |v·ticks| ≥ 30; at one tick per frame (the port's fixed
+  tick) that is one test at `pos + vel`. The push goes on the **velocity only** (`+0x7dc..0x7e4`
+  and the predicted positions; `+0x0..0x8` are never written), so the move that follows carries
+  the objects apart (CONFIRMED, Mac @ 1006a150; OS4 `local_b8 = ticks·vel + pos`). The port
+  tested the current position and pushed position and velocity both, which let a walker or a
+  car end each tick up to a step inside the other; fixed 2026-10 (`sim/contact.rs`).
 - Response: momentum exchange weighted by the smaller mass.
+- **Gaps along long vehicles** (original geometry, kept): a vehicle's circles do not overlap
+  when front + rear is long. Between neighbouring circles at distance g the reach of a person
+  (R = (r + 192)·17 >> 4) is `√(R² − (g/2)²)` from the axis, and in the gap's middle the two
+  pushes are opposite along the axis, so the averaged push is almost zero there. Amiga models:
+  Mundaneo (r 592, circles −64, 0, 528, 1088; R 833) and the other cars, vans and the limo have
+  no gap a person can enter (the cusp stays at or outside the side). The **bus** (r 704, front
+  3552, rear 960: circles −256, 0, 1664, 2848; R 952) has a gap of 1664 between 0 and 1664
+  whose cusp is 462 from the axis, 242 inside the side; the **truck** (r 832, front 4480, rear
+  1024: circles −192, 0, 2154, 3648; R 1088) one of 2154, cusp 154 from the axis. A person
+  running (96 a tick) straight at the side of a parked bus or truck at the gap walks through
+  it (port table `sim/tests/contact.rs` `vehicle_shape_table`: 12-25 of 71 aimed points on the
+  bus, 24-29 of 87 on the truck, any heading). Bullets do not pass these gaps: a hit needs only
+  one touching circle (both circles are within R at the gap's middle).
 
 **Masses T** (`+0x48ec`):
 

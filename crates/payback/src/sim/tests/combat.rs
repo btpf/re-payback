@@ -116,3 +116,33 @@ fn fresh_arsenal_is_fists_only() {
     assert!(a.ammo.iter().all(|&n| n == 0));
     assert!(a.bomb.is_none());
 }
+
+/// A bullet meets a parked car anywhere along its length, not only near its
+/// centre: the car's four circles (Mac `CheckForCollisions` @ 1006a150).
+/// User report 2026-10: shots passed through the front and back of a car
+/// standing diagonally.
+#[test]
+fn bullets_hit_a_diagonal_car_along_its_length() {
+    let t = Trig::default();
+    // Mundaneo: hw 592, front 1680, rear 656; a bullet's half-width 192.
+    let shape = (true, 592, 1680, 656);
+    for deg in [0, 30, 45, 60, 90] {
+        let car = Obj::new(Class::Vehicle, 0, IVec3::new(100_000, 100_000, 0), deg * super::super::TURN / 360);
+        let (s, c) = (t.sin(car.heading), t.cos(car.heading));
+        // Points on the car's axis from the rear to the front bumper hit;
+        // so does one just off the side near the front.
+        for along in [-600, 0, 800, 1600] {
+            let at = car.pos + IVec3::new(s * along >> 8, c * along >> 8, 0);
+            assert!(projectile_touches(&t, &car, shape, at, 192), "{deg} deg, {along} along");
+        }
+        let side = car.pos + IVec3::new((s * 1300 + c * 700) >> 8, (c * 1300 - s * 700) >> 8, 0);
+        assert!(projectile_touches(&t, &car, shape, side, 192), "{deg} deg, side");
+        // Well clear of the front bumper: no hit.
+        let clear = car.pos + IVec3::new(s * 2900 >> 8, c * 2900 >> 8, 0);
+        assert!(!projectile_touches(&t, &car, shape, clear, 192), "{deg} deg, clear");
+    }
+    // A person is one circle of 192.
+    let man = Obj::new(Class::Person, 0, IVec3::new(5000, 5000, 0), 0);
+    assert!(projectile_touches(&t, &man, (false, 192, 0, 0), IVec3::new(5000 + 400, 5000, 0), 192));
+    assert!(!projectile_touches(&t, &man, (false, 192, 0, 0), IVec3::new(5000 + 410, 5000, 0), 192));
+}
