@@ -316,8 +316,8 @@ pub fn locate() -> Result<Roots, String> {
         "The game files must be extracted before Payback can start.\n\n\
          1. Put your copy of the original game into the folder \"Payback Game + Updates\" \
          next to payback.exe:\n\
-         \u{20}  Amiga - the Amiga CD (.iso, .bin + .cue, or a .zip / .rar of them)\n\
-         \u{20}  Amiga\\Updates - PaybackUpdate7.lha\n\
+         \u{20}  Amiga - the Amiga CD (.iso, .bin + .cue, or a .zip / .rar of them) \
+         and PaybackUpdate7.lha\n\
          \u{20}  MacOS - PaybackMac.toast\n\
          The Amiga CD, the Mac CD, or both.\n\
          2. Run payback-extract.exe, next to payback.exe.\n\

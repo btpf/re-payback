@@ -61,15 +61,17 @@ files in it:
 
 | Folder | Files |
 |---|---|
-| `Amiga/` | the Amiga CD: `.iso`, `.cue` with its `.bin` file(s) (one for the disc or one per track), or a `.zip` / `.rar` holding them |
-| `Amiga/Updates/` | `PaybackUpdate7.lha` (`paybackupdateOS4Native.lha` and `Warp3D-42.lha` may go here too; the game does not use them) |
+| `Amiga/` | the Amiga CD: `.iso`, `.cue` with its `.bin` file(s) (one for the disc or one per track), or a `.zip` / `.rar` holding them; and `PaybackUpdate7.lha` next to it (the OS4 port and Warp3D archives are not needed) |
 | `MacOS/` | `PaybackMac.toast` |
 
 Then run `payback-extract.exe` from the same folder. It lists what it
-found, then writes the files the game reads into `data/amiga` and
+found and asks: press Enter to extract (or re-extract, replacing what was
+extracted before), or type `q` and Enter to close without changing
+anything. It writes the files the game reads into `data/amiga` and
 `data/mac`, and the CD's music tracks into `Music/` as FLAC (from a
-`.bin`/`.cue` image; an `.iso` has no audio). `--list` only lists. Start
-`payback.exe`; without extracted data it says what to do and closes.
+`.bin`/`.cue` image; an `.iso` has no audio). `--list` only lists, `--yes`
+skips the question. Start `payback.exe`; without extracted data it says
+what to do and closes.
 (`crates/payback-extract`; it needs no other software.)
 
 ## Quick start (from source)
@@ -80,7 +82,7 @@ found, then writes the files the game reads into `data/amiga` and
 web build see [`docs/web.md`](docs/web.md).
 
 1. **Get the data.** Put your copies in `Payback Game + Updates/` in the
-   repository, laid out as above: `Amiga/Payback.iso`,
+   repository: `Amiga/Payback.iso`,
    `Amiga/Updates/PaybackUpdate7.lha` (and optionally
    `Amiga/Updates/paybackupdateOS4Native.lha`, `Amiga/Updates/Warp3D-42.lha`,
    and the Mac release `MacOS/PaybackMac.toast`). Then unpack them for the
@@ -108,8 +110,8 @@ web build see [`docs/web.md`](docs/web.md).
    the list is [`crates/payback/data_files.txt`](crates/payback/data_files.txt)),
    so `target/release/` is a self-contained folder: double-click
    `payback.exe`, or copy the folder elsewhere and run it there. It also
-   creates the empty `Payback Game + Updates/Amiga/Updates` and `MacOS`
-   folders there for `payback-extract` (`cargo build --release` builds
+   creates the empty `Payback Game + Updates/Amiga` and `MacOS` folders
+   there for `payback-extract` (`cargo build --release` builds
    both executables). The data is your own copy of the game: never commit
    or share it.
 

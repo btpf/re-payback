@@ -43,7 +43,8 @@
 <b>decompiling</b> the original for further reverse-engineering work. The port ships no
 original game data; everything below comes from your own copy, kept in
 <code>Payback Game + Updates/</code> (<code>Amiga/</code>, <code>Amiga/Updates/</code>,
-<code>MacOS/</code>; the same folders next to <code>payback.exe</code> for players) and
+<code>MacOS/</code>; next to <code>payback.exe</code> players use just <code>Amiga/</code>, with the
+update in it, and <code>MacOS/</code>) and
 extracted by <code>payback-extract</code> next to the exe, or by the Python scripts to
 <code>extracted/</code> (all git-ignored). Never commit any of it, nor the decompiled output in <code>analysis/</code>.</p>
 <nav><a href="#summary">Summary</a><a href="#setups">What you get</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#decompile">Decompile</a><a href="#notneeded">Not needed</a></nav>
@@ -127,7 +128,7 @@ models and sounds.</p>
 <pre>cargo build --release              # payback.exe and payback-extract.exe</pre>
 <p><code>payback-extract</code> also compiles the bundled UnRAR C++ source (the
 <code>unrar</code> crate), so it needs the C++ compiler that Rust's Windows (MSVC) toolchain
-already uses. The build creates the empty <code>Payback Game + Updates/Amiga/Updates</code>
+already uses. The build creates the empty <code>Payback Game + Updates/Amiga</code>
 and <code>MacOS</code> folders next to the executables.</p>
 <p>Two build-time extras use game files <b>if they are present</b>, and are skipped
 otherwise (the build still succeeds):</p>
@@ -144,11 +145,11 @@ files; the data pack it writes into <code>web/dist/data/</code> uses the run-tim
 and run <code>payback-extract.exe</code> from the same folder once:</p>
 <table>
   <tr><th>Folder</th><th>Accepted</th></tr>
-  <tr><td><code>Amiga/</code></td><td>the CD: <code>.iso</code> (data track), <code>.cue</code> with its <code>.bin</code> file(s), one for the disc or one per track (the Redump set), or a <code>.zip</code> / <code>.rar</code> holding either</td></tr>
-  <tr><td><code>Amiga/Updates/</code></td><td><code>PaybackUpdate7.lha</code> (the OS4 port and Warp3D archives are listed but not used)</td></tr>
+  <tr><td><code>Amiga/</code></td><td>the CD: <code>.iso</code> (data track), <code>.cue</code> with its <code>.bin</code> file(s), one for the disc or one per track (the Redump set), or a <code>.zip</code> / <code>.rar</code> holding either; and <code>PaybackUpdate7.lha</code> beside it (the OS4 port and Warp3D archives are not needed)</td></tr>
   <tr><td><code>MacOS/</code></td><td><code>PaybackMac.toast</code></td></tr>
 </table>
-<p>It lists what it found, then writes the CD's <code>Payback</code> folder with Update 7 laid
+<p>It lists what it found and asks: Enter extracts (or re-extracts, replacing the earlier
+output), <code>q</code> closes without changing anything. It writes the CD's <code>Payback</code> folder with Update 7 laid
 over it into <code>data/amiga</code>, the Mac CD's <code>Payback</code> folder into
 <code>data/mac</code> (both filtered by the one list in <code>crates/payback/data_files.txt</code>,
 shared with the build's staging, <code>tools/dist/stage_data.py</code> and the web pack), and the

@@ -8,7 +8,7 @@ git-ignored `out/`, `analysis/` or `extracted/`, never into git.
 
 ## `extract/`: unpack your own copy of the game
 
-For playing, `payback-extract` (the Rust crate `crates/payback-extract`, built next to `payback.exe`) does the player's part without Python or 7-Zip: from `Payback Game + Updates/` next to the executable (`Amiga/`: `.iso`, `.cue` + `.bin`, `.zip`, `.rar`; `Amiga/Updates/`; `MacOS/`) it writes `data/amiga`, `data/mac` and `Music/*.flac` there. The scripts below unpack everything into `extracted/` for the build and the RE tools.
+For playing, `payback-extract` (the Rust crate `crates/payback-extract`, built next to `payback.exe`) does the player's part without Python or 7-Zip: from `Payback Game + Updates/` next to the executable (`Amiga/`: `.iso`, `.cue` + `.bin`, `.zip`, `.rar`, and `PaybackUpdate7.lha`; `MacOS/`) it writes `data/amiga`, `data/mac` and `Music/*.flac` there. The scripts below unpack everything into `extracted/` for the build and the RE tools.
 
 | Tool | Does |
 |---|---|

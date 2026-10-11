@@ -6,8 +6,9 @@ missions driven by per-level scripts, vehicles, pedestrians and police.
 
 ## Media
 
-In `Payback Game + Updates/` (git-ignored; the same layout next to
-`payback.exe` for `payback-extract`):
+In `Payback Game + Updates/` (git-ignored). Next to `payback.exe`,
+`payback-extract` reads the same folder with `PaybackUpdate7.lha` straight in
+`Amiga/` (no `Updates/`; the OS4 port and Warp3D are not needed to play):
 
 | Item | Use |
 |---|---|

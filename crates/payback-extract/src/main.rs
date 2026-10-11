@@ -6,28 +6,30 @@
 //!
 //! - `Amiga/`: the CD, as `.iso` (the data track), `.cue` with its `.bin`
 //!   file(s) (one for the disc or one per track, as in the Redump set), or
-//!   a `.zip` / `.rar` holding either;
-//! - `Amiga/Updates/`: `PaybackUpdate7.lha` (`paybackupdateOS4Native.lha`
-//!   and `Warp3D-42.lha` are listed but not used: the port does not need
-//!   them);
+//!   a `.zip` / `.rar` holding either; and next to it `PaybackUpdate7.lha`
+//!   (also found in `Amiga/Updates/`, the repository's layout). The OS4
+//!   port and Warp3D archives are not needed: the port does not use them;
 //! - `MacOS/`: `PaybackMac.toast`.
 //!
-//! The tool lists what it found, then writes the files the port reads
+//! The tool lists what it found and asks: Enter extracts (re-extracts, if
+//! there is extracted data already), anything else closes without changing
+//! a thing. Extracting writes the files the port reads
 //! (`crates/payback/data_files.txt`) into `data/amiga` (the CD's `Payback`
 //! folder with Update 7 laid over it, as `tools/extract/extract.py` does)
 //! and `data/mac` (the Mac CD's `Payback` folder), and the CD's audio
 //! tracks 2-16 into `Music/NN.flac` (from a `.cue` image; a plain `.iso`
 //! has no audio). Each output folder is replaced as a whole.
 //!
-//! Options: `--list` (only list), `--no-music`, `--root <dir>` (default:
-//! the executable's folder), `--no-pause`.
+//! Options: `--list` (only list), `--yes` (extract without asking; also
+//! when the input is not a console), `--no-music`, `--root <dir>`
+//! (default: the executable's folder), `--no-pause`.
 
 mod cd;
 mod hfs;
 
 use payback_formats::data_files::Rules;
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -35,8 +37,6 @@ const SOURCE: &str = "Payback Game + Updates";
 const RULES: &str = include_str!("../../payback/data_files.txt");
 
 const UPDATE7: &str = "PaybackUpdate7.lha";
-const OS4: &str = "paybackupdateOS4Native.lha";
-const WARP3D: &str = "Warp3D-42.lha";
 const TOAST: &str = "PaybackMac.toast";
 
 /// Characters Windows does not allow in names (the Python extractors'
@@ -102,8 +102,6 @@ struct Found {
     /// Files that are neither a CD image nor an archive holding one.
     ignored: Vec<String>,
     update7: Option<PathBuf>,
-    os4: Option<PathBuf>,
-    warp3d: Option<PathBuf>,
     toast: Option<PathBuf>,
 }
 
@@ -150,6 +148,8 @@ fn scan(src: &Path) -> Found {
             "iso" => f.cds.push(Cd::Iso(p)),
             "cue" => cues.push(p),
             "bin" => bins.push(p),
+            "lha" if name.eq_ignore_ascii_case(UPDATE7) => f.update7 = Some(p),
+            "lha" => f.ignored.push(format!("{name} (not used by the game)")),
             "zip" | "rar" => match archive_names(&p) {
                 Ok(names) => {
                     let pick = |e: &str| names.iter().find(|n| n.to_lowercase().ends_with(e)).cloned();
@@ -176,10 +176,9 @@ fn scan(src: &Path) -> Found {
     }
     f.cds.extend(cues.into_iter().map(Cd::Cue));
     f.cds.extend(archives);
-    let updates = amiga.join("Updates");
-    f.update7 = named(&updates, UPDATE7);
-    f.os4 = named(&updates, OS4);
-    f.warp3d = named(&updates, WARP3D);
+    if f.update7.is_none() {
+        f.update7 = named(&amiga.join("Updates"), UPDATE7);
+    }
     f.toast = named(&src.join("MacOS"), TOAST)
         .or_else(|| files_in(&src.join("MacOS")).into_iter().find(|p| ext(p) == "toast"));
     f
@@ -474,8 +473,8 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    let ok = run(&root, has("--list"), has("--no-music"));
-    if !has("--no-pause") && own_console() {
+    let (ok, quit) = run(&root, has("--list"), has("--yes"), has("--no-music"));
+    if !quit && !has("--no-pause") && own_console() {
         print!("\nPress Enter to close this window.");
         let _ = io::stdout().flush();
         let _ = io::stdin().read_line(&mut String::new());
@@ -483,28 +482,26 @@ fn main() {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
-fn run(root: &Path, list_only: bool, no_music: bool) -> bool {
+/// Lists, asks, extracts. Returns (success, the player chose to close).
+fn run(root: &Path, list_only: bool, yes: bool, no_music: bool) -> (bool, bool) {
     let src = root.join(SOURCE);
-    for d in [src.join("Amiga").join("Updates"), src.join("MacOS")] {
+    for d in [src.join("Amiga"), src.join("MacOS")] {
         let _ = std::fs::create_dir_all(d);
     }
     println!("Payback extractor\nLooking in {}\n", src.display());
     let found = scan(&src);
 
-    println!("Amiga/  (the CD)");
+    println!("Amiga/");
     if found.cds.is_empty() {
         println!("  {} no CD image (.iso, .cue + .bin, or a .zip / .rar of them)", mark(false));
     }
     for c in &found.cds {
         println!("  {} {}", mark(true), c.describe());
     }
+    println!("  {} {UPDATE7}  (laid over the CD)", mark(found.update7.is_some()));
     for i in &found.ignored {
         println!("      ignored: {i}");
     }
-    println!("Amiga/Updates/");
-    println!("  {} {UPDATE7}  (laid over the CD)", mark(found.update7.is_some()));
-    println!("  {} {OS4}  (not used by the game)", mark(found.os4.is_some()));
-    println!("  {} {WARP3D}  (not used by the game)", mark(found.warp3d.is_some()));
     println!("MacOS/");
     println!("  {} {TOAST}", mark(found.toast.is_some()));
     println!();
@@ -515,7 +512,7 @@ fn run(root: &Path, list_only: bool, no_music: bool) -> bool {
     let music_cd = if no_music { None } else { found.cds.iter().find(|c| c.has_audio()).cloned() };
     if data_cd.is_none() && found.toast.is_none() {
         println!("Nothing to extract: put the Amiga CD into Amiga/ and/or {TOAST} into MacOS/.");
-        return false;
+        return (false, false);
     }
     if data_cd.is_some() && found.update7.is_none() {
         println!(
@@ -530,7 +527,26 @@ fn run(root: &Path, list_only: bool, no_music: bool) -> bool {
         println!("Note: no music: it needs a .cue + .bin image of the CD (an .iso holds only the data track).");
     }
     if list_only {
-        return true;
+        return (true, false);
+    }
+    let extracted = ["data/amiga", "data/mac", "Music"]
+        .iter()
+        .any(|d| std::fs::read_dir(root.join(d)).is_ok_and(|mut e| e.next().is_some()));
+    if !yes && io::stdin().is_terminal() {
+        if extracted {
+            println!("\nThe game files were extracted before. Re-extracting replaces data/amiga, data/mac and the music tracks.");
+        }
+        print!(
+            "\nPress Enter to {}, or type q and Enter to close without changing anything: ",
+            if extracted { "re-extract" } else { "extract" }
+        );
+        let _ = io::stdout().flush();
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_err() || !answer.trim().is_empty() {
+            println!("Closed; nothing was changed.");
+            return (true, true);
+        }
+        println!();
     }
 
     let rules = Rules::parse(RULES).expect("data_files.txt");
@@ -570,5 +586,5 @@ fn run(root: &Path, list_only: bool, no_music: bool) -> bool {
     if ok {
         println!("Start payback.exe to play.");
     }
-    ok
+    (ok, false)
 }

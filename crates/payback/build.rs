@@ -185,12 +185,12 @@ fn remove_stale(dst: &Path, rel: &Path, wanted: &HashSet<String>, removed: &mut 
 
 /// The folders next to the executable where the player puts the original
 /// files for `payback-extract` (crates/payback-extract): `Payback Game +
-/// Updates/Amiga/Updates` and `Payback Game + Updates/MacOS`, created
-/// empty; anything already in them is left alone.
+/// Updates/Amiga` (the CD and Update 7) and `Payback Game + Updates/MacOS`,
+/// created empty; anything already in them is left alone.
 fn source_folders(out: &Path) {
     let Some(profile) = out.ancestors().nth(3).filter(|p| p.join("build").is_dir()) else { return };
     let root = profile.join("Payback Game + Updates");
-    for dir in [root.join("Amiga").join("Updates"), root.join("MacOS")] {
+    for dir in [root.join("Amiga"), root.join("MacOS")] {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             println!("cargo:warning=could not create {}: {e}", dir.display());
         }
