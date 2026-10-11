@@ -11,10 +11,9 @@ Usage:
   python tools/extract/rip_cd_tracks.py [SOURCE] [OUT_DIR] [--flac]
 
 SOURCE is a .cue file or a .zip holding one (read in place, not unpacked).
-Default: the first of "Payback Game + Updates/Payback (Europe).zip" (the
-Redump set, one .bin per track) and "Payback Game + Updates/cd/Payback-CD.cue"
-(one .bin for the whole disc) that exists. OUT_DIR defaults to
-target/release/Music.
+Default: the first .cue, else the first .zip, in "Payback Game +
+Updates/Amiga/". OUT_DIR defaults to target/release/Music. (`payback-extract`,
+crates/payback-extract, does the same and more without Python.)
 
 Any number of FILE ... BINARY entries with 2352-byte sectors. A track runs
 from its INDEX 01 to the next track's INDEX 00 in the same file (or INDEX 01
@@ -33,10 +32,12 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SECTOR = 2352
-DEFAULT_SOURCES = [
-    os.path.join(ROOT, "Payback Game + Updates", "Payback (Europe).zip"),
-    os.path.join(ROOT, "Payback Game + Updates", "cd", "Payback-CD.cue"),
-]
+AMIGA = os.path.join(ROOT, "Payback Game + Updates", "Amiga")
+DEFAULT_SOURCES = sorted(
+    (os.path.join(AMIGA, n) for n in (os.listdir(AMIGA) if os.path.isdir(AMIGA) else [])
+     if n.lower().endswith((".cue", ".zip"))),
+    key=lambda p: (not p.lower().endswith(".cue"), p),
+)
 
 
 def msf(s):
@@ -102,7 +103,7 @@ def main():
         sys.exit("--flac needs ffmpeg on PATH")
     path = args.source or next((p for p in DEFAULT_SOURCES if os.path.exists(p)), None)
     if not path:
-        sys.exit("no source given and none of the defaults exists:\n  " + "\n  ".join(DEFAULT_SOURCES))
+        sys.exit(f"no source given and no .cue or .zip in {AMIGA}")
     print(f"source: {path}")
     src = Source(path)
     tracks = parse_cue(src.cue)

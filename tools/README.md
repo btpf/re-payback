@@ -8,11 +8,13 @@ git-ignored `out/`, `analysis/` or `extracted/`, never into git.
 
 ## `extract/`: unpack your own copy of the game
 
+For playing, `payback-extract` (the Rust crate `crates/payback-extract`, built next to `payback.exe`) does the player's part without Python or 7-Zip: from `Payback Game + Updates/` next to the executable (`Amiga/`: `.iso`, `.cue` + `.bin`, `.zip`, `.rar`; `Amiga/Updates/`; `MacOS/`) it writes `data/amiga`, `data/mac` and `Music/*.flac` there. The scripts below unpack everything into `extracted/` for the build and the RE tools.
+
 | Tool | Does |
 |---|---|
-| `extract.py` | unpacks `Payback Game + Updates/` (`Payback.iso`, `Updates/*.lha`; needs `7z`) into `extracted/`, and builds the merged CD + Update 7 install `extracted/game/` |
-| `rip_cd_tracks.py` | splits the music (CD audio tracks 2–16) out of a BIN/CUE image of the CD, one `.bin` per disc or per track, or a `.zip` holding one (default `Payback Game + Updates/Payback (Europe).zip`, the Redump set, else `Payback Game + Updates/cd/Payback-CD.cue`) into `NN.wav`/`NN.flac` files, by default into `target/release/Music/` (`--flac` needs `ffmpeg`) |
-| `extract_mac.py` | reads the HFS volume `PaybackMac.toast` into `extracted/mac/` (needs `pip install machfs`) |
+| `extract.py` | unpacks `Payback Game + Updates/` (`Amiga/Payback.iso`, `Amiga/Updates/*.lha`; needs `7z`) into `extracted/`, and builds the merged CD + Update 7 install `extracted/game/` |
+| `rip_cd_tracks.py` | splits the music (CD audio tracks 2–16) out of a BIN/CUE image of the CD, one `.bin` per disc or per track, or a `.zip` holding one (default: the first `.cue`, else `.zip`, in `Payback Game + Updates/Amiga/`) into `NN.wav`/`NN.flac` files, by default into `target/release/Music/` (`--flac` needs `ffmpeg`) |
+| `extract_mac.py` | reads the HFS volume `Payback Game + Updates/MacOS/PaybackMac.toast` into `extracted/mac/` (needs `pip install machfs`) |
 | `hunk.py` | AmigaOS hunk parser; `--flat EXE OUT.bin` lays the hunks out at 0x10000 for Ghidra |
 
 ## `ghidra/`: the decompiles in `analysis/`

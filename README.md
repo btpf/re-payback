@@ -52,17 +52,39 @@ may be committed: you need your own copy of the game. Everything derived from it
 The notes in `docs/` describe the original's behaviour in their own words and
 quote at most a few lines (see [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md)).
 
-## Quick start
+## Playing
+
+You need your own copy of the game: the Amiga CD (with Update 7), the Mac
+CD, or both. Next to `payback.exe` (a release build: `target/release/`, or a
+copy of that folder) is an empty folder `Payback Game + Updates/`. Put your
+files in it:
+
+| Folder | Files |
+|---|---|
+| `Amiga/` | the Amiga CD: `.iso`, `.cue` with its `.bin` file(s) (one for the disc or one per track), or a `.zip` / `.rar` holding them |
+| `Amiga/Updates/` | `PaybackUpdate7.lha` (`paybackupdateOS4Native.lha` and `Warp3D-42.lha` may go here too; the game does not use them) |
+| `MacOS/` | `PaybackMac.toast` |
+
+Then run `payback-extract.exe` from the same folder. It lists what it
+found, then writes the files the game reads into `data/amiga` and
+`data/mac`, and the CD's music tracks into `Music/` as FLAC (from a
+`.bin`/`.cue` image; an `.iso` has no audio). `--list` only lists. Start
+`payback.exe`; without extracted data it says what to do and closes.
+(`crates/payback-extract`; it needs no other software.)
+
+## Quick start (from source)
 
 **Prerequisites:** Rust (edition 2024, stable); Python 3.11+ with `7z` on the
 `PATH` (and `pip install machfs` for the Mac release); for the RE tools also
 `pip install capstone numpy pillow markdown`; Docker for the decompiles; for the
 web build see [`docs/web.md`](docs/web.md).
 
-1. **Get the data.** Put your copies in `Payback Game + Updates/`:
-   `Payback.iso`, `Updates/PaybackUpdate7.lha` (and optionally
-   `Updates/paybackupdateOS4Native.lha`, `Updates/Warp3D-42.lha`, and the Mac
-   release `PaybackMac.toast`). Then unpack them:
+1. **Get the data.** Put your copies in `Payback Game + Updates/` in the
+   repository, laid out as above: `Amiga/Payback.iso`,
+   `Amiga/Updates/PaybackUpdate7.lha` (and optionally
+   `Amiga/Updates/paybackupdateOS4Native.lha`, `Amiga/Updates/Warp3D-42.lha`,
+   and the Mac release `MacOS/PaybackMac.toast`). Then unpack them for the
+   build and the RE tools:
 
    ```sh
    python tools/extract/extract.py       # -> extracted/game (CD + Update 7), iso, os4, ...
@@ -85,19 +107,21 @@ web build see [`docs/web.md`](docs/web.md).
    (`target/<profile>/data/amiga` and `data/mac`, hard links where it can;
    the list is [`crates/payback/data_files.txt`](crates/payback/data_files.txt)),
    so `target/release/` is a self-contained folder: double-click
-   `payback.exe`, or copy the folder elsewhere and run it there. The data is
-   your own copy of the game: never commit or share it.
+   `payback.exe`, or copy the folder elsewhere and run it there. It also
+   creates the empty `Payback Game + Updates/Amiga/Updates` and `MacOS`
+   folders there for `payback-extract` (`cargo build --release` builds
+   both executables). The data is your own copy of the game: never commit
+   or share it.
 
    Where the game looks for its data, first match wins: `PAYBACK_DATA` /
    `PAYBACK_MAC_DATA`, `--data <dir>` / `--mac-data <dir>`; `data/amiga` and
-   `data/mac` next to the executable; the folder remembered in
-   `payback-data.cfg` next to the executable; `extracted/game` and
+   `data/mac` next to the executable; the folders named in
+   `payback-data.cfg` next to the executable (`game = <dir>`, `mac = <dir>`); `extracted/game` and
    `extracted/mac/Payback` in the executable's folder or any folder above it,
-   then in the working directory or above. If neither is found, a folder
-   picker asks for one (the folder with `Payback.exe`, or the Mac CD's
-   `Payback` folder) and remembers the choice. The log
-   says which folders were used. `PAYBACK_NO_DIALOG=1` turns the picker and
-   message boxes off (headless runs). `PAYBACK_STAGE_DATA=0` builds without
+   then in the working directory or above. If neither is found, a message
+   box says the game files must be extracted (see "Playing") and the game
+   closes. The log says which folders were used. `PAYBACK_NO_DIALOG=1`
+   turns the message boxes off (headless runs). `PAYBACK_STAGE_DATA=0` builds without
    staging the data (`=copy` copies instead of linking);
    `python tools/dist/stage_data.py <dir>` stages it next to an executable
    elsewhere.
@@ -111,9 +135,10 @@ web build see [`docs/web.md`](docs/web.md).
 
 ## Music
 
-The game's music is the Red Book audio on the game CD; neither disc image
-holds it. Rip the audio tracks from your CD (any of WAV, Ogg Vorbis, MP3,
-FLAC) into a `Music/` folder next to `payback.exe` (beside `UserMaps/` and
+The game's music is the Red Book audio on the game CD; `Payback.iso` and
+`PaybackMac.toast` hold only data. `payback-extract` takes it from a
+`.bin`/`.cue` image of the CD (see "Playing"). Or rip the audio tracks from
+your CD (any of WAV, Ogg Vorbis, MP3, FLAC) into a `Music/` folder next to `payback.exe` (beside `UserMaps/` and
 `Saves/`; in a source checkout, `target/release/Music/`), one file per track,
 named by its CD track number: `13.ogg`, `13 - anything.flac` or
 `Track13.wav`. Track 1 is the data track: rip tracks 2–16. Without
@@ -127,9 +152,9 @@ followed the sound volume and went silent with the sound at 100.)
 From a raw BIN/CUE image of the CD (2352-byte sectors; one `.bin` for the
 disc or one per track, as in the Redump set), or a `.zip` holding one,
 `python tools/extract/rip_cd_tracks.py <cue or zip> <Music dir> [--flac]`
-splits the tracks out (defaults: `Payback Game + Updates/Payback (Europe).zip`,
-else `Payback Game + Updates/cd/Payback-CD.cue`, into `target/release/Music`;
-`--flac` needs `ffmpeg`).
+also splits the tracks out (defaults: the first `.cue`, else `.zip`, in
+`Payback Game + Updates/Amiga/`, into `target/release/Music`; `--flac` needs
+`ffmpeg`).
 
 | CD track | Plays |
 |---|---|

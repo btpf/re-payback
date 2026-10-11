@@ -9,8 +9,10 @@
 //! Also stages the game data next to the executable, so the profile folder
 //! (`target/<profile>/`) runs as it is: the files chosen by `data_files.txt`
 //! from the Amiga data into `data/amiga` and from the Mac `Payback` folder
-//! into `data/mac` (see [`stage_data`]).
+//! into `data/mac` (see [`stage_data`]), and creates the empty folders
+//! `payback-extract` reads the original files from (see [`source_folders`]).
 
+use payback_formats::data_files::Rules;
 use payback_formats::icon::{self, Rgba};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -67,6 +69,7 @@ fn main() {
     let web = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
     if !web {
         stage_data(&manifest, &out);
+        source_folders(&out);
     }
     let imgs = if web { None } else { source_images(&manifest) };
     // Window icon for the game: width, height (u32 LE) then RGBA; empty
@@ -104,55 +107,18 @@ fn main() {
     }
 }
 
-/// The selection rules of `data_files.txt` (also read by
-/// `tools/dist/stage_data.py` and `tools/web/pack_web_data.py`), names
-/// lower-cased.
-#[derive(Default)]
-struct Rules {
-    skip_dir: Vec<String>,
-    skip_file: Vec<String>,
-    skip_suffix: Vec<String>,
-    skip_prefix: Vec<String>,
-}
-
-impl Rules {
-    fn parse(text: &str) -> Rules {
-        let mut r = Rules::default();
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            let (kind, name) = line.split_once(' ').unwrap_or((line, ""));
-            let name = name.trim().to_lowercase();
-            match kind {
-                "skip-dir" => r.skip_dir.push(name),
-                "skip-file" => r.skip_file.push(name),
-                "skip-suffix" => r.skip_suffix.push(name),
-                "skip-prefix" => r.skip_prefix.push(name),
-                "film" => {}
-                _ => panic!("data_files.txt: bad rule {line:?}"),
+/// The selected files under `root`, relative to it.
+fn select(rules: &Rules, root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root.join(rel)) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ty) = e.file_type() else { continue };
+        if ty.is_dir() {
+            if !rules.skip_dir(&name) {
+                select(rules, root, &rel.join(&name), out);
             }
-        }
-        r
-    }
-
-    fn skip_file(&self, name: &str) -> bool {
-        let low = name.to_lowercase();
-        self.skip_file.contains(&low)
-            || self.skip_suffix.iter().any(|s| low.ends_with(s.as_str()))
-            || self.skip_prefix.iter().any(|p| low.starts_with(p.as_str()))
-    }
-
-    /// The selected files under `root`, relative to it.
-    fn select(&self, root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(root.join(rel)) else { return };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Ok(ty) = e.file_type() else { continue };
-            if ty.is_dir() {
-                if !self.skip_dir.contains(&name.to_lowercase()) {
-                    self.select(root, &rel.join(&name), out);
-                }
-            } else if !self.skip_file(&name) {
-                out.push(rel.join(&name));
-            }
+        } else if !rules.skip_file(&name) {
+            out.push(rel.join(&name));
         }
     }
 }
@@ -171,7 +137,7 @@ struct SyncStats {
 /// no longer selected is removed. Touches nothing outside `dst`.
 fn sync(src: &Path, dst: &Path, rules: &Rules, copy: bool) -> std::io::Result<SyncStats> {
     let mut files = Vec::new();
-    rules.select(src, Path::new(""), &mut files);
+    select(rules, src, Path::new(""), &mut files);
     let mut st = SyncStats::default();
     let mut wanted = HashSet::new();
     for rel in &files {
@@ -217,6 +183,20 @@ fn remove_stale(dst: &Path, rel: &Path, wanted: &HashSet<String>, removed: &mut 
     Ok(())
 }
 
+/// The folders next to the executable where the player puts the original
+/// files for `payback-extract` (crates/payback-extract): `Payback Game +
+/// Updates/Amiga/Updates` and `Payback Game + Updates/MacOS`, created
+/// empty; anything already in them is left alone.
+fn source_folders(out: &Path) {
+    let Some(profile) = out.ancestors().nth(3).filter(|p| p.join("build").is_dir()) else { return };
+    let root = profile.join("Payback Game + Updates");
+    for dir in [root.join("Amiga").join("Updates"), root.join("MacOS")] {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            println!("cargo:warning=could not create {}: {e}", dir.display());
+        }
+    }
+}
+
 /// Stages the game data next to the executable: `target/<profile>/data/amiga`
 /// (from `PAYBACK_DATA` or `extracted/game`) and `data/mac` (from
 /// `PAYBACK_MAC_DATA` or `extracted/mac/Payback`), the files chosen by
@@ -240,7 +220,7 @@ fn stage_data(manifest: &Path, out: &Path) {
     };
     let rules_path = manifest.join("data_files.txt");
     println!("cargo:rerun-if-changed={}", rules_path.display());
-    let rules = Rules::parse(&std::fs::read_to_string(&rules_path).expect("read data_files.txt"));
+    let rules = Rules::parse(&std::fs::read_to_string(&rules_path).expect("read data_files.txt")).unwrap();
     let extracted = manifest.ancestors().nth(2).unwrap_or(manifest).join("extracted");
     let env_or = |var: &str, default: PathBuf| std::env::var_os(var).map(PathBuf::from).unwrap_or(default);
     let game = env_or("PAYBACK_DATA", extracted.join("game"));

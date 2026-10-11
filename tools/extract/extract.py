@@ -1,5 +1,9 @@
 """Unpack the original Payback CD image and updates into extracted/.
 
+Reads `Payback Game + Updates/Amiga/Payback.iso` and `Amiga/Updates/*.lha`
+(the layout `payback-extract` uses; it also takes .bin/.cue images and
+.zip/.rar archives, crates/payback-extract):
+
     extracted/iso      - the CD (Payback.iso)
     extracted/update7  - PaybackUpdate7.lha (last official update)
     extracted/os4      - paybackupdateOS4Native.lha (community OS4 PPC port)
@@ -19,10 +23,10 @@ SRC = 'Payback Game + Updates'
 OUT = 'extracted'
 
 ARCHIVES = {
-    'iso': f'{SRC}/Payback.iso',
-    'update7': f'{SRC}/Updates/PaybackUpdate7.lha',
-    'os4': f'{SRC}/Updates/paybackupdateOS4Native.lha',
-    'warp3d': f'{SRC}/Updates/Warp3D-42.lha',
+    'iso': f'{SRC}/Amiga/Payback.iso',
+    'update7': f'{SRC}/Amiga/Updates/PaybackUpdate7.lha',
+    'os4': f'{SRC}/Amiga/Updates/paybackupdateOS4Native.lha',
+    'warp3d': f'{SRC}/Amiga/Updates/Warp3D-42.lha',
 }
 
 for name, archive in ARCHIVES.items():

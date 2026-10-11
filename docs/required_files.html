@@ -42,8 +42,10 @@
 <p class="lead">For three different jobs: <b>compiling</b> the port, <b>running</b> it, and
 <b>decompiling</b> the original for further reverse-engineering work. The port ships no
 original game data; everything below comes from your own copy, kept in
-<code>Payback Game + Updates/</code> and extracted to <code>extracted/</code> (both
-git-ignored). Never commit any of it, nor the decompiled output in <code>analysis/</code>.</p>
+<code>Payback Game + Updates/</code> (<code>Amiga/</code>, <code>Amiga/Updates/</code>,
+<code>MacOS/</code>; the same folders next to <code>payback.exe</code> for players) and
+extracted by <code>payback-extract</code> next to the exe, or by the Python scripts to
+<code>extracted/</code> (all git-ignored). Never commit any of it, nor the decompiled output in <code>analysis/</code>.</p>
 <nav><a href="#summary">Summary</a><a href="#setups">What you get</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#decompile">Decompile</a><a href="#notneeded">Not needed</a></nav>
 
 <h2 id="summary">Summary</h2>
@@ -53,8 +55,11 @@ git-ignored). Never commit any of it, nor the decompiled output in <code>analysi
     <p>Only the Rust toolchain. Game files are used at build time just for optional extras
     (the exe icon, copying the data next to the exe).</p></div>
   <div class="card"><h3>Run</h3>
-    <p><span class="y">either</span> <code>Payback.iso</code> + <code>PaybackUpdate7.lha</code>
+    <p><span class="y">either</span> the Amiga CD + <code>PaybackUpdate7.lha</code>
     <b>or</b> <code>PaybackMac.toast</code> alone, or both (recommended).</p>
+    <p>The Amiga CD as <code>Payback.iso</code>, or as a <code>.cue</code> + <code>.bin</code>
+    image (which also holds the music), possibly in a <code>.zip</code> / <code>.rar</code>.
+    Run <code>payback-extract</code> once.</p>
     <p>Mac alone: Mac content only, English/Deutsch/Français, no Amiga variants, no FLC
     intro or shipped replays.</p>
     <p>About 40 MB of Amiga files and/or ~90 MB Mac are actually read.</p></div>
@@ -66,11 +71,11 @@ git-ignored). Never commit any of it, nor the decompiled output in <code>analysi
 
 <table>
   <tr><th>Original file (in <code>Payback Game + Updates/</code>)</th><th>Compile</th><th>Run</th><th>Decompile</th></tr>
-  <tr><td><code>Payback.iso</code> (CD release)</td><td><span class="n">no</span></td><td><span class="o">either this + Update 7, or the Mac release</span> base game data</td><td><span class="y">yes</span> CD mission scripts <code>Maps/NN.script</code></td></tr>
-  <tr><td><code>Updates/PaybackUpdate7.lha</code> (last official update)</td><td><span class="n">no</span></td><td><span class="o">with the CD</span> updated data and <code>Payback.exe</code> (palette; the CD's own differs in colour 8)</td><td><span class="y">yes</span> the 68k <code>Payback.exe</code></td></tr>
-  <tr><td><code>Updates/paybackupdateOS4Native.lha</code> (AmigaOS 4 port)</td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="y">yes</span> <code>PaybackOS4</code>, the cleanest Amiga decompile</td></tr>
-  <tr><td><code>PaybackMac.toast</code> (Mac OS 9 / OS X release)</td><td><span class="o">optional</span> exe/window icon</td><td><span class="o">enough alone</span> all game data incl. the palette (in <code>Payback (OS X)</code>); with the Amiga data: Mac textures, models, phrases, intro film, community maps as settings</td><td><span class="y">yes</span> OS X + OS 9 games and the map editor (original function names)</td></tr>
-  <tr><td><code>Updates/Warp3D-42.lha</code></td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td></tr>
+  <tr><td><code>Amiga/Payback.iso</code> (CD release, data track) or a <code>.cue</code> + <code>.bin</code> image of the whole CD (also <code>.zip</code> / <code>.rar</code>)</td><td><span class="n">no</span></td><td><span class="o">either this + Update 7, or the Mac release</span> base game data</td><td><span class="y">yes</span> CD mission scripts <code>Maps/NN.script</code></td></tr>
+  <tr><td><code>Amiga/Updates/PaybackUpdate7.lha</code> (last official update)</td><td><span class="n">no</span></td><td><span class="o">with the CD</span> updated data and <code>Payback.exe</code> (palette; the CD's own differs in colour 8)</td><td><span class="y">yes</span> the 68k <code>Payback.exe</code></td></tr>
+  <tr><td><code>Amiga/Updates/paybackupdateOS4Native.lha</code> (AmigaOS 4 port)</td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="y">yes</span> <code>PaybackOS4</code>, the cleanest Amiga decompile</td></tr>
+  <tr><td><code>MacOS/PaybackMac.toast</code> (Mac OS 9 / OS X release)</td><td><span class="o">optional</span> exe/window icon</td><td><span class="o">enough alone</span> all game data incl. the palette (in <code>Payback (OS X)</code>); with the Amiga data: Mac textures, models, phrases, intro film, community maps as settings</td><td><span class="y">yes</span> OS X + OS 9 games and the map editor (original function names)</td></tr>
+  <tr><td><code>Amiga/Updates/Warp3D-42.lha</code></td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td></tr>
 </table>
 
 <h2 id="setups">What you get with each set of files</h2>
@@ -119,7 +124,11 @@ models and sounds.</p>
 
 <h2 id="compile">Compiling the game</h2>
 <p>Building needs no game files at all: install Rust (stable) and run</p>
-<pre>cargo build --release -p payback</pre>
+<pre>cargo build --release              # payback.exe and payback-extract.exe</pre>
+<p><code>payback-extract</code> also compiles the bundled UnRAR C++ source (the
+<code>unrar</code> crate), so it needs the C++ compiler that Rust's Windows (MSVC) toolchain
+already uses. The build creates the empty <code>Payback Game + Updates/Amiga/Updates</code>
+and <code>MacOS</code> folders next to the executables.</p>
 <p>Two build-time extras use game files <b>if they are present</b>, and are skipped
 otherwise (the build still succeeds):</p>
 <table>
@@ -131,16 +140,28 @@ otherwise (the build still succeeds):</p>
 files; the data pack it writes into <code>web/dist/data/</code> uses the run-time list.</p>
 
 <h2 id="run">Running the game</h2>
-<p>Extract your copy once:</p>
-<pre>python tools/extract/extract.py       # Payback.iso + PaybackUpdate7.lha (+ OS4) -> extracted/game
-python tools/extract/extract_mac.py   # PaybackMac.toast -> extracted/mac   (optional; pip install machfs)</pre>
-<p><code>extract.py</code> copies the CD and lays Update 7 over it, giving the Update 7
-install in <code>extracted/game</code>. The port then reads only the files below; the exact
-rules are the one list in <code>crates/payback/data_files.txt</code>, shared by the build's
-staging, <code>tools/dist/stage_data.py</code> and the web pack.</p>
+<p>Put your files into <code>Payback Game + Updates/</code> next to <code>payback.exe</code>
+and run <code>payback-extract.exe</code> from the same folder once:</p>
+<table>
+  <tr><th>Folder</th><th>Accepted</th></tr>
+  <tr><td><code>Amiga/</code></td><td>the CD: <code>.iso</code> (data track), <code>.cue</code> with its <code>.bin</code> file(s), one for the disc or one per track (the Redump set), or a <code>.zip</code> / <code>.rar</code> holding either</td></tr>
+  <tr><td><code>Amiga/Updates/</code></td><td><code>PaybackUpdate7.lha</code> (the OS4 port and Warp3D archives are listed but not used)</td></tr>
+  <tr><td><code>MacOS/</code></td><td><code>PaybackMac.toast</code></td></tr>
+</table>
+<p>It lists what it found, then writes the CD's <code>Payback</code> folder with Update 7 laid
+over it into <code>data/amiga</code>, the Mac CD's <code>Payback</code> folder into
+<code>data/mac</code> (both filtered by the one list in <code>crates/payback/data_files.txt</code>,
+shared with the build's staging, <code>tools/dist/stage_data.py</code> and the web pack), and the
+audio tracks into <code>Music/NN.flac</code>. It has its own ISO 9660, HFS, LHA and FLAC code, so it
+needs nothing else installed. Without the data, <code>payback.exe</code> shows a message saying
+the game files must be extracted, and closes.</p>
+<p>From a source checkout the Python scripts unpack everything into <code>extracted/</code>
+instead, which the build then stages next to the exe:</p>
+<pre>python tools/extract/extract.py       # Amiga/Payback.iso + Amiga/Updates/*.lha -> extracted/game, iso, os4, ...
+python tools/extract/extract_mac.py   # MacOS/PaybackMac.toast -> extracted/mac   (optional; pip install machfs)</pre>
 <p><b>Which release is needed?</b> Either one is enough (<code>crates/payback/src/data.rs</code>,
-<code>locate.rs</code>); the start-up search looks for both, and the folder picker accepts
-either. <code>--mac-only</code> ignores the Amiga data to try a Mac-only setup.</p>
+<code>locate.rs</code>); the start-up search looks for both. <code>--mac-only</code> ignores the
+Amiga data to try a Mac-only setup.</p>
 <table>
   <tr><th>Setup</th><th>Palette from</th><th>What you get / lack</th></tr>
   <tr><td>Amiga + Mac (recommended)</td><td>Amiga <code>Payback.exe</code></td><td>everything; Mac/Amiga variants selectable in the settings (Mac by default)</td></tr>
@@ -171,8 +192,10 @@ Screenshots and replays match between the setups.</p>
   <tr><td><code>Replays/</code>, <code>UserMaps/</code></td><td>small, 0.8 MB</td><td>shipped replays and the Amiga user map</td></tr>
   <tr><td><code>Payback.info</code></td><td>small</td><td>window-icon fallback when there is no Mac data</td></tr>
 </table>
-<p>That is about <b>40 MB</b>. The CD's audio tracks (music) are not on the data track; to
-hear music, rip them yourself (or split a BIN/CUE image of the CD, such as the Redump set <code>Payback (Europe).zip</code>, with <code>tools/extract/rip_cd_tracks.py</code>) into a <code>Music</code> folder <b>next to <code>payback.exe</code></b>
+<p>That is about <b>40 MB</b>. The CD's audio tracks (music) are not on the data track:
+<code>payback-extract</code> takes them from a <code>.cue</code> + <code>.bin</code> image of the CD
+(<code>tools/extract/rip_cd_tracks.py</code> does the same from Python); or rip them yourself
+into a <code>Music</code> folder <b>next to <code>payback.exe</code></b>
 (beside <code>UserMaps/</code> and <code>Saves/</code>; not into <code>data/</code>, which the build regenerates).
 One file per CD track, named by track number (<code>13.ogg</code>, <code>13 - anything.flac</code>,
 <code>Track13.wav</code>; WAV, Ogg, MP3 or FLAC). Track 1 is the data track: rip tracks <b>2&ndash;16</b>
@@ -206,7 +229,7 @@ tools/ghidra/decompile_all.sh            # or name builds: 68k os4 macx mac9 map
   <tr><td><code>mac/Payback/MapEditor (OS X)</code></td><td>Mac release</td><td><code>ghidra_mapedx</code></td><td>the map editor (route algorithm, file writers)</td></tr>
 </table>
 <p class="note">You only need the archives for the builds you want: e.g. Mac work needs just
-<code>PaybackMac.toast</code>; Amiga 68k work needs the CD and Update 7. The data files
+<code>MacOS/PaybackMac.toast</code>; Amiga 68k work needs the CD and Update 7. The data files
 themselves are not decompiled, but RE work on formats reads them from <code>extracted/</code>
 too (<code>tools/re/</code>), and the symbol cross-reference is already committed in
 <code>docs/xref/symbols.tsv</code>.</p>
@@ -220,7 +243,7 @@ rules still copy a few of them into <code>data/</code> (they are harmless, just 
   <tr><td><code>HID.bundle/</code></td><td>Mac</td><td>yes (unused)</td></tr>
   <tr><td><code>PaybackWOS.exe</code>, <code>Payback (OS 9)</code>, <code>Map Editor (OS 9)</code>, <code>MapEditor (OS X)</code>, docs, manuals, resource forks, Finder files</td><td>both</td><td>no</td></tr>
   <tr><td><code>payback_high_mpeg2.mpg</code>, <code>payback_low_mpeg1.mpg</code> (unused Mac films)</td><td>Mac</td><td>no</td></tr>
-  <tr><td>The OS4 port, Warp3D</td><td>Updates</td><td>never staged</td></tr>
+  <tr><td>The OS4 port, Warp3D</td><td>Updates</td><td>never staged or extracted by <code>payback-extract</code></td></tr>
 </table>
 </main>
 </body>

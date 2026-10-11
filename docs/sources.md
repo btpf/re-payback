@@ -6,17 +6,22 @@ missions driven by per-level scripts, vehicles, pedestrians and police.
 
 ## Media
 
+In `Payback Game + Updates/` (git-ignored; the same layout next to
+`payback.exe` for `payback-extract`):
+
 | Item | Use |
 |---|---|
-| `Payback.iso` | CD release; base data |
-| `PaybackUpdate7.lha` | last official update; **the version we target** |
-| `paybackupdateOS4Native.lha` | community AmigaOS 4 PPC port (ELF) |
-| `Warp3D-42.lha` | Warp3D driver; not needed |
-| `PaybackMac.toast` | Mac OS 9 / OS X release (HFS image); the reference for behaviour; enough on its own to run the port |
+| `Amiga/Payback.iso` | CD release; base data (the data track; a `.cue` + `.bin` image of the whole CD, e.g. the Redump set, also holds the music, and may come zipped or in a `.rar`) |
+| `Amiga/Updates/PaybackUpdate7.lha` | last official update; **the version we target** |
+| `Amiga/Updates/paybackupdateOS4Native.lha` | community AmigaOS 4 PPC port (ELF) |
+| `Amiga/Updates/Warp3D-42.lha` | Warp3D driver; not needed |
+| `MacOS/PaybackMac.toast` | Mac OS 9 / OS X release (HFS image); the reference for behaviour; enough on its own to run the port |
 
 `python tools/extract/extract.py` unpacks the Amiga media into `extracted/` and builds
 the merged install in `extracted/game/`; `python tools/extract/extract_mac.py` reads
-the Mac image into `extracted/mac/`.
+the Mac image into `extracted/mac/`. For playing, `payback-extract`
+(`crates/payback-extract`) writes just the files the port reads, and the
+music, next to `payback.exe`.
 
 ## Amiga binaries
 

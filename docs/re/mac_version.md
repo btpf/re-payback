@@ -9,11 +9,15 @@ an additional cross-reference.
 
 ## Source and extraction
 
-- `Payback Game + Updates/PaybackMac.toast`: a classic **HFS** volume (`BD`
+- `Payback Game + Updates/MacOS/PaybackMac.toast`: a classic **HFS** volume (`BD`
   signature at 0x400, volume name `PaybackMac`), not ISO 9660.
 - `python tools/extract/extract_mac.py` (needs `pip install machfs`) writes
   `extracted/mac/`: data forks under their HFS paths, resource forks as
   `<name>.rsrc`, and type/creator codes in `extracted/mac/_finder_info.tsv`.
+  `payback-extract` (`crates/payback-extract/src/hfs.rs`, a small HFS reader:
+  catalog and extents overflow B-trees, data forks, names from Mac OS Roman)
+  writes the `Payback` folder's data forks into `data/mac` instead, with the
+  same names.
 - Layout: `Payback/` holds the game (`Payback (OS 9)`, `Payback (OS X)`, the
   map editors, and the data folders `Backgrounds`, `CubeTextures`,
   `EffectTextures`, `General`, `Icons`, `Maps`, `Motion`, `Objects`,
