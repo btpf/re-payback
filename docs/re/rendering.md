@@ -1068,6 +1068,24 @@ Flares are only added for objects that are not burning (`obj+0x33c < 1`).
   (±5 model units). The table lookup is fixed, so the dent is a static deformation
   (same shape every frame and for every car of that model); environment-mapped faces
   then use a second set of normals (`+0x3c70` …).
+  Mac (CONFIRMED, `DrawObject` @ 10075880, static-vertex loop): the flag is `+0x93a`,
+  the same `RandomFromSeed(3n + a, 0xa0) − 0x50` on the 1-based vertex n, file x, y, z
+  (`LoadStructure` @ 10074630 stores them ×16 in `[2]`, `[3]`, `[4]`), only when both
+  animation frames are −1. It moves **every** vertex, wheels included: the wheels are
+  separate one-sided mode-3 (colour-keyed) squares in the vertical planes x = ±36 (police
+  car; body sides ±29…33, one bumper corner 37), outside the body, so dented they tilt by up to ±5 units in x
+  and show as discs from above, and the body side moves up to 5 units in or out. The
+  door is not dented: it is a fresh object (`CreateObject` @ 10075630 clears it with
+  `malloc_check` → `+0x93a` = 0) at the model's fixed hinge `+0x8150` = −max|X| over all
+  vertices (37 on the police car, its bumper corner (37, 117, −10)), `+0x8154` = `+0x8124`
+  / 2 (`LoadStructure`), not the dented extents, so its inner face (x −35) stands 2–4
+  units off the undented side and up to 9 off a dented one; the door model spans z
+  −18…+18 around the car's origin. The port draws all of this alike (`objects.rs`
+  `variant_mesh`, `vehicle_doors`; checked top-down and rotating, software and hardware,
+  police, taxi, Mundaneo). Not ported: the dented normal sets (face `+0x8104…`, vertex `+0x8110…`, `LoadStructure`)
+  is built with each face edge's two offsets *added* (x, y: `r_a + r_b − 160`) and z offsets
+  of `RandomFromSeed(…, 0x140)` (±10 units); the port takes the normals of the dented
+  mesh, which only shifts the reflection on dented environment-mapped faces.
 
 ### Scenery that changes (`FUN_01049374` scenery pass; 68k `FUN_000d1058`)
 
