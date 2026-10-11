@@ -19,7 +19,8 @@
 //! the files go ([`NO_MUSIC_HINT`]) and the log names the folder.
 //! The disc images (`Payback.iso`, ISO 9660, and `PaybackMac.toast`, HFS)
 //! hold only the data track, so the tracks cannot be extracted from them:
-//! rip them from the CD (docs/status.md, the Audio row).
+//! rip them from the CD, or split a BIN/CUE image of it with
+//! `tools/extract/rip_cd_tracks.py` (docs/status.md, the Audio row).
 //!
 //! **Tracks** (docs/re/frontend_audio.md §4.6; CONFIRMED, Mac callers of
 //! `CD_CheckForTrackEnd` @ 100fb000 and `InitStructures` @ 1005ffb0 type
