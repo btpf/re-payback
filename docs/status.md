@@ -9,8 +9,8 @@ MATCH; it records and plays back with the same build, so it checks the port's
 own determinism, not agreement with the original, whose state can't be
 observed this way). The Mac release is the reference: its differences from
 the Amiga version are ported, with a setting where the content differs
-([`re/mac_version.md`](re/mac_version.md) "Decisions"). `progress.html`
-(local, git-ignored) has the per-area estimates and `remaining_gaps.html`
+([`re/mac_version.md`](re/mac_version.md) "Decisions"). `docs/progress.html`
+(local, git-ignored) has the per-area estimates and `docs/remaining_gaps.html`
 (local) the itemised list of what still differs.
 
 How the port keeps replays deterministic, and its performance and frame-pacing
@@ -33,7 +33,7 @@ notes, are in [`port_engineering.md`](port_engineering.md).
 | Platform | saves and settings in `Saves` next to the executable (`PAYBACK_SAVES`), smooth motion, vsync and frame limit, WebAssembly build ([`web.md`](web.md)) | `frontend/progress`, `frame`, `web`, `vfs` |
 | Tooling | `--screenshot`, `--record`/`--play`, `--autoplay`, `--fast`, `--perf-check`, `--pad-sim`/`--pad-debug`; [`tools/README.md`](../tools/README.md) | `main`, `replay`, `autoplay`, `perf` |
 
-Recent work (2026-10-08/09; one line each in `progress.html`):
+Recent work (2026-10-08/09; one line each in `docs/progress.html`):
 
 - Mac comparison: the Mac release extracted and decompiled, its differences
   ported (30 Hz tick, AI and pedestrians, lighting, MPEG intro, 0x3F3
@@ -53,7 +53,7 @@ Recent work (2026-10-08/09; one line each in `progress.html`):
 
 ## Roadmap
 
-Remaining, by priority (details and evidence in `remaining_gaps.html`):
+Remaining, by priority (details and evidence in `docs/remaining_gaps.html`):
 
 1. Small rule fixes: the burning-car blast is centred 500 above the car
    instead of below it (`sim/contact.rs`, Mac `Explode` @ 10055570); bullet

@@ -58,8 +58,8 @@ git-ignored `out/`, `analysis/` or `extracted/`, never into git.
 
 | Tool | Writes |
 |---|---|
-| `coverage.py` | `coverage.html`: every Mac function as a treemap box, coloured by how the port and the notes cite it |
-| `mac_differences.py` | `mac_differences.html`: the consolidated Mac-vs-Amiga report (embeds renders from `out/img/` when present; never commit it) |
+| `coverage.py` | `docs/coverage.html`: every Mac function as a treemap box, coloured by how the port and the notes cite it |
+| `mac_differences.py` | `docs/mac_differences.html`: the consolidated Mac-vs-Amiga report (embeds renders from `out/img/` when present; never commit it) |
 
 ## `web/`, `dist/` and `dev/`
 

@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
 import subprocess
 import sys
-OUT = os.path.join(ROOT, 'mac_differences.html')
+OUT = os.path.join(ROOT, 'docs', 'mac_differences.html')
 
 
 def rd(rel):

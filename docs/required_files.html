@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payback: which original files are needed</title>
+<style>
+  :root { --bg:#fff; --fg:#1d2330; --mute:#5c6475; --line:#d9dde5; --head:#f3f5f9;
+          --yes:#1f7a3a; --yesbg:#e6f4ea; --opt:#8a5a00; --optbg:#fdf3dc; --no:#8d2b2b; --nobg:#fbe9e9; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171d; --fg:#e4e7ee; --mute:#9aa2b2; --line:#2c323d; --head:#1c2129;
+            --yes:#7fd69a; --yesbg:#16301f; --opt:#f0c46b; --optbg:#33290f; --no:#f19a9a; --nobg:#341a1a; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:28px 22px 60px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  h2 { font-size:19px; margin:36px 0 10px; padding-top:8px; border-top:1px solid var(--line); }
+  h3 { font-size:16px; margin:22px 0 8px; }
+  p, li { color:var(--fg); }
+  .lead { color:var(--mute); margin:0 0 18px; }
+  code { font:13px/1.4 ui-monospace, Consolas, monospace; background:var(--head); padding:1px 5px; border-radius:4px; }
+  pre { background:var(--head); padding:12px 14px; border-radius:8px; overflow:auto; font:13px/1.45 ui-monospace, Consolas, monospace; }
+  table { border-collapse:collapse; width:100%; margin:8px 0 14px; font-size:14px; }
+  th, td { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--head); font-weight:600; }
+  .y, .o, .n { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .y { color:var(--yes); background:var(--yesbg); }
+  .o { color:var(--opt); background:var(--optbg); }
+  .n { color:var(--no); background:var(--nobg); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(270px, 1fr)); gap:12px; margin:14px 0; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h3 { margin:0 0 6px; }
+  .card p { margin:4px 0; }
+  .note { border-left:3px solid var(--line); padding:4px 12px; color:var(--mute); }
+  nav a { margin-right:14px; }
+  a { color:inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>Which original files are needed</h1>
+<p class="lead">For three different jobs: <b>compiling</b> the port, <b>running</b> it, and
+<b>decompiling</b> the original for further reverse-engineering work. The port ships no
+original game data; everything below comes from your own copy, kept in
+<code>Payback Game + Updates/</code> and extracted to <code>extracted/</code> (both
+git-ignored). Never commit any of it, nor the decompiled output in <code>analysis/</code>.</p>
+<nav><a href="#summary">Summary</a><a href="#setups">What you get</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#decompile">Decompile</a><a href="#notneeded">Not needed</a></nav>
+
+<h2 id="summary">Summary</h2>
+<div class="cards">
+  <div class="card"><h3>Compile</h3>
+    <p><span class="y">nothing</span> from the game.</p>
+    <p>Only the Rust toolchain. Game files are used at build time just for optional extras
+    (the exe icon, copying the data next to the exe).</p></div>
+  <div class="card"><h3>Run</h3>
+    <p><span class="y">either</span> <code>Payback.iso</code> + <code>PaybackUpdate7.lha</code>
+    <b>or</b> <code>PaybackMac.toast</code> alone, or both (recommended).</p>
+    <p>Mac alone: Mac content only, English/Deutsch/Français, no Amiga variants, no FLC
+    intro or shipped replays.</p>
+    <p>About 40 MB of Amiga files and/or ~90 MB Mac are actually read.</p></div>
+  <div class="card"><h3>Decompile</h3>
+    <p><span class="y">required</span> all four: the CD, Update 7, the OS4 port and the Mac
+    release (one per build you want to decompile).</p>
+    <p>Only six executables and the 22 CD mission scripts are read.</p></div>
+</div>
+
+<table>
+  <tr><th>Original file (in <code>Payback Game + Updates/</code>)</th><th>Compile</th><th>Run</th><th>Decompile</th></tr>
+  <tr><td><code>Payback.iso</code> (CD release)</td><td><span class="n">no</span></td><td><span class="o">either this + Update 7, or the Mac release</span> base game data</td><td><span class="y">yes</span> CD mission scripts <code>Maps/NN.script</code></td></tr>
+  <tr><td><code>Updates/PaybackUpdate7.lha</code> (last official update)</td><td><span class="n">no</span></td><td><span class="o">with the CD</span> updated data and <code>Payback.exe</code> (palette; the CD's own differs in colour 8)</td><td><span class="y">yes</span> the 68k <code>Payback.exe</code></td></tr>
+  <tr><td><code>Updates/paybackupdateOS4Native.lha</code> (AmigaOS 4 port)</td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="y">yes</span> <code>PaybackOS4</code>, the cleanest Amiga decompile</td></tr>
+  <tr><td><code>PaybackMac.toast</code> (Mac OS 9 / OS X release)</td><td><span class="o">optional</span> exe/window icon</td><td><span class="o">enough alone</span> all game data incl. the palette (in <code>Payback (OS X)</code>); with the Amiga data: Mac textures, models, phrases, intro film, community maps as settings</td><td><span class="y">yes</span> OS X + OS 9 games and the map editor (original function names)</td></tr>
+  <tr><td><code>Updates/Warp3D-42.lha</code></td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td></tr>
+</table>
+
+<h2 id="setups">What you get with each set of files</h2>
+<p>Three ways to supply the game data. All three run the full game (all six story levels,
+Rampage, multiplayer, replays); they differ in content, languages and what you can switch
+between in the settings.</p>
+<div class="cards">
+  <div class="card"><h3>Payback.iso + Update 7</h3>
+    <p>The Amiga game as last updated (the version the port targets).</p>
+    <p><span class="y">14 languages</span> <span class="y">Amiga intro</span></p>
+    <p>No Mac content: the Mac/Amiga settings are greyed out on Amiga.</p></div>
+  <div class="card"><h3>PaybackMac.toast</h3>
+    <p>The later Mac release on its own: Update 7's game plus the Mac's own art pass,
+    models and film.</p>
+    <p><span class="y">Mac film intro</span> <span class="y">31 community maps</span></p>
+    <p><span class="o">3 languages</span> only; the Amiga variants are greyed out on Mac.</p></div>
+  <div class="card"><h3>Both (recommended)</h3>
+    <p>Everything: every Mac/Amiga variant can be chosen in the settings (Mac by default),
+    all 14 languages, both intros, all maps and replays.</p>
+    <p><span class="y">complete</span></p></div>
+</div>
+<table>
+  <tr><th></th><th>Payback.iso + Update 7</th><th>PaybackMac.toast</th><th>Both</th></tr>
+  <tr><td>Game, missions, Rampage, multiplayer</td><td><span class="y">yes</span></td><td><span class="y">yes</span></td><td><span class="y">yes</span></td></tr>
+  <tr><td>Colours (palette)</td><td>from Amiga <code>Payback.exe</code></td><td>from <code>Payback (OS X)</code>, identical</td><td>Amiga <code>Payback.exe</code></td></tr>
+  <tr><td>City textures</td><td>Amiga set</td><td>Mac set (darker repaint with baked light pools)</td><td>either; setting "Textures" (default Mac)</td></tr>
+  <tr><td>Models (people, cars, scenery, menu props)</td><td>Amiga models</td><td>Mac models (people at the feet, shorter phones / traffic lights / trees, PC menu props)</td><td>either; settings "Scenery", "Menu props" (default Mac)</td></tr>
+  <tr><td>Blood</td><td>Amiga <code>Blood</code> + <code>Blood.dark</code> at night</td><td>Mac <code>Blood</code> day and night</td><td>either; setting "Blood"</td></tr>
+  <tr><td>Title screens</td><td>Amiga</td><td>Mac (Apex + Virtual Programming logos)</td><td>either; setting "Title screens"</td></tr>
+  <tr><td>Intro</td><td>Amiga FLC (30 s, in-engine)</td><td>Mac MPEG film (72 s)</td><td>either; setting "Intro"</td></tr>
+  <tr><td>Languages</td><td>14 (Czech, Deutsch, English, Español, Français, Italiano, Nederlands, Norsk, Polski, Slovak, Slovensko, Srpski, Suomi, Svenska)</td><td>3 (English, Deutsch, Français), with the Mac's text fixes and random-mission phrases</td><td>all 14, the Mac text for the 3 shared ones</td></tr>
+  <tr><td>Rampage random phone missions</td><td><span class="n">off</span> (they need the Mac phrases)</td><td><span class="y">on</span> (setting)</td><td><span class="y">on</span> (setting)</td></tr>
+  <tr><td>German "Gas" instead of blood (a Mac feature)</td><td>setting (the Amiga data has the Gas texture too)</td><td>setting</td><td>setting</td></tr>
+  <tr><td>User maps</td><td>The Killing Zone</td><td>31 community maps (+ the editor's test map)</td><td>all</td></tr>
+  <tr><td>Shipped replays</td><td>2 Amiga replays</td><td>none</td><td>2</td></tr>
+  <tr><td>Exe / window icon</td><td>Amiga Workbench icon</td><td>Mac application icon</td><td>Mac icon</td></tr>
+  <tr><td>Data read at run time</td><td>~40 MB</td><td>~90 MB</td><td>~130 MB</td></tr>
+  <tr><td>Decompiling</td><td>68k game + CD mission scripts (add the OS4 port for the cleanest Amiga decompile)</td><td>OS X + OS 9 games and the map editor, with the original function names</td><td>all of them</td></tr>
+</table>
+<p class="note">The CD alone (without Update 7) also runs, but as the original pre-update
+release: an older palette (one colour differs), older textures and vehicles, no parked
+vehicles on the maps. Update 7 alone does not run: it is an 8 MB patch of 337 files laid
+over the CD (programs, 124 textures, 26 models/paints, phrases, icons, two maps, engine
+sounds, <code>Alpha.256</code>), without the animation, effects, intro, routes or most
+models and sounds.</p>
+
+<h2 id="compile">Compiling the game</h2>
+<p>Building needs no game files at all: install Rust (stable) and run</p>
+<pre>cargo build --release -p payback</pre>
+<p>Two build-time extras use game files <b>if they are present</b>, and are skipped
+otherwise (the build still succeeds):</p>
+<table>
+  <tr><th>Extra</th><th>Reads</th><th>Without it</th></tr>
+  <tr><td>Exe and window icon (<code>crates/payback/build.rs</code>)</td><td><code>extracted/mac/Payback/Payback (OS X).rsrc</code>, else the Amiga <code>Payback.info</code></td><td>no icon</td></tr>
+  <tr><td>Data staging next to the exe (<code>target/&lt;profile&gt;/data/amiga</code>, <code>data/mac</code>)</td><td>the run-time files below, from <code>extracted/</code> (or <code>PAYBACK_DATA</code> / <code>PAYBACK_MAC_DATA</code>)</td><td>the exe looks for the data elsewhere at start-up (<code>crates/payback/src/locate.rs</code>)</td></tr>
+</table>
+<p>The web build (<code>tools/web/build_web.sh</code>) is the same: the code needs no game
+files; the data pack it writes into <code>web/dist/data/</code> uses the run-time list.</p>
+
+<h2 id="run">Running the game</h2>
+<p>Extract your copy once:</p>
+<pre>python tools/extract/extract.py       # Payback.iso + PaybackUpdate7.lha (+ OS4) -> extracted/game
+python tools/extract/extract_mac.py   # PaybackMac.toast -> extracted/mac   (optional; pip install machfs)</pre>
+<p><code>extract.py</code> copies the CD and lays Update 7 over it, giving the Update 7
+install in <code>extracted/game</code>. The port then reads only the files below; the exact
+rules are the one list in <code>crates/payback/data_files.txt</code>, shared by the build's
+staging, <code>tools/dist/stage_data.py</code> and the web pack.</p>
+<p><b>Which release is needed?</b> Either one is enough (<code>crates/payback/src/data.rs</code>,
+<code>locate.rs</code>); the start-up search looks for both, and the folder picker accepts
+either. <code>--mac-only</code> ignores the Amiga data to try a Mac-only setup.</p>
+<table>
+  <tr><th>Setup</th><th>Palette from</th><th>What you get / lack</th></tr>
+  <tr><td>Amiga + Mac (recommended)</td><td>Amiga <code>Payback.exe</code></td><td>everything; Mac/Amiga variants selectable in the settings (Mac by default)</td></tr>
+  <tr><td>Amiga only</td><td>Amiga <code>Payback.exe</code></td><td>Amiga content; the Mac variants are greyed out; no Mac film, no 31 community maps</td></tr>
+  <tr><td>Mac only (<code>PaybackMac.toast</code>)</td><td>Mac <code>Payback (OS X)</code> (else <code>Payback (OS 9)</code>)</td><td>Mac content, Mac film intro, community maps. Lacks: the 11 extra languages (only English, Deutsch, Français), the Amiga variants (textures, blood + <code>Blood.dark</code>, menu props, title screens, FLC intro, scenery: greyed out, showing Mac), the two shipped Amiga replays, the <code>Payback.info</code> window-icon fallback</td></tr>
+</table>
+<p class="note">The palette is the same in both releases: the Mac applications hold the
+Update 7 <code>LoadRGB32</code> table byte for byte (four copies), but inside their
+pattern-compressed PEF data section, so the port unpacks that section to read it
+(<code>crates/payback-formats/src/pef.rs</code>; <code>docs/re/mac/assets.md</code> §15).
+Screenshots and replays match between the setups.</p>
+
+<h3>Amiga data (optional with the Mac data): <code>extracted/game</code> → <code>data/amiga</code></h3>
+<table>
+  <tr><th>Folder / file</th><th>Size</th><th>What the port uses it for</th></tr>
+  <tr><td><code>Payback.exe</code></td><td>1.2 MB</td><td>the colour palette (read out of the executable) and the marker of the Amiga data folder</td></tr>
+  <tr><td><code>Maps/</code></td><td>2.2 MB</td><td>the three cities: <code>.map</code>, <code>.route</code>, <code>.vehicles</code>, thumbnails, scores</td></tr>
+  <tr><td><code>CubeTextures/</code></td><td>3.8 MB</td><td>city textures and the texture lists</td></tr>
+  <tr><td><code>Objects/</code>, <code>ObjectTextures/</code></td><td>1.4 + 2.7 MB</td><td>vehicle, people and scenery models and their textures</td></tr>
+  <tr><td><code>EffectTextures/</code></td><td>0.2 MB</td><td>explosions, smoke, blood, sparks, weather</td></tr>
+  <tr><td><code>General/</code></td><td>0.9 MB</td><td>blend tables (<code>Alpha.256</code> etc.)</td></tr>
+  <tr><td><code>Icons/</code></td><td>1.5 MB</td><td>HUD art, fonts, title screens, menu images</td></tr>
+  <tr><td><code>Backgrounds/</code></td><td>0.6 MB</td><td>skies (also the water reflection)</td></tr>
+  <tr><td><code>Motion/</code></td><td>4 KB</td><td>people animation</td></tr>
+  <tr><td><code>Phrases/</code></td><td>1 MB</td><td>all in-game text, every language</td></tr>
+  <tr><td><code>Sounds/</code></td><td>1 MB</td><td>sound effects</td></tr>
+  <tr><td><code>Videos/</code></td><td>24 MB</td><td>the Amiga intro (FLC)</td></tr>
+  <tr><td><code>Replays/</code>, <code>UserMaps/</code></td><td>small, 0.8 MB</td><td>shipped replays and the Amiga user map</td></tr>
+  <tr><td><code>Payback.info</code></td><td>small</td><td>window-icon fallback when there is no Mac data</td></tr>
+</table>
+<p>That is about <b>40 MB</b>. The CD's audio tracks (music) are not on the data track; to
+hear music, rip them yourself into a <code>Music</code> folder <b>next to <code>payback.exe</code></b>
+(beside <code>UserMaps/</code> and <code>Saves/</code>; not into <code>data/</code>, which the build regenerates).
+One file per CD track, named by track number (<code>13.ogg</code>, <code>13 - anything.flac</code>,
+<code>Track13.wav</code>; WAV, Ogg, MP3 or FLAC). Track 1 is the data track: rip tracks <b>2&ndash;16</b>
+(13 menus, 16 Game Over, 8 Level/Game Complete, the rest the vehicles' radio stations; table in
+<code>README.md</code> &ldquo;Music&rdquo; and <code>docs/re/frontend_audio.md</code> &sect;4.6). The Music setup screen
+says where they go when none are found.</p>
+
+<h3>Mac data (optional with the Amiga data): <code>extracted/mac/Payback</code> → <code>data/mac</code></h3>
+<p>The same folder layout as the Amiga data (marker: <code>CubeTextures/CubeTextureList.txt</code>).
+With the Amiga data the port offers the Mac versions as settings (textures, models, blood,
+title screens, menu props, scenery), the Mac phrases, the MPEG intro film
+(<code>Videos/payback_high_mpeg1.mpg</code>, 44 MB) and the 31 bundled community maps
+(<code>UserMaps/</code>, 20 MB); without the Mac data everything falls back to the Amiga
+data. Alone it runs the whole game. <code>Payback (OS X)</code> (1.6 MB) is staged too: it
+holds the palette for a Mac-only setup. About <b>90 MB</b>.</p>
+
+<h2 id="decompile">Decompiling (further reverse-engineering)</h2>
+<p>The decompiles in <code>analysis/</code> are regenerated by one command
+(<code>docs/decompiling.md</code>), which needs Docker and Python:</p>
+<pre>python tools/extract/extract.py
+python tools/extract/extract_mac.py
+docker build -t payback-re .
+tools/ghidra/decompile_all.sh            # or name builds: 68k os4 macx mac9 mapedx scripts</pre>
+<table>
+  <tr><th>Binary (in <code>extracted/</code>)</th><th>From</th><th>Export</th><th>Why it matters</th></tr>
+  <tr><td><code>game/Payback.exe</code></td><td>Update 7 (over the CD)</td><td><code>ghidra_68k</code></td><td>the version the Amiga data matches</td></tr>
+  <tr><td><code>game/Maps/00.script</code> … <code>21.script</code></td><td>CD</td><td><code>ghidra_script00…21</code></td><td>the mission scripts (68k code)</td></tr>
+  <tr><td><code>os4/PaybackUpdateOS4/install_files/PaybackOS4</code></td><td>OS4 port</td><td><code>ghidra_os4</code></td><td>cleanest Amiga decompile (PowerPC ELF)</td></tr>
+  <tr><td><code>mac/Payback/Payback (OS X)</code></td><td>Mac release</td><td><code>ghidra_macx</code></td><td>keeps the original C++ function names; the reference for behaviour</td></tr>
+  <tr><td><code>mac/Payback/Payback (OS 9)</code></td><td>Mac release</td><td><code>ghidra_mac9</code></td><td>cross-check of the OS X build</td></tr>
+  <tr><td><code>mac/Payback/MapEditor (OS X)</code></td><td>Mac release</td><td><code>ghidra_mapedx</code></td><td>the map editor (route algorithm, file writers)</td></tr>
+</table>
+<p class="note">You only need the archives for the builds you want: e.g. Mac work needs just
+<code>PaybackMac.toast</code>; Amiga 68k work needs the CD and Update 7. The data files
+themselves are not decompiled, but RE work on formats reads them from <code>extracted/</code>
+too (<code>tools/re/</code>), and the symbol cross-reference is already committed in
+<code>docs/xref/symbols.tsv</code>.</p>
+
+<h2 id="notneeded">Present in the extracted data but not needed to run</h2>
+<p>These are in the original folders but the port never reads them. The current staging
+rules still copy a few of them into <code>data/</code> (they are harmless, just unused):</p>
+<table>
+  <tr><th>File / folder</th><th>Where</th><th>Copied into <code>data/</code> today?</th></tr>
+  <tr><td><code>Payback</code> (launcher script), <code>MapEditor</code>, <code>MapEditor.info</code>, <code>PaybackSetup</code>, <code>PaybackSetup.exe</code>/<code>.info</code>, <code>PaybackWOS</code>/<code>.info</code>, <code>Docs.info</code>, <code>libs/</code></td><td>Amiga</td><td>yes (unused)</td></tr>
+  <tr><td><code>HID.bundle/</code></td><td>Mac</td><td>yes (unused)</td></tr>
+  <tr><td><code>PaybackWOS.exe</code>, <code>Payback (OS 9)</code>, <code>Map Editor (OS 9)</code>, <code>MapEditor (OS X)</code>, docs, manuals, resource forks, Finder files</td><td>both</td><td>no</td></tr>
+  <tr><td><code>payback_high_mpeg2.mpg</code>, <code>payback_low_mpeg1.mpg</code> (unused Mac films)</td><td>Mac</td><td>no</td></tr>
+  <tr><td>The OS4 port, Warp3D</td><td>Updates</td><td>never staged</td></tr>
+</table>
+</main>
+</body>
+</html>

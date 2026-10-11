@@ -1,9 +1,35 @@
 # Payback reimplementation
 
-A reverse-engineered reimplementation of
-[Payback](https://en.wikipedia.org/wiki/Payback_(video_game)) (Apex Designs,
-Amiga, 2001) in Rust with [Bevy](https://bevyengine.org), plus the research
-behind it.
+A reverse-engineered reimplementation of [Payback](https://en.wikipedia.org/wiki/Payback_(video_game)) (Apex Designs, Amiga, 2001) in Rust with [Bevy](https://bevyengine.org), plus the research behind it.
+
+If there are any issues, please open an issue or PR with screenshot preferably and I would happily review the changes. 
+
+### Features
+
+- A from-scratch Rust and Bevy reimplementation of *Payback* (Apex Designs, 2001), built from reverse-engineering the original Amiga and Mac releases.
+- Game logic follows the decompiled originals function by function: driving physics, collisions, AI traffic and police, pedestrians, combat, the wanted level and scoring. Code comments cite the original function and address.
+- A toggle to switch between Amiga Assets and MacOS Release Assets
+  - Both Intro videos
+  - Both Textures
+  - Both Models
+- Quality Of Life Improvements
+  - Smooth Motion Interpolation to any frame rate
+  - A custom Cheat menu by pressing F12
+  - Modern Controller Support
+  - Ability to unlock all straight from the main menu
+
+### Motivations
+
+Payback was a GTA Clone for the Commodore Amiga and PPC Mac Computers. It was a childhood favorite of mine but as of 2026 is impossible to emulate at full speed and quality, and difficult to play without the original vintage hardware. 
+
+I created this in the name of preservation and to test the reverse engineering capabilities of frontier AI Models.
+The bulk of this game was recreated in ~3 days using opus 5.5 at medium effort and used around \$1500 worth of API Credits.
+
+I had no prior knowledge of the original Motorola 68k Instruction Set, nor any ability to reverse engineer. This was all done with a handful of short high level prompts and some manual testing.
+
+
+
+## AI Written & Maintained Notes Below
 
 It is a **behavioural port**, not a matching decompilation: the game logic is
 rewritten from the decompiled original (the Amiga Update 7 and AmigaOS 4 builds

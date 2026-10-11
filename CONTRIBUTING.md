@@ -60,5 +60,5 @@ new function names to the symbol cross-reference
 - One-off scripts, logs and dumps go into `scratch/<date>-<topic>/` (git-ignored,
   safe to delete). Committed code and docs never cite `scratch/`: promote the file
   first.
-- The progress pages (`progress.html`, `remaining_gaps.html`) are local; keep
-  `progress.html`'s `DATA` object current when something lands.
+- The progress pages (`docs/progress.html`, `docs/remaining_gaps.html`) are local; keep
+  `docs/progress.html`'s `DATA` object current when something lands.

@@ -21,15 +21,9 @@ __pycache__/
 # Local saves and settings written by the game.
 /Saves/
 
-# Local report pages in the repository root (not committed): progress.html and
-# remaining_gaps.html are hand-edited; coverage.html is written by
-# tools/reports/coverage.py; mac_differences.html by
-# tools/reports/mac_differences.py (it embeds renders of the game's art).
-/progress.html
-/remaining_gaps.html
-/coverage.html
-/mac_differences.html
+# The Mac-vs-Amiga report embeds renders of the game's art: local only
+# (tools/reports/mac_differences.py writes it).
+/docs/mac_differences.html
 
 # Web build output (tools/web/build_web.sh); data/ holds the packed original data.
 /web/dist/
-/docs/required_files.html

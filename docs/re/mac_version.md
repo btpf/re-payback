@@ -158,7 +158,7 @@ the Mac ones without the Mac data). `--mac-only` ignores the Amiga data.
 
 ## Findings
 
-The full comparison report is `mac_differences.html` in the repository root
+The full comparison report is `docs/mac_differences.html` in the repository root
 (git-ignored, local only; regenerate with `python tools/reports/mac_differences.py`).
 Headlines:
 - The Mac game code is the same C source as the Amiga OS4 build.
@@ -178,7 +178,7 @@ Mac function name and address (e.g. `drawCubeTop_None` @ `100c8160`).
 ## Decisions (2026-10-08)
 
 How the port treats the Mac differences. These override the recommendations in
-`mac_differences.html` where they disagree.
+`docs/mac_differences.html` where they disagree.
 
 Principle: where the Mac and Amiga content differ and both are reasonable, offer
 both through an in-game setting. Default to the Mac version, since it is the more

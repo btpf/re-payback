@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Port coverage treemap for the Payback reimplementation.
 
-Writes ``coverage.html`` in the repository root: a squarified treemap in the
+Writes ``docs/coverage.html``: a squarified treemap in the
 style of the progress charts of matching-decompilation projects. Every
 function of the Mac OS X build of Payback (``analysis/ghidra_macx``) is one
 box, sized by its byte size and coloured by how far the port covers it.
@@ -30,10 +30,10 @@ addresses (``@ 1013fbd0``; any address inside a function counts for it), OS4
 addresses, mapped to Mac functions through ``docs/xref/symbols.tsv`` (the
 Amiga<->Mac symbol match) and the OS4/68k function tables.
 
-Inputs (read at run time; analysis/ and remaining_gaps.html are git-ignored and local):
+Inputs (read at run time; analysis/ is git-ignored and local):
 analysis/ghidra_macx/functions.tsv, analysis/ghidra_os4/functions.tsv,
 analysis/ghidra_68k/functions.tsv, docs/xref/symbols.tsv, crates/**/*.rs,
-docs/**/*.md (except docs/xref/) and remaining_gaps.html. The output contains only function names, addresses,
+docs/**/*.md (except docs/xref/) and docs/remaining_gaps.html. The output contains only function names, addresses,
 sizes, file:line references and short status notes - no game data and no
 decompiled code.
 
@@ -595,7 +595,7 @@ def js_strings(block: str) -> list[str]:
 
 
 def scan_gaps(resolver, cites):
-    path = ROOT / "remaining_gaps.html"
+    path = ROOT / "docs" / "remaining_gaps.html"
     if not path.exists():
         return 0
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -725,7 +725,7 @@ def rust_identifiers() -> set[str]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--out", default=str(ROOT / "coverage.html"))
+    ap.add_argument("--out", default=str(ROOT / "docs" / "coverage.html"))
     ap.add_argument("--json", help="also write the per-function data as JSON")
     args = ap.parse_args()
 

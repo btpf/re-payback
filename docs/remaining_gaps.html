@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payback port: remaining gaps</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --border: #e2e2dd; --ink: #1d1d1b;
+    --ink2: #55554f; --muted: #85857d; --accent: #2f6fb5; --chip: #eeeeea;
+    --high: #c2413b; --medium: #b7791f; --low: #2f8a4e; --info: #2f6fb5; --code: #f0f0ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --surface: #1f1f1d; --border: #34342f; --ink: #ecece7;
+      --ink2: #b5b5ad; --muted: #8a8a82; --accent: #6aa2e0; --chip: #2a2a27;
+      --high: #e7716a; --medium: #e0a84a; --low: #5cb87a; --info: #6aa2e0; --code: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 12px; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14.5px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 28px;
+    max-width: 1320px; margin: 0 auto; padding: 24px 20px 80px; }
+  nav.toc { position: sticky; top: 12px; align-self: start; max-height: calc(100vh - 24px);
+    overflow: auto; font-size: 13px; padding-right: 6px; }
+  nav.toc b { display: block; margin: 0 0 6px; font-size: 12px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .05em; }
+  nav.toc a { display: flex; justify-content: space-between; gap: 8px; color: var(--ink2);
+    text-decoration: none; padding: 3px 6px; border-radius: 5px; }
+  nav.toc a:hover { background: var(--chip); color: var(--ink); }
+  nav.toc a.sub { padding-left: 16px; font-size: 12.5px; }
+  nav.toc .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  h1 { font-size: 25px; margin: 0 0 4px; }
+  h2 { font-size: 19px; margin: 36px 0 10px; padding-top: 4px; }
+  h3 { font-size: 15.5px; margin: 24px 0 8px; display: flex; gap: 10px; align-items: baseline; }
+  h3 .n { color: var(--muted); font-weight: 500; font-size: 13px; }
+  p { margin: 0 0 10px; }
+  .sub { color: var(--ink2); margin: 0; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 16px 0; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .stat .v { font-size: 26px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 12px; color: var(--ink2); }
+  .stat.high .v { color: var(--high); } .stat.medium .v { color: var(--medium); } .stat.low .v { color: var(--low); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  a { color: var(--accent); }
+  .controls { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 10px 0 8px;
+    border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+  .controls input[type=search] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--ink); font: inherit; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .chips .lab { font-size: 12px; color: var(--muted); margin-right: 2px; }
+  .chip { border: 1px solid var(--border); background: var(--surface); color: var(--ink2); border-radius: 999px;
+    padding: 2px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
+  .chip[aria-pressed=true] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .chip .dot { margin-right: 5px; }
+  .count { font-size: 12.5px; color: var(--muted); margin-left: auto; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; vertical-align: 0; }
+  .dot.high { background: var(--high); } .dot.medium { background: var(--medium); }
+  .dot.low { background: transparent; box-shadow: inset 0 0 0 2px var(--low); }
+  .gap { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; margin: 8px 0; }
+  .gap.high { border-left-color: var(--high); } .gap.medium { border-left-color: var(--medium); } .gap.low { border-left-color: var(--low); }
+  .gap .t { font-weight: 620; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .gap .t .id { color: var(--muted); font-weight: 500; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+  .tag { font-size: 11.5px; border-radius: 4px; padding: 0 6px; background: var(--chip); color: var(--ink2); white-space: nowrap; }
+  .tag.sev-high { color: var(--high); font-weight: 650; } .tag.sev-medium { color: var(--medium); font-weight: 650; }
+  .tag.sev-low { color: var(--low); font-weight: 650; }
+  dl { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 3px 12px; margin: 0; font-size: 13.5px; }
+  dt { color: var(--muted); } dd { margin: 0; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--code); padding: 0 3px; border-radius: 3px; overflow-wrap: anywhere; }
+  ul.plain, ol.plain { margin: 0; padding-left: 20px; } ul.plain li, ol.plain li { margin: 4px 0; }
+  .note { color: var(--ink2); font-size: 13px; }
+  .hidden { display: none !important; }
+  .empty { color: var(--muted); font-style: italic; margin: 6px 0 0; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } nav.toc { position: static; max-height: none; } }
+  @media print { nav.toc, .controls { display: none; } .layout { display: block; } }
+</style>
+<style>
+  .tag.st-closed { color: var(--low); font-weight: 650; } .tag.st-partial { color: var(--medium); font-weight: 650; }
+  .tag.st-open { color: var(--high); font-weight: 650; } .tag.st-new { color: var(--info); font-weight: 650; }
+  .gap.st-closed { opacity: .72; } .gap.st-closed .t { text-decoration: line-through; text-decoration-color: var(--muted); }
+  .stat.closed .v { color: var(--low); } .stat.partial .v { color: var(--medium); } .stat.open .v { color: var(--high); } .stat.new .v { color: var(--info); }
+  .chg td:first-child { white-space: nowrap; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" id="toc" aria-label="Contents"></nav>
+<main id="app"></main>
+</div>
+<script>
+/* =====================================================================
+   DATA. Edit these objects to update the page.
+   sev: high | medium | low      effort: S | M | L
+   conf: confirmed (checked in the code) | suspected | open (RE question)
+   st (status now, at 3382e77): closed | partial | open | new
+   was (status in the previous report, bbe27cb); entries without it are new now
+   since: evidence for the status (file:line at bbe27cb unless a later commit is named)
+   ===================================================================== */
+const META = {
+  title: "Payback port: remaining gaps",
+  subtitle: "What still differs between the Rust / Bevy port and the original game (Amiga 68k Update 7, OS4, and the Mac release, which counts as the more definitive copy).",
+  generated: "Refreshed 2026-10-09 at HEAD `3382e77` (“Run from the Mac release alone: palette from the Mac program”). The previous report was compiled at `bbe27cb` with 80 entries, 27 of them still open; each of those was re-checked against the code at `3382e77` and the twelve commits since `bbe27cb` (defaults, web cache-busting, helicopter, controllers and vehicle god mode, the reorganisation, data staging, gamepad fixes and layout 3, Mac-only support). Code paths are under `crates/payback/src/` unless shown otherwise; line numbers are as of `bbe27cb` unless a later commit is named.",
+  summary: [
+    "The twelve commits after `bbe27cb` added features and fixed other things (defaults of free aspect and hardware rendering, web cache-busting, the helicopter door and rotor, gamepads with layout 3 and a Horn action, vehicle god mode, saves next to the executable, Unlock all on the main menu, scenery collision sizes, on-foot car contacts, headlight depth, data staged next to the executable, Mac-only installs) but closed none of the 27 open gaps: every one is unchanged at `3382e77`. One new gap (PL-11) and several stale notes were found; the stale notes are fixed in this pass (section 5).",
+    "What is left: the burning-car blast centred above the car instead of below it (CB-8), the bullet hits' owner test (CB-7), two decisions for the user (blast crime at zero damage, CB-4; the Random missions row with Amiga-only data, MS-3), the per-object AI interleave (AI-1), rendering approximations, the bot still teleporting, and the map editor. The biggest risk is still verification: apart from one real gamepad (a Steam Controller), nothing since `bbe27cb` has been looked at by a human next to the original, and the web build ran only in headless Chrome with a software GPU (section 4)."
+  ],
+  legend: [
+    "Status now; “Changes since the last report” compares with the status each entry had at `bbe27cb`. Closed: the gap is gone in the code (evidence given). Partial: most of it is done, a stated part remains. Open: nothing done yet. New: found in this pass (new code, docs or comments marked approximation / INFERRED / not reproduced). Closed entries stay on the page, struck through, so the old IDs can still be looked up; use the Status filter to hide them.",
+    "Severity. High: a player notices it in normal play or a level can't be played as designed. Medium: noticeable in some situations, or changes scoring or wanted level. Low: cosmetic, rare, or only visible side by side with the original.",
+    "Effort. S: a few hours. M: a day or two. L: several days, or a redesign. Confidence. Confirmed: the gap was seen in the current code. Suspected: the original's behaviour or the port's effect is not fully certain. Open RE question: the original's behaviour is not known yet.",
+    "Addresses: Mac OS X names and addresses (e.g. `do_Other` @ 10146280) come from `analysis/ghidra_macx`; `FUN_01xxxxxx` are OS4, `FUN_000xxxxx` and bare `0x` offsets are 68k Update 7.",
+    "Replays: most gameplay fixes change the simulation, so the replay baselines must be re-recorded after them (`python tools/checks/replay_check.py --suite` must report MATCH)."
+  ]
+};
+
+const AREAS = [
+  { id: "combat", name: "Combat, weapons and scoring", short: "Combat" },
+  { id: "driving", name: "Vehicles and driving physics", short: "Vehicles" },
+  { id: "ai", name: "AI drivers, traffic and police", short: "AI/police" },
+  { id: "people", name: "People", short: "People",
+    note: "Pedestrians, the player on foot, boarding and hijacking, swimming and drowning, arrests and the Mac pavement wander are ported and checked against the Mac code. The previous people leftovers (CB-1 punches, VH-7 touch flag, RE-1 footsteps) are closed; the think-before-move order is AI-1 (partial)." },
+  { id: "missions", name: "Missions and triggers", short: "Missions" },
+  { id: "render", name: "Rendering and lighting (software)", short: "Rendering" },
+  { id: "hw", name: "Hardware (Warp3D) renderer", short: "Hardware renderer" },
+  { id: "objects", name: "Objects and models", short: "Objects" },
+  { id: "effects", name: "Effects, weather, flares, debris", short: "Effects" },
+  { id: "hud", name: "Camera, HUD and minimap", short: "Camera/HUD" },
+  { id: "mp", name: "Multiplayer and Rampage", short: "Multiplayer" },
+  { id: "platform", name: "Platform: input, display, frame pacing, web", short: "Platform",
+    note: "The original drew one frame per tick (at most 30 fps). The port now draws at the display rate with render-only smooth motion (on by default), vsync and a 30/60/120/144 frame limit, and keeps the HUD blinks and motion blur per tick (`frame.rs`, `docs/port_engineering.md` “Frame pacing”). Gamepads: layout 3, per-pad bindings, hot-plug, and on Windows an XInput cross-check against lost events (`frontend/xinput.rs`, `docs/controls.md`)." },
+  { id: "mac", name: "Mac-only features", short: "Mac" },
+  { id: "frontend", name: "Front end and menus", short: "Front end" },
+  { id: "audio", name: "Audio and music", short: "Audio" },
+  { id: "replays", name: "Replays and saves", short: "Replays/saves" },
+  { id: "usermaps", name: "User maps and the map editor", short: "User maps" },
+  { id: "perf", name: "Performance", short: "Performance" },
+  { id: "det", name: "Determinism and test coverage", short: "Determinism/tests" },
+  { id: "data", name: "Data and formats", short: "Data" },
+  { id: "re", name: "RE open questions", short: "RE questions",
+    note: "`docs/re/open_questions.md` at `3382e77`: 201 items, 173 resolved, 28 open or INFERRED (the summary table and the §2.10 slopes and level 11 Q6 rows were brought up to date in this pass). OPEN: the people feet offset and river banks, the level 10 CD race helpers, the CD audio track contents; the rest are INFERRED design-intent notes that need an in-game look." }
+];
+
+const GAPS = [
+  // ---------------------------------------------------------------- combat
+  { id: "CB-1", area: "combat", sev: "high", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible, gameplay",
+    title: "Punches can't hit ordinary pedestrians",
+    orig: "A punch hits every person near the fist (Mac `do_Person` @ 1013fbd0, 68k `FUN_0009217e`).",
+    port: "The melee target list is every person, armed or not (`shooters` chained with `bystanders`), sorted by object-table slot.",
+    impact: "Fixed.",
+    ev: "`sim/combat.rs:365-372` (targets), `:485-506` (Fist).",
+    since: "Closed: `sim/combat.rs:365-372` builds targets from `shooters` + `bystanders`, sorted by `slot`." },
+  { id: "CB-2", area: "combat", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Gameplay (money)",
+    title: "Punch pays a flat 500 and has no head-height line-of-sight test",
+    orig: "500 × multiplier, line of sight at z − 0x400.",
+    port: "Pays `500 * session.multiplier` to the player's object; `collide::line_of_sight` tests at `max(z) − 0x400`.",
+    impact: "Fixed.",
+    ev: "`sim/combat.rs:496`, `:673-676`; `sim/collide.rs:624-634`.",
+    since: "Closed: `sim/combat.rs:675` (`500 * session.multiplier`), `:496` + `sim/collide.rs:625` (head-height sight)." },
+  { id: "CB-3", area: "combat", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Gameplay (money)",
+    title: "Ramming earns no score",
+    orig: "`mult · min(6000, v² >> 9)` per touching tick (`CheckForCollisions` @ 1006a150).",
+    port: "Implemented per contact, paid to the player-side rammer.",
+    impact: "Fixed.",
+    ev: "`sim/contact.rs:381-396`.",
+    since: "Closed: `sim/contact.rs:393` (`((v * v) >> 9).min(6000) * session.multiplier`)." },
+  { id: "CB-4", area: "combat", sev: "medium", effort: "S", conf: "confirmed", st: "partial", was: "partial", visible: "Gameplay (wanted level, triggers)",
+    title: "Zero-damage hits: contacts fixed, blast crimes behind a switch (decision pending)",
+    orig: "Contacts and explosions report a hit (`CheckHitObject`) even at zero damage; `Shockwave` @ 10054ac0 reports every owner-side −1 object, with no radius.",
+    port: "Contacts: reported whatever the damage. Explosions: only hits that do damage count, because `BLAST_CRIME_AT_ZERO_DAMAGE = false`: with it on, every grenade made each NPC in the table a GBH victim and the wanted level jumped to 4, getting the bot busted even in the grenade tutorial.",
+    impact: "Explosions raise less wanted level than in the original. Needs a user decision: follow the original (and accept the wanted-level jump) or keep the switch off as a deliberate departure.",
+    ev: "`sim/contact.rs:396` (`check || dmg > 0`); `sim/combat.rs:1206-1213` (switch and note), `:1299-1304`.",
+    since: "Partial: contact half closed (`sim/contact.rs:396`); explosion half off by `sim/combat.rs:1213` pending a decision." },
+  { id: "CB-5", area: "combat", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Gameplay (money, rare)",
+    title: "Explosion score only for the player's own blasts",
+    orig: "Pays whenever the exploding object has an owner side ≥ 0.",
+    port: "`Obj::side` (the original's `+0x824`) is kept per object; `Explode::by_player` is `side >= 0` for projectiles, cars and scripts.",
+    impact: "Fixed for explosions (bullet hits: see CB-7).",
+    ev: "`sim/combat.rs:309-313`, `:933`, `:957`, `:974`, `:1115`; `sim/contact.rs:547`, `:608`; `mission/api.rs:217`.",
+    since: "Closed: owner side in `sim/combat.rs:313`, used at `:933-974`." },
+  { id: "CB-6", area: "combat", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Visible (snow map)",
+    title: "Projectiles don't knock snowmen down",
+    orig: "Any non-person reaching a snowman square knocks it down (`AddCollideObj` @ 10055c70).",
+    port: "Projectiles knock snowmen down too.",
+    impact: "Fixed.",
+    ev: "`sim/combat.rs:824-856`.",
+    since: "Closed: `sim/combat.rs:849-856`." },
+  { id: "CB-7", area: "combat", sev: "low", effort: "S", conf: "confirmed", st: "open", was: "new", visible: "Gameplay (crime, money; rare)",
+    title: "Bullet and pellet hits use “shooter is the player”, not the owner-side test",
+    orig: "Bullet and pellet hits test the projectile's owner side (`CheckForCollisions` l.27315-27750): side 1 for every person's bullets, −1 for an NPC's pellets.",
+    port: "`Projectile::by_player` is `player.is_some()` at spawn and the hit report uses it; only explosions read `Obj::side`.",
+    impact: "AI bullets hitting NPCs never count as the player's crime or score, where the original's side-1 bullets do. Rare.",
+    ev: "`sim/combat.rs:180`, `:324`, `:1125`; `docs/re/combat_police.md` §5.3 (“[I: not ported, open]”).",
+    since: "New (documented as not ported in `bbe27cb`'s `combat_police.md`)." },
+  { id: "CB-8", area: "combat", sev: "medium", effort: "S", conf: "confirmed", st: "open", was: "new", visible: "Visible (car explosions)",
+    title: "Burning-car blast is centred 500 above the car instead of 500 below",
+    orig: "`Explode` @ 10055570 calls `Shockwave(…, pos.z + 500, mass · 25000, …)` (Mac decompile l.17296-17297); `combat_police.md:910` says `Explosion(owner, pos.z+500, …)`.",
+    port: "`at.z -= 500` before `Explode` (z grows downward, so the port's blast centre is above the car).",
+    impact: "Every car explosion's knock-back and damage fall-off are measured from the wrong height: nearby objects are pushed down instead of up, and distances differ by 500. Fix changes replays.",
+    ev: "`sim/contact.rs:599-603`; `analysis/ghidra_macx/decompiled.c` ~l.17296; `docs/re/combat_police.md:910`.",
+    since: "New (found in this pass by comparing `contact.rs` with the Mac `Explode`)." },
+
+  // ---------------------------------------------------------------- driving
+  { id: "VH-1", area: "driving", sev: "high", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Visible, gameplay, missions",
+    title: "Bomb truck can't launch its RC car",
+    orig: "`DoVehicleFire` @ 10070c20 launches the RC car; the player steers it, fire detonates it (health −71).",
+    port: "`sim/rc_car.rs`: launch, steering, detonation, blow-up on exit or death, 60-tick camera hold, no contacts, water death.",
+    impact: "Fixed in code. Never played through: the autoplay bot does M9 without the RC car (section 4).",
+    ev: "`sim/rc_car.rs:1-23`, `:83` (`rc_controls`), `:150` (`rc_launch`).",
+    since: "Closed: `sim/rc_car.rs` (195 lines, new). Unverified in level 11 M9 / Kill frenzy." },
+  { id: "VH-2", area: "driving", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible (roadblocks)",
+    title: "Barriers and cones don't topple",
+    orig: "Knocked over (`[3] = 0x5a0`), sound 30, extra push.",
+    port: "`sim/props.rs` moves the props (topple, sounds); `contact.rs` knocks them over.",
+    impact: "Fixed.",
+    ev: "`sim/props.rs:1-30`, `:39` (`move_props`), `:80-81`, `:123`.",
+    since: "Closed: `sim/props.rs` (new)." },
+  { id: "VH-3", area: "driving", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible (level 00)",
+    title: "Training dummy gets pushed",
+    orig: "The dummy takes no push.",
+    port: "The dummy is not pushed; its partner takes it all.",
+    impact: "Fixed.", ev: "`sim/contact.rs:272-278`.", since: "Closed: `sim/contact.rs:277-278`." },
+  { id: "VH-4", area: "driving", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Barely visible",
+    title: "Police van handling doesn't alternate with the siren",
+    orig: "`policevan_red` has its own handling (brake 10, grip 20, mass 2000).",
+    port: "`vehicles::handling(k, red_frame)` returns `POLICEVAN_RED` on the red frame.",
+    impact: "Fixed.", ev: "`vehicles.rs:387-403`.", since: "Closed: `vehicles.rs:402-403`." },
+  { id: "VH-5", area: "driving", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Level-end summary",
+    title: "Shunt counter not kept per contact tick",
+    orig: "`+0x944` up every touching tick.",
+    port: "`Crimes::shunt` goes up per player vehicle in every touching vehicle pair.",
+    impact: "Fixed.", ev: "`sim/contact.rs:314-320`.", since: "Closed: `sim/contact.rs:319`." },
+  { id: "VH-6", area: "driving", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Rare",
+    title: "Glass broken by a car is removed at the end of the tick",
+    orig: "Glass disappears on the hit.",
+    port: "`collide::remove_glass_now` takes it out of the map at once; `smash_glass` still sends the edit and sound after the loop.",
+    impact: "Fixed.", ev: "`sim/driving.rs:456-460`; `sim/collide.rs:636-640`.", since: "Closed: `sim/driving.rs:459`." },
+  { id: "VH-7", area: "driving", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Not visible",
+    title: "Touch flag only for player walkers",
+    orig: "Any walker touching a vehicle gets the flag.",
+    port: "Every walker touching a vehicle gets `boarding::Touched`.",
+    impact: "Fixed.", ev: "`sim/contact.rs:254-262`.", since: "Closed: `sim/contact.rs:258-260`." },
+
+  // ---------------------------------------------------------------- ai
+  { id: "AI-1", area: "ai", sev: "medium", effort: "L", conf: "confirmed", st: "partial", was: "partial", visible: "Not visible; blocks frame-exact parity",
+    title: "Original phase order per tick, but not the per-object interleave",
+    orig: "Per object in table order: move, then that object's AI, firing and scenery push (`object_MainLoop` @ 1014a670); contacts before (`amiga_levelloop` @ 10100f50).",
+    port: "Now in the original's phase order (input, spawn, contacts, people move then think, vehicles move then AI then controls, combat, triggers), but each phase runs over every object; people and vehicles are separate passes; firing and projectiles after all movement.",
+    impact: "An object sees all others already moved in that phase, where the original's sees only those before it. Still the reason an original recording can't be replayed frame for frame.",
+    ev: "`sim/mod.rs:420-444` (“What remains different”); `docs/re/people.md`.",
+    since: "Partial: phase order done (`sim/mod.rs:426-437`); per-object interleave not (`:439-444`)." },
+  { id: "AI-2", area: "ai", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Edge cases",
+    title: "Route-node cache only tracks the player as a target",
+    orig: "Cache on whatever object is chased.",
+    port: "Every object carries its own `TargetNode`.",
+    impact: "Fixed.", ev: "`sim/vehicle_ai.rs:100-109`, `:738`.", since: "Closed: `sim/vehicle_ai.rs:100-104`." },
+
+  // ---------------------------------------------------------------- missions
+  { id: "MS-1", area: "missions", sev: "medium", effort: "M", conf: "suspected", st: "closed", was: "closed", visible: "Gameplay (level 21)",
+    title: "Level 21 race: the bot's car is destroyed mid-race",
+    orig: "M3 race against the grid.",
+    port: "Cause found: the bot (it set heading and speed directly and hit walls at full speed), not the game. The bot now drives with the game's AI driver and finishes (about 5th); the AI racers' ramming was not the cause.",
+    impact: "Fixed (it was a bot bug).",
+    ev: "`docs/re/missions_21.md` “Port, autoplay (MS-1)”; `autoplay.rs:1510-1571` (`race`).",
+    since: "Closed: `missions_21.md` (MS-1 paragraph), `autoplay.rs:1513`." },
+  { id: "MS-2", area: "missions", sev: "medium", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Occasionally visible",
+    title: "Trigger removal keeps list order",
+    orig: "`RemoveTrigger` @ 100f4560 moves the last trigger into the freed slot.",
+    port: "`swap_remove`, as the original.",
+    impact: "Fixed.", ev: "`mission/triggers.rs:210`.", since: "Closed: `mission/triggers.rs:210`." },
+  { id: "MS-3", area: "missions", sev: "low", effort: "S", conf: "confirmed", st: "partial", was: "partial", visible: "Menu (Amiga-only data)",
+    title: "Random missions: off without the Mac phrases, but the menu row still says On",
+    orig: "Random phone missions exist only in the Mac release.",
+    port: "The mode now runs only when phrase 1400 exists, so Amiga-only data plays no silent missions. The Rampage setup row still reads “Random missions: On” (default `true`) and is neither dimmed nor hidden then.",
+    impact: "A player with only the Amiga data sees an option that does nothing.",
+    ev: "`mission/mod.rs:185-193`; `frontend/rampage.rs:128-130`; `frontend/progress.rs:493`.",
+    since: "Partial: gameplay fixed (`mission/mod.rs:191`); menu row unchanged (`frontend/rampage.rs:129`)." },
+  { id: "MS-4", area: "missions", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Rare",
+    title: "`GetSafePos` tests from the ground cube, not the node's cube",
+    orig: "The node's own cube height (`GetNodeCubeNum` @ 100f1450).",
+    port: "Uses the node's cube (`r.0.nodes[n].cube`).",
+    impact: "Fixed.", ev: "`mission/levels/random.rs:179-189`.", since: "Closed: `mission/levels/random.rs:183-189`." },
+  { id: "MS-5", area: "missions", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Latent",
+    title: "Orders 0x17/0x43/0x44 don't clear the owner flag",
+    orig: "`+0x824 = -1`.",
+    port: "Script orders set `Obj::side = -1` on non-player actors.",
+    impact: "Fixed.", ev: "`mission/api.rs:205-218`.", since: "Closed: `mission/api.rs:217`." },
+  { id: "MS-6", area: "missions", sev: "low", effort: "S", conf: "open", st: "closed", was: "closed", visible: "Possibly visible",
+    title: "Level 11 Q6: which clock shows during the Kill frenzy bonus",
+    orig: "`GetTimerVal` @ 100f6b10 shows the first type-5 trigger; removals swap the last trigger in.",
+    port: "Resolved from the code; with MS-2 and VH-1 done the port behaves the same.",
+    impact: "Fixed in code; an in-game look is still owed (RE-5).",
+    ev: "`docs/re/missions_11.md` §8 item 6.",
+    since: "Closed from code (`missions_11.md` §8.6); `open_questions.md:452` still says OPEN (stale)." },
+
+  // ---------------------------------------------------------------- render
+  { id: "RD-1", area: "render", sev: "medium", effort: "L", conf: "confirmed", st: "partial", was: "partial", visible: "Slight",
+    title: "Palette-space blending: snapped once, not after every blend; HUD panels linear",
+    orig: "Every blend works on gamma-encoded palette bytes and lands on a palette entry at once, clamped per blend.",
+    port: "World shaders now write gamma-encoded palette RGB into an Rgba16Float target (additive, subtractive, table 3, average, shine `d + s − 32`), then a resolve pass snaps once before the HUD and clamps there. The HUD's subtract panels still blend in linear light. `--linear-blend` restores the old pipeline.",
+    impact: "Small differences where several blends stack (sums above 255 survive until the snap) and in the HUD panel tones.",
+    ev: "`postfx.rs:45-50` (“What stays approximate”); `shaders/resolve.wgsl`; `docs/re/rendering.md` “Palette output”.",
+    since: "Partial: palette-space blends in; per-blend snap/clamp and HUD panels not (`postfx.rs:45`)." },
+  { id: "RD-2", area: "render", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Rare",
+    title: "Dynamic lights capped at 510 (original 1000)",
+    orig: "Up to 1000.", port: "1000 natively (32 KB uniform block); the WebGL2 web build keeps 510.",
+    impact: "Fixed natively; web limit in PL-10.", ev: "`lighting.rs:446-453`.", since: "Closed: `lighting.rs:451` (`MAX_LIGHTS = 1000`)." },
+  { id: "RD-3", area: "render", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Barely",
+    title: "Gouraud light interpolated bilinearly, not edge-and-span",
+    orig: "Edges then spans, by the perspective-correct row parameter.",
+    port: "Shown to equal the bilinear blend top-down (CONFIRMED); the rotating view now splits along corner 1 – corner 3 with screen-linear light, as `DrawAffineTriangleGouraud` @ 100c36a0.",
+    impact: "Fixed (the walls' perspective filler INFERRED).", ev: "`shaders/city.wgsl`; `rendering.md` §4 Gouraud.", since: "Closed: `rendering.md` §4 (CONFIRMED equivalence), `lighting.rs` `params.z` rotating flag." },
+  { id: "RD-4", area: "render", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Odd camera angles",
+    title: "City faces drawn double-sided",
+    orig: "Back faces culled.", port: "One-sided quads, back faces culled.",
+    impact: "Fixed.", ev: "`lighting.rs:544-545`; `rendering.md` (city faces).", since: "Closed: `lighting.rs:545` (`Face::Back`)." },
+  { id: "RD-5", area: "render", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Invisible",
+    title: "Motion blur last 32 pixels and alpha-top last row/column",
+    orig: "Blur skips the last 32 pixels; alpha tops stop at cx−1 / cy−1.",
+    port: "Both reproduced: the last 32 pixels show palette colour 0 while blur is on (INFERRED content); the alpha top's last pixel at s = 1 / t = 1 is discarded.",
+    impact: "Fixed.", ev: "`postfx.rs` module notes; `shaders/city.wgsl`; `rendering.md` §4, §9.", since: "Closed: `rendering.md` (alpha tops, blur loop) and `postfx.rs`." },
+  { id: "RD-6", area: "render", sev: "low", effort: "M", conf: "confirmed", st: "open", was: "new", visible: "Rare",
+    title: "Painter's sort of flagged models is fixed at mesh build",
+    orig: "Flagged models (`+0x490c`) are insertion-sorted per frame by vertex depth; objects are re-sorted when they pitch or roll, and by true camera depth in the rotating view.",
+    port: "Only the non-depth-writing faces (50 % faces, hardware colour-keyed faces) are sorted once, along the unturned model's vertical; pitched/rolled objects and the rotating view are not re-sorted; the sort's artefacts on depth-writing faces are not reproduced.",
+    impact: "Possible wrong overlap of translucent faces on tumbling objects or in the rotating view.",
+    ev: "`objects.rs:347-354` (`painter_sort`, “not done”); `rendering.md` Objects.",
+    since: "New (approximation introduced by `bbe27cb`)." },
+  { id: "RD-7", area: "render", sev: "low", effort: "M", conf: "confirmed", st: "open", was: "new", visible: "Rotating view",
+    title: "Rotating view maps top textures perspective-correct, not affine",
+    orig: "The rotating view draws tops with affine triangle fillers (`DrawAffineTriangleGouraud` @ 100c36a0), so textures swim slightly.",
+    port: "Perspective-correct texture mapping (only the light is screen-linear).",
+    impact: "The rotating view's ground looks steadier than the original's.",
+    ev: "`docs/re/rendering.md` §4 (“affine texture mapping of tops is not reproduced”).",
+    since: "New (documented in `bbe27cb`)." },
+
+  // ---------------------------------------------------------------- hw
+  { id: "HW-1", area: "hw", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Slight",
+    title: "Framebuffer not reduced to 15/16 bits",
+    orig: "16-bit 5-5-5 with the card's dither.",
+    port: "Cut to 5-5-5 with a 4×4 ordered dither once before the HUD (see HW-5 for what is INFERRED).",
+    impact: "Fixed.", ev: "`shaders/resolve.wgsl:13`, `:35`; `rendering.md` §11.", since: "Closed: `shaders/resolve.wgsl`." },
+  { id: "HW-2", area: "hw", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Faint",
+    title: "Atlas bleed at sprite edges",
+    orig: "Each texture its own Warp3D texture.",
+    port: "Effect sprites wrap within their tile; object textures clamped half a texel inside their 256×128 slot.",
+    impact: "Fixed.", ev: "`shaders/objects.wgsl:15`, `:72`; `shaders/effects.wgsl`.", since: "Closed: `shaders/objects.wgsl:72`." },
+  { id: "HW-3", area: "hw", sev: "low", effort: "S", conf: "suspected", st: "partial", was: "partial", visible: "Hardly",
+    title: "Fades still drawn as in software",
+    orig: "Fades are W3D alpha quads; trees use `Tree2.clone` / `tanne.clone`.",
+    port: "Tree shadows settled (the clones are byte copies, CONFIRMED). Fades are still the software fades.",
+    impact: "Hardly visible.", ev: "`rendering.md` §11 (“fades … still drawn as in software”); `objects/shadows.rs` module notes.",
+    since: "Partial: tree clones closed; fades open (`rendering.md` §11)." },
+  { id: "HW-4", area: "hw", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Possibly",
+    title: "Guessed water UV sign, wall diagonal, flare blends",
+    orig: "—", port: "All three decoded (OS4 `FUN_01081ba4`, Mac `DrawAffineTriangleReflect` @ 100ba910, `drawCubeSide_North` @ 100d9a50) and exact.",
+    impact: "Fixed.", ev: "`rendering.md` §11.", since: "Closed: `rendering.md` §11 (CONFIRMED)." },
+  { id: "HW-5", area: "hw", sev: "low", effort: "S", conf: "suspected", st: "open", was: "new", visible: "Slight",
+    title: "16-bit dither: pattern guessed, applied once per frame",
+    orig: "Warp3D dithers each primitive as it is drawn (`W3D_SetState(0x80000)` / `GL_DITHER`); the card's pattern is unknown.",
+    port: "4×4 Bayer pattern (INFERRED) applied once, before the HUD.",
+    impact: "Slightly different banding than a real card.",
+    ev: "`shaders/resolve.wgsl:13-35`; `rendering.md` §11.", since: "New (INFERRED in `bbe27cb`)." },
+
+  // ---------------------------------------------------------------- objects
+  { id: "OB-1", area: "objects", sev: "low", effort: "M", conf: "confirmed", st: "partial", was: "partial", visible: "Small",
+    title: "Shadow details",
+    orig: "Depth cut beyond 6000, mode-5 line shadows, spinning-pickup shadows, painted in draw order.",
+    port: "Depth cut (units INFERRED), line shadows and spin-heading shadows are in. Still depth-tested triangles 1 h-unit above the ground instead of draw order.",
+    impact: "Minor.", ev: "`objects/shadows.rs:533` (`scenery_shadow_frame`), module notes; `rendering.md` §10.",
+    since: "Partial: three of four details done (`objects/shadows.rs:533`); draw order not." },
+  { id: "OB-2", area: "objects", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Rare",
+    title: "Object face slots drawn double-sided",
+    orig: "Slot picked by projected winding (`FUN_010c101c`).",
+    port: "Each active slot is a triangle facing its side; back faces culled.",
+    impact: "Fixed.", ev: "`objects.rs:9-19`, `:607`.", since: "Closed: `objects.rs:607` (`Face::Back`)." },
+  { id: "OB-3", area: "objects", sev: "low", effort: "S", conf: "confirmed", st: "open", was: "open", visible: "Tiny",
+    title: "Scenery reaching below its origin is lifted",
+    orig: "Painter's order keeps dipping models whole.",
+    port: "Lifted by the depth they reach (“slightly nearer projection”).",
+    impact: "Tiny height difference (Info sign, Briefcase).",
+    ev: "`objects.rs:1392-1401` (`sunk_lift`).", since: "Open: unchanged (`objects.rs:1392`)." },
+
+  // ---------------------------------------------------------------- effects
+  { id: "FX-1", area: "effects", sev: "low", effort: "M", conf: "confirmed", st: "partial", was: "partial", visible: "Rare",
+    title: "Lens flares: objects now occlude, effect sprites still don't",
+    orig: "A flare is hidden when anything overdraws its centre pixel (`AddFlare` @ 100a6fb0, `DrawFlares` @ 100a7340).",
+    port: "The segment to the eye is tested against the city and other models' triangles (`FlareOccluders`). Effect sprites (smoke, fire) over the centre don't hide it; the flare's own model isn't tested (INFERRED).",
+    impact: "A flare can shine through thick smoke.",
+    ev: "`objects.rs:1704` (`FlareOccluders`); `rendering.md` §7.",
+    since: "Partial: objects occlude (`objects.rs:1704`); effect sprites don't." },
+  { id: "FX-2", area: "effects", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Minor",
+    title: "Effects and debris outside the view are not deleted",
+    orig: "`UpdateEffects` @ 100aa1f0 deletes records outside the view; debris culled.",
+    port: "`in_view` with every view's rectangle; debris removed outside every view, near cull per view (split-screen rectangles INFERRED).",
+    impact: "Fixed.", ev: "`effects.rs:403`; `debris.rs`.", since: "Closed: `effects.rs:403`." },
+  { id: "FX-3", area: "effects", sev: "low", effort: "S", conf: "confirmed", st: "open", was: "open", visible: "Negligible",
+    title: "Snow marks are depth-tested",
+    orig: "Effect list 0 has no depth test; the mark sits at street level, drawn after the ground tops.",
+    port: "Depth-tested, placed on the ground; Bevy's pass order gives no “after the ground tops, before everything else” slot.",
+    impact: "Negligible.", ev: "`effects.rs:556-566`.", since: "Open: unchanged; not doable cleanly with Bevy's pass (`effects.rs:559-560`)." },
+
+  // ---------------------------------------------------------------- hud
+  { id: "HU-1", area: "hud", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible at high refresh",
+    title: "HUD blink and spin counters run per rendered frame",
+    orig: "One frame per tick.", port: "`canvas.frame` advances once per tick (`tick_frame`).",
+    impact: "Fixed.", ev: "`hud/mod.rs:293`, `:549`.", since: "Closed: `hud/mod.rs:549`." },
+  { id: "HU-2", area: "hud", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible in replays",
+    title: "No replay clock or progress bar",
+    orig: "`DisplayPlayback` @ 100909c0.", port: "`draw_playback` replaces the minimap during playback.",
+    impact: "Fixed.", ev: "`hud/mod.rs:1043`, `:1148-1159`.", since: "Closed: `hud/mod.rs:1159`." },
+  { id: "HU-3", area: "hud", sev: "low", effort: "M", conf: "confirmed", st: "partial", was: "partial", visible: "Software, story levels",
+    title: "Level-start zoom-in map: approximated with the live view",
+    orig: "`ZoomInMap` @ 1009a9c0: the map thumbnail zooms in with the first game frame (drawn from height 10000) genlocked over it, shrunk to the same scale.",
+    port: "Zoom, pan, level line, cups and timing are in; the genlocked first frame is replaced by the live 3-D view in that rectangle. Skipped in split screen and replay playback (INFERRED for the latter).",
+    impact: "Close; the inset differs (live, not a frozen high-altitude frame).",
+    ev: "`hud/zoom.rs:1-26`.", since: "Partial: `hud/zoom.rs` (new, 298 lines); inset approximated (`:17-18`)." },
+
+  // ---------------------------------------------------------------- mp
+  { id: "MP-1", area: "mp", sev: "low", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Split screen",
+    title: "Pickup-name labels not drawn in split screen",
+    orig: "Drawn in each view by `DrawView` @ 1006eb80.", port: "Drawn per view.",
+    impact: "Fixed.", ev: "`hud/mod.rs:924-935`.", since: "Closed: `hud/mod.rs:924`." },
+  { id: "MP-2", area: "mp", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Audible",
+    title: "Radio music follows only player 1's vehicle in split screen",
+    orig: "Resolved: any player getting in switches the CD; the per-frame request is player 1's (CONFIRMED, Mac l.24524 ff.).",
+    port: "Does the same.", impact: "Fixed (it is the original's behaviour).",
+    ev: "`music.rs:45-53`, `:377-391`.", since: "Closed: `music.rs:45-53` (CONFIRMED)." },
+
+  // ---------------------------------------------------------------- platform
+  { id: "PL-1", area: "platform", sev: "high", effort: "M", conf: "confirmed", st: "closed", was: "closed", visible: "Visible all the time",
+    title: "Judder: 30 Hz game state with no interpolation",
+    orig: "One render per tick.", port: "Smooth motion (render-only interpolation of `Obj` transforms and cameras, one tick behind), Graphics option, on by default; off gives one picture per tick.",
+    impact: "Fixed in code; not yet watched on a 144 Hz monitor (section 4).",
+    ev: "`frame.rs:10-19`, `:164` (`smooth_objects`); `frontend/display.rs:197`, `:272`.", since: "Closed: `frame.rs:164`." },
+  { id: "PL-2", area: "platform", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Visible at high refresh",
+    title: "Motion blur fades away at high refresh rates",
+    orig: "Blend per frame = per tick.", port: "Previous frame swapped only when a tick has run (`FrameParity`).",
+    impact: "Fixed.", ev: "`postfx.rs:669`.", since: "Closed: `postfx.rs:669`." },
+  { id: "PL-3", area: "platform", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Multiplayer",
+    title: "Gamepads identified by Entity order",
+    orig: "Fixed joystick numbers.", port: "`PadSlots`: a pad keeps its number; a returning pad gets its slot back.",
+    impact: "Fixed; untested with real pads.", ev: "`frontend/bindings.rs:372-389`; `multiplayer.rs:258-259`.", since: "Closed: `frontend/bindings.rs:389`." },
+  { id: "PL-4", area: "platform", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Settings",
+    title: "No vsync, present-mode or frame-cap option",
+    orig: "Fixed 30 fps.", port: "Vsync on/off and a 30/60/120/144 frame limit in Graphics options.",
+    impact: "Fixed.", ev: "`frame.rs:20-23`, `:51`; `frontend/display.rs:202`, `:474-476`, `:691`.", since: "Closed: `frontend/display.rs:691`." },
+  { id: "PL-5", area: "platform", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "After hitches",
+    title: "Catch-up clamp differs",
+    orig: "1..5 ticks per frame.", port: "`clamp_catch_up`: at most 5 ticks per frame.",
+    impact: "Fixed.", ev: "`frame.rs:129`.", since: "Closed: `frame.rs:129`." },
+  { id: "PL-6", area: "platform", sev: "low", effort: "S", conf: "confirmed", st: "partial", was: "partial", visible: "Visible",
+    title: "Cursor hidden; no pause-on-unfocus option",
+    orig: "Mac hides the cursor; losing focus does not pause (`UDesktop::Suspend` @ 101591b0).",
+    port: "Cursor hidden over the game window. Losing focus keeps the game running, as the Mac; there is no option to pause on alt-tab.",
+    impact: "Faithful, but a modern player alt-tabbing out of a level keeps getting shot. An optional pause is a user decision.",
+    ev: "`frame.rs:24-31`, `:235` (`cursor`).", since: "Partial: cursor closed (`frame.rs:235`); pause-on-unfocus not offered." },
+  { id: "PL-7", area: "platform", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "At launch",
+    title: "Exclusive fullscreen opens in the desktop mode, then switches",
+    orig: "Opens in the chosen mode.", port: "The window is created hidden for exclusive fullscreen and shown once the monitor list gives the chosen mode (or after 60 frames).",
+    impact: "Fixed; not tested on real multi-monitor setups.", ev: "`frontend/display.rs:680-698`, `:776-791`.", since: "Closed: `frontend/display.rs:684` (`(WindowMode::Windowed, false)`), `:697` (`MONITOR_WAIT`)." },
+  { id: "PL-8", area: "platform", sev: "low", effort: "M", conf: "confirmed", st: "partial", was: "partial", visible: "Control setup",
+    title: "Pad axes bindable; layout key names only after the first press",
+    orig: "Mac HID binds any element; key names from the system layout.",
+    port: "Axes bindable (`PadControl::Axis`, `AXIS_PRESS`). Character-key labels come from the layout, but only once a key has been pressed (`key_label` learns from `logical_key`); until then the US label shows.",
+    impact: "On AZERTY/QWERTZ the control screen shows US letters for keys not yet pressed this session.",
+    ev: "`frontend/bindings.rs:64-90`, `:436-468`; `frontend/misc.rs:453-455`.",
+    since: "Partial: axes closed (`frontend/bindings.rs:72`); names learnt per press (`:436-451`)." },
+  { id: "PL-9", area: "platform", sev: "low", effort: "S", conf: "suspected", st: "closed", was: "closed", visible: "Rare",
+    title: "Very short taps between ticks can be missed",
+    orig: "Input read once per tick.", port: "Presses are latched until a tick has seen them.",
+    impact: "Fixed.", ev: "`sim/people.rs:148-150`, `:418-450`; `multiplayer.rs` `read_devices`.", since: "Closed: `sim/people.rs:418`." },
+  { id: "PL-10", area: "platform", sev: "low", effort: "M", conf: "confirmed", st: "open", was: "new", visible: "Web build",
+    title: "Web build limitations",
+    orig: "n/a (port addition).",
+    port: "WebGL2: no Resolution / Window mode / Vsync (dimmed), frame limit ineffective, 510 lights (16 KB uniform blocks), single thread (slower), no user maps outside the data pack, saves in localStorage (~5 MB per origin; long replays can fill it; per port and browser profile), `--record`/`--screenshot` do nothing.",
+    impact: "Web players get a reduced feature set; documented.",
+    ev: "`docs/web.md` “Limitations”; `lighting.rs:452-453`; `vfs.rs`; `web.rs`.", since: "New (web build added in `bbe27cb`)." },
+  { id: "PL-11", area: "platform", sev: "low", effort: "M", conf: "suspected", st: "new", visible: "Gamepads",
+    title: "Lost gamepad events are corrected on Windows only",
+    orig: "n/a (port addition; the Amiga read PSX/CD32 pads, the Mac HID devices).",
+    port: "Bevy/gilrs turns pad readings into events; under Steam Input some releases never arrive. On Windows `frontend/xinput.rs` re-reads XInput every frame and corrects XInput-style pads; on Linux and macOS (and the web) only the generic guards apply (opposite directions cancel, inputs held at connection or when a menu opens are ignored until released), so a lost release of a single button could still stick there.",
+    impact: "A Steam Input pad on Linux or macOS might keep a button held until pressed again; not observed (no test on those platforms).",
+    ev: "`frontend/xinput.rs` (Windows only); `frontend/mod.rs` (no-op stand-in, `04a4e40`); `docs/controls.md` “Lost button releases”.", since: "New (found in this pass; `ae2b79f`)." },
+
+  // ---------------------------------------------------------------- mac
+  { id: "MC-1", area: "mac", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Controls",
+    title: "Mac default keys and weapon-cycle aliases missing",
+    orig: "Brake Z, Help/Insert next, Forward-Delete previous, aliases F3/F10/keypad+ and F2/F9/keypad−.",
+    port: "Mac defaults and both alias sets; the debug free camera moved to F6.",
+    impact: "Fixed.", ev: "`frontend/bindings.rs:151-174`; `camera.rs:2`.", since: "Closed: `frontend/bindings.rs:162-174`." },
+  { id: "MC-2", area: "mac", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Menus",
+    title: "Dimmed menu items use the Amiga path",
+    orig: "`DisplayTextAlpha3` @ 1008ee50.", port: "`centred_dim` follows `DisplayTextAlpha3` (table 4, then blended).",
+    impact: "Fixed.", ev: "`frontend/ui.rs:313-322`.", since: "Closed: `frontend/ui.rs:321`." },
+  { id: "MC-3", area: "mac", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Menus",
+    title: "No About box",
+    orig: "PowerPlant About box.", port: "The About text is shown at the end of the main menu's credits.",
+    impact: "Fixed.", ev: "`frontend/misc.rs:259-263`; `frontend/menus.rs:219`.", since: "Closed: `frontend/misc.rs:263`." },
+
+  // ---------------------------------------------------------------- frontend
+  { id: "FE-1", area: "frontend", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Software mode",
+    title: "View-size keys - and = not supported",
+    orig: "`DAT_0114c310`.", port: "`-` / `=` shrink and grow the view in software single player (min 0xB0).",
+    impact: "Fixed.", ev: "`camera.rs:121-160`.", since: "Closed: `camera.rs:157-159`." },
+  { id: "FE-2", area: "frontend", sev: "low", effort: "S", conf: "suspected", st: "partial", was: "partial", visible: "Menus",
+    title: "Menu model scale: derived, not compared with the original",
+    orig: "`FUN_010c101c(obj, 0, 0, 0, 0x65)` projection.",
+    port: "Scale now derived from the projection (`MODEL_UNIT = 16`, CONFIRMED from the code), but never put next to a screenshot of the original menu.",
+    impact: "Probably right; unverified.", ev: "`frontend/model.rs:16-23`.", since: "Partial: derivation done (`frontend/model.rs:23`); screenshot check missing." },
+  { id: "FE-3", area: "frontend", sev: "low", effort: "S", conf: "confirmed", st: "open", was: "new", visible: "Pause menu",
+    title: "Menu person: the pitch-0 frame's 0x5dc Y offset not reproduced",
+    orig: "People models in the menus get 0x5dc added to Y on frames whose pitch angle is exactly 0 (one frame per turn of the pause menu's person).",
+    port: "Not reproduced; also the people scaling is applied before the rotation, not after.",
+    impact: "A one-frame hop per turn is missing.",
+    ev: "`frontend/model.rs` `model_scale` notes.", since: "New (documented in `bbe27cb`)." },
+
+  // ---------------------------------------------------------------- audio
+  { id: "AU-1", area: "audio", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Audible",
+    title: "Fires are silent: no looping Flames sound",
+    orig: "Looping Flames (13).", port: "Looping Flames for burning objects and fire effects (audio-only, no sim feedback).",
+    impact: "Fixed.", ev: "`audio.rs:728-776`.", since: "Closed: `audio.rs:767`, `:776`." },
+  { id: "AU-2", area: "audio", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Audible",
+    title: "No CD music unless ripped, and nothing says so",
+    orig: "CD audio tracks.", port: "The CD Audio Setup screen shows where the files go (`NO_MUSIC_HINT`), the log lists the folders, and the saves folder's `Music` is searched too.",
+    impact: "Hint fixed. Music still needs the player's own rip (no tracks available to the project; RE-6).",
+    ev: "`music.rs:8-19`, `:131`; `frontend/misc.rs:817`.", since: "Closed: `music.rs:131`, `frontend/misc.rs:817`." },
+
+  // ---------------------------------------------------------------- replays
+  { id: "RS-1", area: "replays", sev: "medium", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Progress lost",
+    title: "Saves and settings live in the working directory",
+    orig: "`PROGDIR:Saves`.", port: "Since `e586f96`: `Saves` next to the executable, as `PROGDIR:Saves`, whatever the working directory; `PAYBACK_SAVES` overrides; the per-user data directory (`%APPDATA%\\Payback`) only if that folder can't be created; saves of earlier builds (per-user directory, `./Saves`) copied once; localStorage on the web.",
+    impact: "Fixed.", ev: "`frontend/progress.rs` `saves_dir`, `migrate_legacy_saves` (at `3382e77`).", since: "Closed: `frontend/progress.rs:245` at `bbe27cb` (per-user directory); moved next to the executable in `e586f96`." },
+
+  // ---------------------------------------------------------------- usermaps
+  { id: "UM-1", area: "usermaps", sev: "low", effort: "L", conf: "confirmed", st: "open", was: "open", visible: "Missing tool",
+    title: "No map editor",
+    orig: "Both releases ship a map editor that also builds the `.route` table.",
+    port: "None. The `.route` algorithm itself is now ported (`Route::calculate_routing`, RE-4), which removes the hardest RE dependency.",
+    impact: "Players can't make new maps. Estimate: about 1 week for a minimal editor (paint cubes/textures, place objects, save `.map`/`.route`), 2-3 weeks for a faithful copy of the Mac editor's UI.",
+    ev: "`extracted/game/MapEditor`; `analysis/ghidra_mapedx`; `payback-formats/src/route.rs:137`.", since: "Open: not implemented." },
+  { id: "UM-2", area: "usermaps", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Menus",
+    title: "User maps listed by name, not directory order",
+    orig: "Directory order (`MatchFirst`).", port: "HFS+ catalog name order (the Mac volume's order).",
+    impact: "Fixed.", ev: "`frontend/usermaps.rs:15-22`, `:117`.", since: "Closed: `frontend/usermaps.rs:117`." },
+
+  // ---------------------------------------------------------------- perf
+  { id: "PF-1", area: "perf", sev: "low", effort: "S", conf: "suspected", st: "open", was: "open", visible: "One hitch",
+    title: "Live render-mode switch rebuilds the night atlases",
+    orig: "n/a.", port: "The level loader now builds night atlases for the renderer in use, so only a later mid-level switch pays the 65-76 ms rebuild.",
+    impact: "A short freeze when switching renderer at night mid-level.",
+    ev: "`lighting.rs:653-668` (`sync_mode`).", since: "Open: narrowed (no rebuild at load) but the live switch still pays it." },
+  { id: "PF-2", area: "perf", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Not visible",
+    title: "No automatic performance check",
+    orig: "n/a.", port: "`--perf-check [s]` and `tools/checks/perf_check.sh` fail on p95/max/CPU thresholds.",
+    impact: "Fixed (not run by `cargo test` or CI).", ev: "`perf.rs:23-30`; `tools/checks/perf_check.sh`.", since: "Closed: `perf.rs:23`." },
+
+  // ---------------------------------------------------------------- det
+  { id: "DT-1", area: "det", sev: "medium", effort: "L", conf: "confirmed", st: "partial", was: "partial", visible: "Risk",
+    title: "Sim unit tests cover helpers, not the new rules",
+    orig: "n/a.",
+    port: "31 new tests in `sim/tests/` (boarding 6, combat 6, contact 3, people 4, police 5, score 7). They test pure helpers and small worlds (door points, weapon ids, circles, decay, kill scoring). The rules changed in `bbe27cb` (punch targets and pay, ram score, blast side, RC car, props, shunt) have no tests; `vehicles.rs` and `rc_car.rs` have none.",
+    impact: "Regressions in the new combat/vehicle rules are caught only by the replay suite (self-consistency) and the bot.",
+    ev: "`sim/tests/*.rs`; `grep -c '#[test]'`.", since: "Partial: 31 tests added; new rules untested." },
+  { id: "DT-2", area: "det", sev: "medium", effort: "S", conf: "confirmed", st: "partial", was: "partial", visible: "Risk",
+    title: "Replay check in the repository, but ignored by default and self-referential",
+    orig: "n/a.",
+    port: "`tools/checks/replay_check.py --suite` (5 cases) and the ignored `tests/replay_determinism.rs` are committed. They compare the port with itself; no stored baseline; no CI (`.github/` absent); the test is `#[ignore]` (needs game data and windows).",
+    impact: "A determinism break is caught only when someone runs the suite.",
+    ev: "`tools/checks/replay_check.py`; `crates/payback/tests/replay_determinism.rs:1-30`.", since: "Partial: in repo (`tools/checks/replay_check.py`); still manual." },
+  { id: "DT-3", area: "det", sev: "low", effort: "S", conf: "confirmed", st: "closed", was: "closed", visible: "Not visible",
+    title: "Punch targets follow ECS query order",
+    orig: "Table order.", port: "Targets sorted by slot; punches applied puncher by puncher in table order.",
+    impact: "Fixed.", ev: "`sim/combat.rs:372`, `:375`, `:647-654`.", since: "Closed: `sim/combat.rs:372`." },
+  { id: "DT-4", area: "det", sev: "medium", effort: "M", conf: "confirmed", st: "partial", was: "partial", visible: "Risk",
+    title: "The bot still teleports in some cases",
+    orig: "n/a.",
+    port: "In a vehicle the bot now drives with the game's AI driver along the route graph; it still teleports on foot, when a mission clock is too short, for goals on another floor or when the car gets nowhere, and kills targets with explosions credited to the player. It plays Rampage random missions now. It never uses the RC car.",
+    impact: "Mission bugs a human would hit on foot or in M9 can still go unnoticed.",
+    ev: "`autoplay.rs:9-22`, `teleport` calls at `:697-1225`.", since: "Partial: drives where it can (`autoplay.rs:9-12`); ~20 teleport sites remain." },
+
+  // ---------------------------------------------------------------- data
+  { id: "DA-1", area: "data", sev: "low", effort: "M", conf: "open", st: "closed", was: "closed", visible: "Unknown",
+    title: "Unknown fields: square flag 0x80, `.textures` +0x30, Obj header flag",
+    orig: "Resolved from the Mac map editor: 0x80 unused; +0x30 an in-memory stamp; the Obj flag is the painter's sort flag (`+0x490c`).",
+    port: "Ignored where unused; the Obj flag drives `painter_sort` (RD-6).",
+    impact: "Fixed.", ev: "`formats.md`; `open_questions.md`; `payback-formats/src/obj.rs:7-8`.", since: "Closed: `open_questions.md` (CONFIRMED rows), `obj.rs:7`." },
+
+  // ---------------------------------------------------------------- re
+  { id: "RE-1", area: "re", sev: "low", effort: "M", conf: "open", st: "closed", was: "closed", visible: "Possibly",
+    title: "Footstep water test and truck sounds",
+    orig: "Resolved: `+9 & 0x7f == 4` is a Reflect top; other steps use the top texture's sound (`GetSampleNum` @ 100ad3c0); truck sounds CONFIRMED.",
+    port: "Footstep from the top texture, snow footprints.", impact: "Fixed.",
+    ev: "`sim/people.rs:1015-1019` (`footstep`); `open_questions.md` §4.4 rows.", since: "Closed: `sim/people.rs:1019`." },
+  { id: "RE-2", area: "re", sev: "low", effort: "M", conf: "open", st: "closed", was: "closed", visible: "No",
+    title: "Game Menu p3 replay state, language-select input reset",
+    orig: "Resolved (player count < 2; pad reader as input reset).", port: "Matches.", impact: "None.",
+    ev: "`open_questions.md` front-end rows.", since: "Closed: `open_questions.md` (CONFIRMED)." },
+  { id: "RE-3", area: "re", sev: "low", effort: "M", conf: "open", st: "closed", was: "closed", visible: "Barely",
+    title: "Unrolled Gouraud copies not fully decoded",
+    orig: "Resolved: all 14 tests call `CheckVoxels` @ 100b3960, the same diagonal.", port: "Matches.", impact: "None.",
+    ev: "`rendering.md` §4; `open_questions.md`.", since: "Closed: `open_questions.md` (CONFIRMED)." },
+  { id: "RE-4", area: "re", sev: "low", effort: "L", conf: "open", st: "closed", was: "closed", visible: "Only for an editor",
+    title: "Map editor's `.route` next-hop algorithm",
+    orig: "`CalculateRouting` @ 100776a0 (Mac map editor).", port: "`Route::calculate_routing` reproduces all 31 shipped tables exactly.",
+    impact: "Fixed.", ev: "`payback-formats/src/route.rs:137`; `payback-formats/tests/real_data.rs`.", since: "Closed: `route.rs:137`." },
+  { id: "RE-5", area: "re", sev: "low", effort: "M", conf: "open", st: "partial", was: "partial", visible: "Possibly",
+    title: "Mission questions that need an in-game look",
+    orig: "Level 11 Q3, Q4, Q8 and level 20 Q5 are resolved from the data (fence piece at the door, shadow ring, limb colours, the boat can't reach (107,3)). Level 11 Q6 (Kill-frenzy clock) is resolved from the code but never seen in game.",
+    port: "Ported as resolved.",
+    impact: "Q6 needs gameplay: start the RC bonus during M2 or M6 and watch the clock. Other INFERRED design notes (L00 cones, L01 0x835, L10 early kidnapper kill, L21 truck explosion) still need an in-game look (section 4).",
+    ev: "`missions_11.md` §8; `missions_20.md` §7; `open_questions.md:395-495`.", since: "Partial: 4 of 5 resolved; Q6 needs gameplay." },
+  { id: "RE-6", area: "re", sev: "low", effort: "L", conf: "open", st: "partial", was: "partial", visible: "Legacy / music",
+    title: "CD audio track contents",
+    orig: "CD script codes and unlock logic mapped; the `CD_Audio_Handler` protocol decoded.",
+    port: "Music from ripped files.",
+    impact: "Which music is on which track (and the radio stations' feel) can't be checked without a mixed-mode disc rip; the disc images hold only the data track.",
+    ev: "`open_questions.md:343`; `script_api.md` §6; `frontend_audio.md` §4.6.", since: "Partial: protocol and scripts done; track contents need a disc rip." }
+];
+
+const CHANGES = {
+  intro: "Previous report: 80 entries at `bbe27cb`, 27 of them open, partial or new. Re-checked at `3382e77`.",
+  stillOpen: [
+    ["CB-4", "partial", "Blast crime at zero damage behind `BLAST_CRIME_AT_ZERO_DAMAGE = false` (`sim/combat.rs:1213`), waiting for a user decision."],
+    ["CB-7", "open", "Bullet and pellet hits still test `player.is_some()` (`sim/combat.rs` `by_player`)."],
+    ["CB-8", "open", "Still `at.z -= 500` before `Explode` (`sim/contact.rs`, line 602 at `3382e77`)."],
+    ["AI-1", "partial", "Phase order matches; the per-object interleave (move, think, fire per object in table order) does not."],
+    ["MS-3", "partial", "The “Random missions: On” row still shows with Amiga-only data (`frontend/rampage.rs:129`)."],
+    ["RD-1", "partial", "Palette-space blending in; snapped once instead of per blend, HUD panels linear."],
+    ["RD-6", "open", "Sort still fixed at mesh build (`objects.rs` `painter_sort`)."],
+    ["RD-7", "open", "Rotating view tops still perspective-correct."],
+    ["HW-3", "partial", "Hardware fades still the software fades."],
+    ["HW-5", "open", "4x4 Bayer pattern still INFERRED, applied once per frame."],
+    ["OB-1", "partial", "Shadows depth-tested, not painted in draw order."],
+    ["OB-3", "open", "Dipping scenery lifted."],
+    ["FX-1", "partial", "Effect sprites over a flare's centre don't hide it."],
+    ["FX-3", "open", "Snow marks depth-tested (no fitting Bevy pass)."],
+    ["HU-3", "partial", "Zoom-in map uses the live view instead of the genlocked first frame."],
+    ["PL-6", "partial", "Cursor hidden; no pause-on-unfocus option (the Mac doesn't pause either)."],
+    ["PL-8", "partial", "Layout key names only after the key's first press."],
+    ["PL-10", "open", "Unchanged; `dc8a372` added cache-busting only."],
+    ["FE-2", "partial", "Menu model scale derived but not compared with original screenshots."],
+    ["FE-3", "open", "Unchanged."],
+    ["UM-1", "open", "No map editor (about 1 week minimal, 2-3 weeks faithful)."],
+    ["PF-1", "open", "Live render-mode switch at night still rebuilds the atlases."],
+    ["DT-1", "partial", "Helper tests added; the new combat/vehicle rules have none."],
+    ["DT-2", "partial", "Replay suite in the repo but manual, self-referential, no CI."],
+    ["DT-4", "partial", "Bot still teleports on foot and in several cases; never uses the RC car."],
+    ["RE-5", "partial", "Level 11 Q6 needs gameplay."],
+    ["RE-6", "partial", "CD audio track contents need a disc rip."]
+  ]
+};
+
+const HEADLINES = [
+  "Burning-car blast centred above the car (port `z − 500`) where the Mac `Explode` @ 10055570 uses `z + 500` (CB-8, `sim/contact.rs:599-600`). Small fix, changes replays.",
+  "Decision needed: blast crimes at zero damage (CB-4, switch off because the wanted level jumps to 4 on every grenade), and whether to hide the Random missions row without the Mac data (MS-3).",
+  "Bullet and pellet hits still use “shooter is the player” instead of the owner side (CB-7).",
+  "AI runs in the original's phase order but not interleaved per object (AI-1); still the blocker for frame-exact parity.",
+  "The bot still teleports in several cases and never uses the new RC car; the new combat and vehicle rules have no unit tests (DT-4, DT-1).",
+  "No gap was closed after `bbe27cb`: the later commits were features, defaults and platform work. Apart from one real gamepad, nothing since `bbe27cb` has been checked by a human or against the original on screen; the web build ran only in headless Chrome with SwiftShader (section 4)."
+];
+
+const PENDING = [
+  "Bus and truck side gap (original geometry, both releases): keep it, or block walkers along the whole side (port departure, people only). `docs/re/combat_police.md` pair test.",
+  "Mac-only setups: the 23 re-pivoted people and 4 shifted cars collide with their Mac extents (no Amiga file); keep, or note as accepted. `docs/re/rendering.md` §10.",
+  "CB-4: turn `BLAST_CRIME_AT_ZERO_DAMAGE` on (original behaviour, wanted level jumps on every blast) or record it as a deliberate departure.",
+  "MS-3: hide or dim the Rampage “Random missions” row when the Mac phrases are missing (gameplay already ignores it).",
+  "PL-6: offer an optional pause when the window loses focus (the Mac kept running), or keep the Mac behaviour."
+];
+
+const DEPARTURES = [
+  ["Smooth motion (render-only interpolation), on by default", "Port addition for high-refresh displays; off shows one picture per tick as the original (`frame.rs`, `docs/port_engineering.md` “Frame pacing”)."],
+  ["Vsync and a 30/60/120/144 frame limit", "Port addition; the original had neither (no vsync request, `audio_platform.md` §4.1)."],
+  ["Saves folder: overrides and fallbacks", "`Saves` next to the executable as the original's `PROGDIR:Saves`; the port adds `PAYBACK_SAVES`, the per-user data directory as a fallback for a read-only install, a one-time copy of older builds' saves, and localStorage on the web (`frontend/progress.rs` `saves_dir`, `e586f96`)."],
+  ["Data staged next to the executable and found without configuration", "`build.rs` copies the files of `crates/payback/data_files.txt` into `target/<profile>/data/amiga` and `data/mac`; `locate.rs` searches env, `--data`, `data/` next to the exe, `payback-data.cfg`, `extracted/` above, then asks with a folder picker (`b82aabe`). Either release alone runs; `--mac-only` (`3382e77`)."],
+  ["Gamepad layout 3 and a Horn action", "Default pad table A/X drive, RT shoot, RB brake, LB/LT weapons, B horn; the stick and d-pad steer only (“Left stick forward/back” option, off); Horn sets the shoot bit only in a vehicle, `H` on the keyboard (`f885e85`, `docs/controls.md`). The originals had plain button tables."],
+  ["WebAssembly build", "Port addition (`docs/web.md`); WebGL2 keeps 510 lights."],
+  ["Cheat menu: vehicle paint, Clear wanted, Wanted up/down, Vehicle god mode", "Port additions to the F12 menu, recorded as replay events (`cheats.rs`, `frontend/cheats.rs`; vehicle god mode is event kind 6, `e586f96`)."],
+  ["Vert (slope 2) lighting-height quirk not reproduced", "The original adds h1 twice for Vert cubes (`FUN_010766c8`, Mac `DoLightSourcing` @ 1015bd18). `mac_version.md` Decisions."],
+  ["Pause menu keeps the game visible under hardware rendering", "User request, commit `680919c`."],
+  ["No Payback Setup dialog", "Its options are in the in-game Graphics options; main menu items 8 (Graphics options) and 9 (Unlock all levels, moved there from the Graphics screen in `e586f96`) added."],
+  ["Settings defaults follow the Mac, except renderer and aspect", "Music Radio, volume 50, P1 keyboard, P2 gamepad 1, FX 2, Gouraud on, hi-res HUD; Mac data variants by default, each with an Amiga setting. By the user's choice (`604023e`) hardware rendering is on and the aspect is free (the original starts in software at the fixed framing); the 3D minimap is off unless the view rotates (`b390963`)."],
+  ["German “Gas” blood replacement is a setting, default off", "Decision 10."],
+  ["One-shot sound cut-off a setting, default off; quiet-voice +6 dB ignored", "Decisions 2 and 3."],
+  ["Continuous music stops after the last track; the Mac's every-other-track skip not copied", "Decision 1; `music.rs:33-38`."],
+  ["Gouraud.256 and Alpha.256 computed from the palette", "Decision 9."],
+  ["Phrase 2023 “Level complete!” instead of the missing 1799 at a Rampage level end", "Decision 12."],
+  ["Rotating view is render-only", "The sim keeps the top-down camera values so replays don't depend on the option."],
+  ["Replays store neither the rotating-view nor the hardware setting", "As the original format."],
+  ["Hardware light jitter, static lamp intensities and fire-light jitter use local generators", "The original drew some from the game RNG (`lighting.rs`)."],
+  ["Vehicles obey attack / follow / flee / goto-and-vanish orders", "The original leaves vehicles idle for these (`sim/vehicle_ai.rs`; `vehicles.md` §6.3)."],
+  ["Mac models with Amiga sim extents", "People use per-model offsets; the simulation keeps the Amiga extents."],
+  ["Replays: lossless 0x3F3 writing plus a `PBrm` trailer", "Random missions flag, random setup and cheat events."],
+  ["Text `Payback.cfg` instead of the binary `S:Payback.config`", "Plus the port's added rows (resolution, window mode, smooth motion, vsync, frame limit, one-shot cut, random missions, unlock all)."],
+  ["Mac bugs not copied", "Rampage high scores persist; the repeat-message key is edge-triggered."],
+  ["Always registered", "No keyfile, demo menu, time-out or CD check."],
+  ["Square pixels and original horizontal angle", "The Mac at 640×480 stretched the picture 6.7%."],
+  ["Mac TentRoof texture's missing row filled with zeros", "`payback-formats/src/texture.rs`."],
+  ["`--linear-blend` and `--no-palette-snap` debug switches", "Comparison aids only (RD-1)."]
+];
+
+const FAITHFUL = [
+  "Losing the window focus does not pause the game: the Mac kept running (`UDesktop::Suspend` @ 101591b0); see PL-6 for the optional pause.",
+  "Radio in split screen: any player getting in switches the station; the per-frame request is player 1's (MP-2, CONFIRMED).",
+  "The level-start zoom is skipped in hardware mode, so the Mac OS X build normally never showed it (HU-3).",
+  "A player in a burning car loses the controls and can't get out (`GetInOutVehicles` @ 10066140 acts only in state 2).",
+  "Score labels only in single player and only for |n| > 10.",
+  "The minimap plots only the player and the mission target; the radar pickup has no effect.",
+  "No weather in split screen.",
+  "The shipped version-3 replays are rejected by the list, as in the original.",
+  "Weapons at level start and after respawn: fists only; only the score carries over.",
+  "No rumble: neither original had force feedback."
+];
+
+const UNVERIFIED = [
+  ["Web build in a real browser with a GPU", "Only headless Chrome with SwiftShader WebGL2 was run (`docs/web.md` Testing). Not tried: hardware WebGL2, Firefox, Safari, mobile, audio unlock on a real click, the 48 MB wasm download on a slow link, a native replay played back on the web."],
+  ["Gamepads", "One real pad so far: a Steam Controller under Steam Input on Windows (`ae2b79f`, which it prompted). Not tried: Xbox, PlayStation and Switch pads, two pads in multiplayer, hot-plug with real hardware, Linux or macOS (PL-11), and gamepads in the web build (Gamepad API)."],
+  ["Smooth motion, vsync and the frame limit on a high-refresh monitor", "Not watched on a 144 Hz display; the mixed smooth/stepped motion of the rotating view and TV camera was the original complaint."],
+  ["Bomb truck RC car in level 11", "M9 (“drive the RC under her car”) and the Kill frenzy bonus have not been played with the RC car; the bot does M9 another way. The camera hold, steering feel and blast credit are untested."],
+  ["Level 11 Q6 clock", "The Kill-frenzy clock vs M2/M6 timers, resolved from the code, never seen in game."],
+  ["Level-start zoom-in map, replay clock, view-size keys", "Never compared with the original's screens."],
+  ["Palette-space blending, 16-bit dither, painter's sort, flare occlusion, scenery line shadows", "Never compared on screen with the original; no reference screenshots in the repository. The debug exe in `target/debug` predates `bbe27cb` (built Oct 8 16:08), so no screenshot of the new code was taken in this pass."],
+  ["Barrier and cone topple, dummy, police-van handling", "Checked by code only."],
+  ["Cheat-menu paint colours and wanted controls", "Only the replay suite's `cheats` case; paints vs `AddThing` @ 10058350 not compared on screen."],
+  ["Keyboard layout labels", "AZERTY / QWERTZ labels learnt from presses (PL-8) never tried on such a layout."],
+  ["Exclusive fullscreen", "Hidden-window start, alt-tab, multiple monitors."],
+  ["Mac 0x3F3 compressed replay decoder", "No Mac replay ships; synthetic unit tests only."],
+  ["Original Amiga v10 / 0x3F2 replays", "Would need frame-exact simulation (AI-1)."],
+  ["A human playthrough of all six levels", "Only `--autoplay` (drives where it can, teleports otherwise)."],
+  ["The 7 Rampage random-mission jobs", "The bot plays them now (`--rampage <p> --autoplay`); no human run and no per-job test."],
+  ["Hardware renderer against real Warp3D/OpenGL output", "Jitter, night vertex colours, water, blend modes, colour keys, dither pattern."],
+  ["Per-model people offsets, climbing out of rivers, Info sign tumble height", "No original screenshot or map scan."],
+  ["Mission consequences marked INFERRED", "L00 cones at the broken bridge; L01 cancelling 0x835; L10 killing the kidnapper early; L21 the truck explosion killing the player."],
+  ["`AddSound` with a negative volume", "`BounceUnit` passes the signed speed; the port uses the absolute value."],
+  ["Menu frame rate", "Mac menus ran at 60 fps; the port's menus step at 30 Hz."],
+  ["Audio device changes", "Output device fixed at start-up; unplugging headphones may silence the game."]
+];
+
+const STALE = [
+  "Fixed in this pass: `docs/research.md`'s area table and roadmap now live, rewritten, in `docs/status.md` (state at `3382e77`, roadmap from this page).",
+  "Fixed in this pass: `docs/re/open_questions.md` §2.10 slopes and level 11 Q6 marked resolved, summary table recounted (201 / 173 / 28).",
+  "Fixed in this pass: `docs/re/rendering.md` “Still missing: the rotating view” and “Not done: debris”; `docs/re/missions_random.md` “No HUD arrows”; `docs/re/combat_police.md` “does not draw the [crate] fragments yet”. Not stale: `rendering.md` §11 lists “unoccluded flares” for hardware mode, which is CONFIRMED (Warp3D flares are never occlusion-tested).",
+  "Fixed in this pass: “TBD” comments in `payback-formats/src/texture.rs` and `map.rs` (settled in `formats.md`); `main.rs` usage (data search order, missing flags); `camera.rs` calling original aspect the default; `docs/re/frontend_menus.md` §6 describing gamepad layout 2; `docs/web.md` without the cache-busting; `docs/formats.md` palette without the Mac programs; scratch-file citations in `mission/api.rs` and `script_api.md`.",
+  "Open: `CLAUDE.md` lists the replay suite as “story, rampage, multiplayer, cheats”; the suite also has `story2` (`tools/checks/replay_check.py`). Left for the maintainer (agent instructions).",
+  "Kept as history: the Mac reviews (`docs/re/mac/`) and `docs/re/reviews/` name local working files (`analysis/mac/scratch_*`, `analysis/scratch/`) that are not kept; `docs/CONVENTIONS.md` “Paths in the notes” explains this."
+];
+
+const ORDER = [
+  "Two small rule fixes, one batch, then re-record the replay baselines: the burning-car blast height (CB-8, `sim/contact.rs:600` to `z + 500`) and the bullet/pellet owner-side test (CB-7).",
+  "Get the pending decisions from the user: CB-4 blast crime switch, MS-3 Random missions row, PL-6 pause on unfocus. Each is S once decided.",
+  "A human verification pass with a fresh build: level 11 M9 with the RC car and the Q6 clock (RE-5), smooth motion and frame limit on a 144 Hz monitor, a real gamepad (axes, hot-plug, two pads), the web build in Chrome and Firefox with a GPU, and screenshots of the zoom-in map, replay clock and hardware dither.",
+  "Tests: system-level tests for punch, ram score, blast side and the RC car (DT-1); run the replay suite in CI or a pre-commit script (DT-2); teach the bot the RC car and walking routes so it teleports less (DT-4).",
+  "Rendering leftovers: per-blend palette snap or HUD panels in palette space (RD-1), effect sprites hiding flares (FX-1), painter's sort for tumbling models and the rotating view (RD-6), affine tops in the rotating view (RD-7), the genlocked first frame of the zoom (HU-3), hardware fades (HW-3), shadow draw order and dipping scenery (OB-1, OB-3).",
+  "The per-object AI interleave (AI-1): largest refactor, changes every baseline; only worth it if frame-exact parity with original recordings becomes a goal.",
+  "Low priority: layout key names before the first press (PL-8), menu model checks (FE-2, FE-3), the live-switch hitch (PF-1), snow marks (FX-3), the CD rip (RE-6), web limitations (PL-10), and a map editor (UM-1: about 1 week minimal, 2-3 weeks faithful).",
+  "Throughout: keep the notes current (section 5); PL-11 only if a pad misbehaves on Linux or macOS."
+];
+
+const SOURCES = [
+  "Previous report: `remaining_gaps.html` at `bbe27cb` (80 entries, 27 open, partial or new); the report before that at `8c7f7d9` (73 gaps).",
+  "Checked: `git log bbe27cb..3382e77` (12 commits) with their messages and diffs; each of the 27 open entries looked up in `crates/payback/src` at `3382e77` (`sim/contact.rs` `at.z -= 500`, `sim/combat.rs` `by_player` and `BLAST_CRIME_AT_ZERO_DAMAGE`, `frontend/rampage.rs` Random missions row, `sim/mod.rs` “What remains different”, and the rest unchanged since `bbe27cb`); the committed docs swept for stale statements.",
+  "New gaps: a sweep of the post-`bbe27cb` diff for “approximation”, “INFERRED”, “not reproduced”, “not done”, “TODO” and “port addition”; only PL-11 qualified (the other additions are listed as departures).",
+  "Nothing was built or run in this pass."
+];
+</script>
+<script>
+(function () {
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmt = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+  const SEV = { high: "High", medium: "Medium", low: "Low" };
+  const EFF = { S: "S (hours)", M: "M (a day or two)", L: "L (several days)" };
+  const ST = { closed: "Closed since last report", partial: "Partial", open: "Still open", new: "New" };
+  const state = { q: "", sev: new Set(), area: new Set(), conf: new Set(), st: new Set() };
+
+  const byArea = {};
+  for (const g of GAPS) (byArea[g.area] ||= []).push(g);
+  const count = f => GAPS.filter(f).length;
+  const remaining = g => g.st !== "closed";
+  const prev = GAPS.filter(g => g.was !== undefined && g.was !== "closed");
+  const nSt = s => s === "new" ? count(g => g.st === "new") : prev.filter(g => g.st === s).length;
+
+  let h = `
+    <h1>${esc(META.title)}</h1>
+    <p class="sub">${fmt(META.subtitle)}</p>
+    <p class="meta">${fmt(META.generated)}</p>
+
+    <h2 id="changes">Changes since the last report</h2>
+    <div class="stats">
+      <div class="stat"><div class="v">${prev.length}</div><div class="l">open in the last report</div></div>
+      <div class="stat closed"><div class="v">${nSt("closed")}</div><div class="l">closed</div></div>
+      <div class="stat partial"><div class="v">${nSt("partial")}</div><div class="l">partial</div></div>
+      <div class="stat open"><div class="v">${nSt("open")}</div><div class="l">still open</div></div>
+      <div class="stat new"><div class="v">${nSt("new")}</div><div class="l">new gaps found</div></div>
+    </div>
+    <div class="panel">
+      <p>${fmt(CHANGES.intro)} ${nSt("closed")} of the ${prev.length} open then are closed; ${nSt("partial")} are partly done and ${nSt("open")} not started (${count(g => g.was === "closed")} were closed earlier and stay listed). ${nSt("new")} new gaps were found in the new code and docs.</p>
+      <b>Still open or partial</b>
+      <table class="chg"><thead><tr><th>ID</th><th>Status</th><th>What remains</th></tr></thead><tbody>
+      ${CHANGES.stillOpen.map(([id, s, t]) => `<tr><td><a href="#gap-${id}">${id}</a></td><td><span class="tag st-${s}">${s}</span></td><td>${fmt(t)}</td></tr>`).join("")}
+      </tbody></table>
+      <p style="margin-top:10px"><b>New:</b> ${GAPS.filter(g => g.st === "new").map(g => `<a href="#gap-${g.id}">${g.id}</a> ${fmt(g.title)}`).join("; ")}.</p>
+      <p><b>Closed in this pass:</b> ${GAPS.filter(g => g.st === "closed" && g.was !== "closed").map(g => `<a href="#gap-${g.id}">${g.id}</a>`).join(", ") || "none"}.</p>
+    </div>
+
+    <h2 id="summary">1. Summary</h2>
+    <div class="stats">
+      <div class="stat"><div class="v">${count(remaining)}</div><div class="l">gaps remaining (open + partial + new)</div></div>
+      <div class="stat high"><div class="v">${count(g => remaining(g) && g.sev === "high")}</div><div class="l">high severity</div></div>
+      <div class="stat medium"><div class="v">${count(g => remaining(g) && g.sev === "medium")}</div><div class="l">medium severity</div></div>
+      <div class="stat low"><div class="v">${count(g => remaining(g) && g.sev === "low")}</div><div class="l">low severity</div></div>
+      <div class="stat"><div class="v">${PENDING.length}</div><div class="l">decisions pending</div></div>
+      <div class="stat"><div class="v">${DEPARTURES.length}</div><div class="l">deliberate departures</div></div>
+      <div class="stat"><div class="v">${UNVERIFIED.length}</div><div class="l">implemented, unverified</div></div>
+    </div>
+    <div class="panel">
+      ${META.summary.map(p => `<p>${fmt(p)}</p>`).join("")}
+      <b>Headline gaps</b>
+      <ol class="plain">${HEADLINES.map(x => `<li>${fmt(x)}</li>`).join("")}</ol>
+    </div>
+
+    <h3>Counts by area (remaining)</h3>
+    <div class="panel"><table>
+      <thead><tr><th>Area</th><th class="num">High</th><th class="num">Medium</th><th class="num">Low</th><th class="num">Remaining</th><th class="num">Closed</th></tr></thead>
+      <tbody>${AREAS.filter(a => byArea[a.id]).map(a => {
+        const l = byArea[a.id], r = l.filter(remaining);
+        const c = s => r.filter(g => g.sev === s).length || "";
+        return `<tr><td><a href="#area-${a.id}">${esc(a.name)}</a></td><td class="num">${c("high")}</td><td class="num">${c("medium")}</td><td class="num">${c("low")}</td><td class="num">${r.length}</td><td class="num">${l.length - r.length || ""}</td></tr>`;
+      }).join("")}</tbody>
+    </table></div>
+
+    <h3>Decisions pending (user)</h3>
+    <div class="panel"><ul class="plain">${PENDING.map(x => `<li>${fmt(x)}</li>`).join("")}</ul></div>
+
+    <h3>How to read this page</h3>
+    <div class="panel note">${META.legend.map(p => `<p>${fmt(p)}</p>`).join("")}</div>
+
+    <h2 id="gaps">2. Gaps by area</h2>
+    <div class="controls">
+      <input type="search" id="q" placeholder="Search gaps (text, file, address, e.g. 10146280 or contact.rs)" aria-label="Search gaps">
+      <div class="chips" id="stchips"><span class="lab">Status</span></div>
+      <div class="chips" id="sevchips"><span class="lab">Severity</span></div>
+      <div class="chips" id="confchips"><span class="lab">Confidence</span></div>
+      <div class="chips" id="areachips"><span class="lab">Area</span></div>
+      <div class="chips"><button class="chip" id="reset">Clear filters</button><span class="count" id="shown"></span></div>
+    </div>
+    <div id="gaplist">`;
+
+  const stOrder = { new: 0, open: 1, partial: 2, closed: 3 };
+  const sevOrder = { high: 0, medium: 1, low: 2 };
+  for (const a of AREAS) {
+    const l = byArea[a.id];
+    if (!l) {
+      if (a.note) h += `<section class="area" data-area="${a.id}"><h3 id="area-${a.id}">${esc(a.name)} <span class="n">0</span></h3><p class="note">${fmt(a.note)}</p><p class="empty">No gaps in this area.</p></section>`;
+      continue;
+    }
+    h += `<section class="area" data-area="${a.id}"><h3 id="area-${a.id}">${esc(a.name)} <span class="n">${l.filter(remaining).length}</span></h3>`;
+    if (a.note) h += `<p class="note">${fmt(a.note)}</p>`;
+    for (const g of l.slice().sort((x, y) => stOrder[x.st] - stOrder[y.st] || sevOrder[x.sev] - sevOrder[y.sev])) {
+      const text = [g.id, g.title, g.orig, g.port, g.impact, g.ev, g.since, a.name, g.st].join(" ").toLowerCase();
+      h += `<article class="gap ${g.sev} st-${g.st}" id="gap-${g.id}" data-sev="${g.sev}" data-area="${g.area}" data-conf="${g.conf}" data-st="${g.st}" data-text="${esc(text)}">
+        <div class="t"><span class="id">${esc(g.id)}</span>${fmt(g.title)}</div>
+        <div class="tags">
+          <span class="tag st-${g.st}">${ST[g.st]}</span>
+          <span class="tag sev-${g.sev}">${SEV[g.sev]} severity</span>
+          <span class="tag">Effort ${EFF[g.effort]}</span>
+          <span class="tag">${g.conf === "confirmed" ? "Confirmed in code" : g.conf === "suspected" ? "Suspected" : "Open RE question"}</span>
+          ${g.visible ? `<span class="tag">${esc(g.visible)}</span>` : ""}
+        </div>
+        <dl>
+          <dt>Status since last report</dt><dd>${fmt(g.since)}</dd>
+          <dt>Original</dt><dd>${fmt(g.orig)}</dd>
+          <dt>Port now</dt><dd>${fmt(g.port)}</dd>
+          <dt>Player impact</dt><dd>${fmt(g.impact)}</dd>
+          <dt>Evidence</dt><dd>${fmt(g.ev)}</dd>
+        </dl>
+      </article>`;
+    }
+    h += `<p class="empty hidden">No gaps in this area match the filters.</p></section>`;
+  }
+  h += `</div>
+
+    <h2 id="departures">3. Deliberate departures (not gaps)</h2>
+    <p class="note">Decisions by the user or documented in <code>docs/re/mac_version.md</code> "Decisions", and port additions. Don't "fix" these.</p>
+    <div class="panel"><table><thead><tr><th>Departure</th><th>Why / where</th></tr></thead><tbody>
+      ${DEPARTURES.map(d => `<tr><td>${fmt(d[0])}</td><td>${fmt(d[1])}</td></tr>`).join("")}
+    </tbody></table></div>
+    <h3>Faithful to the original (look like bugs, are not)</h3>
+    <div class="panel"><ul class="plain">${FAITHFUL.map(x => `<li>${fmt(x)}</li>`).join("")}</ul></div>
+
+    <h2 id="unverified">4. Implemented but unverified</h2>
+    <p class="note">Present in the port, never checked against the original or by a person, or checked only by the port's own tests and bots.</p>
+    <div class="panel"><table><thead><tr><th>Item</th><th>What is missing to verify it</th></tr></thead><tbody>
+      ${UNVERIFIED.map(d => `<tr><td>${fmt(d[0])}</td><td>${fmt(d[1])}</td></tr>`).join("")}
+    </tbody></table></div>
+
+    <h2 id="stale">5. Stale notes</h2>
+    <p class="note">Notes that still describe fixed things as missing (or the reverse).</p>
+    <div class="panel"><ul class="plain">${STALE.map(x => `<li>${fmt(x)}</li>`).join("")}</ul></div>
+
+    <h2 id="order">6. Suggested order of work</h2>
+    <div class="panel"><ol class="plain">${ORDER.map(x => `<li>${fmt(x)}</li>`).join("")}</ol></div>
+
+    <h2 id="sources">7. Sources and method</h2>
+    <div class="panel note">${SOURCES.map(p => `<p>${fmt(p)}</p>`).join("")}</div>`;
+
+  document.getElementById("app").innerHTML = h;
+
+  const toc = [
+    ["changes", "Changes since last report", ""], ["summary", "1. Summary", ""], ["gaps", "2. Gaps by area", count(remaining)],
+    ...AREAS.filter(a => byArea[a.id] || a.note).map(a => ["area-" + a.id, a.name, (byArea[a.id] || []).filter(remaining).length, true]),
+    ["departures", "3. Deliberate departures", DEPARTURES.length], ["unverified", "4. Unverified", UNVERIFIED.length],
+    ["stale", "5. Stale notes", STALE.length], ["order", "6. Order of work", ""], ["sources", "7. Sources", ""]];
+  document.getElementById("toc").innerHTML = `<b>Contents</b>` + toc.map(([id, t, n, sub]) =>
+    `<a href="#${id}" class="${sub ? "sub" : ""}" data-toc="${id}"><span>${esc(t)}</span><span class="n">${n}</span></a>`).join("");
+
+  const mk = (box, set, items) => {
+    const el = document.getElementById(box);
+    for (const [v, label, dot] of items) {
+      const b = document.createElement("button");
+      b.className = "chip"; b.setAttribute("aria-pressed", "false"); b.dataset.v = v;
+      b.innerHTML = (dot ? `<span class="dot ${v}"></span>` : "") + esc(label);
+      b.onclick = () => { set.has(v) ? set.delete(v) : set.add(v); b.setAttribute("aria-pressed", set.has(v)); apply(); };
+      el.appendChild(b);
+    }
+  };
+  mk("stchips", state.st, [["new", "New"], ["open", "Open"], ["partial", "Partial"], ["closed", "Closed"]]);
+  mk("sevchips", state.sev, [["high", "High", 1], ["medium", "Medium", 1], ["low", "Low", 1]]);
+  mk("confchips", state.conf, [["confirmed", "Confirmed"], ["suspected", "Suspected"], ["open", "Open RE question"]]);
+  mk("areachips", state.area, AREAS.filter(a => byArea[a.id]).map(a => [a.id, a.short || a.name]));
+  const q = document.getElementById("q");
+  q.oninput = () => { state.q = q.value.trim().toLowerCase(); apply(); };
+  document.getElementById("reset").onclick = () => {
+    state.q = ""; q.value = ""; state.sev.clear(); state.area.clear(); state.conf.clear(); state.st.clear();
+    document.querySelectorAll(".chip[aria-pressed]").forEach(b => b.setAttribute("aria-pressed", "false")); apply();
+  };
+  function apply() {
+    let shown = 0;
+    const words = state.q.split(/\s+/).filter(Boolean);
+    document.querySelectorAll("article.gap").forEach(el => {
+      const ok = (!state.sev.size || state.sev.has(el.dataset.sev)) &&
+                 (!state.area.size || state.area.has(el.dataset.area)) &&
+                 (!state.conf.size || state.conf.has(el.dataset.conf)) &&
+                 (!state.st.size || state.st.has(el.dataset.st)) &&
+                 words.every(w => el.dataset.text.includes(w));
+      el.classList.toggle("hidden", !ok); if (ok) shown++;
+    });
+    document.querySelectorAll("section.area").forEach(s => {
+      const any = s.querySelector("article.gap:not(.hidden)");
+      const filtered = state.area.size && !state.area.has(s.dataset.area);
+      s.classList.toggle("hidden", !!filtered);
+      const e = s.querySelector(".empty");
+      if (s.querySelector("article.gap")) e.classList.toggle("hidden", !!any || !!filtered);
+      const t = document.querySelector(`[data-toc="area-${s.dataset.area}"] .n`);
+      if (t) t.textContent = s.querySelectorAll("article.gap:not(.hidden)").length;
+    });
+    document.getElementById("shown").textContent = `${shown} of ${GAPS.length} entries shown`;
+  }
+  apply();
+})();
+</script>
+</body>
+</html>

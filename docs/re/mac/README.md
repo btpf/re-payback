@@ -25,5 +25,5 @@ unless marked; see [`../../CONVENTIONS.md`](../../CONVENTIONS.md).
 Some passages name the review's working files (`scratch_*/…`, `.c` extracts, renders
 under `analysis/mac/`). Those were local and are not kept; see
 [`../../CONVENTIONS.md`](../../CONVENTIONS.md) "Paths in the notes". The consolidated
-local report `mac_differences.html` is built from these notes by
+local report `docs/mac_differences.html` is built from these notes by
 `python tools/reports/mac_differences.py`.
