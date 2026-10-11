@@ -28,6 +28,28 @@ The bulk of this game was recreated in ~3 days using opus 5.5 at medium effort a
 
 I had no prior knowledge of the original Motorola 68k Instruction Set, nor any ability to reverse engineer. This was all done with a handful of short high level prompts and some manual testing.
 
+## Quick Start Instructions
+
+In order to play, either the MacOS or the amiga version are needed.
+
+Providing both version will allow you to toggle between the platform specific features in game.
+
+```
+payback.exe
+payback-extract.exe
+Payback Game + Updates\
+    Amiga\
+        - the Amiga CD (.zip, .bin, .cue, .iso)
+        - PaybackUpdate7.lha
+    MacOS\
+        - PaybackMac.toast
+```
+
+Required File Downloads:
+- `PaybackMac.toast` - Can be found here: https://www.myabandonware.com/game/payback-3of#download
+- `Payback (Europe).zip` - https://archive.org/download/commodore_amiga_cd/Payback%20%28Europe%29.zip
+- `PaybackUpdate7.lha` - https://www.apex-designs.net/payback_update_amiga.html
+
 
 
 ## AI Written & Maintained Notes Below
