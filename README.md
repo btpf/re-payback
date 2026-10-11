@@ -44,6 +44,9 @@ Payback Game + Updates\
     MacOS\
         - PaybackMac.toast
 ```
+When you run `payback-extract.exe`, all of the necessary game files will be extracted.
+
+Music will also be extracted from the Amiga CD files if they are present.
 
 Required File Downloads:
 - `PaybackMac.toast` - Can be found here: https://www.myabandonware.com/game/payback-3of#download
