@@ -82,6 +82,39 @@ web build see [`docs/web.md`](docs/web.md).
 3. **Web build** (optional): `tools/web/build_web.sh`, then serve `web/dist/`
    ([`docs/web.md`](docs/web.md)).
 
+## Music
+
+The game's music is the Red Book audio on the game CD; neither disc image
+holds it. Rip the audio tracks from your CD (any of WAV, Ogg Vorbis, MP3,
+FLAC) into a `Music/` folder next to `payback.exe` (beside `UserMaps/` and
+`Saves/`; in a source checkout, `target/release/Music/`), one file per track,
+named by its CD track number: `13.ogg`, `13 - anything.flac` or
+`Track13.wav`. Track 1 is the data track: rip tracks 2–16. Without
+tracks the Music setup shows the mode as Disabled.
+
+| CD track | Plays |
+|---|---|
+| 2 | radio: Limo, Hotrod |
+| 3 | radio: Taxi |
+| 4 | radio: Vapour |
+| 5 | radio: Diblo, Pug Racer, Vapour GT |
+| 6 | radio: Pug GTI |
+| 7 | radio: Mundaneo, Fjord |
+| 8 | Level / Game Complete; radio: Boat |
+| 9 | radio: Evo |
+| 10 | radio: Scooby |
+| 11 | radio: Pug |
+| 12 | radio: Truck, Rocket car |
+| 13 | all menus |
+| 14 | radio: Pickup truck |
+| 15 | radio: Van |
+| 16 | Game Over; radio: RC truck, Remote controlled car |
+
+Bus, police vehicles, Tank, Ice cream van and Helicopter have no radio. In
+Continuous mode every track plays in number order. The release names no
+track titles (the credits list the artists only); details in
+[`docs/re/frontend_audio.md`](docs/re/frontend_audio.md) §4.6.
+
 ## Verify
 
 ```sh

@@ -749,7 +749,7 @@ track: idle → n = 0 random first track `first + rand·(last−first) >> 15`, n
 playing → n < 0 stop, past the TOC length n = 0 next track with wrap, n > 0 restart n),
 0x3ec volume (`CD_SetVolume` 0x7ac8c, never sent; the handler has no case). The same set
 as the OS4 thread below, and the same track numbers (menus 13, radio = the vehicle's track,
-continuous mode `CD_Ensure(0)`). What is on each track needs a rip of the mixed-mode CD:
+continuous mode `CD_Ensure(0)`). The audio itself needs a rip of the mixed-mode CD:
 `Payback.iso` and `PaybackMac.toast` are data tracks only. Update 7/OS4: in-process "Payback CDDA Thread" (`FUN_010089dc`, entry
 `0x010087a0`), commands in `DAT_0114c2b4` + Signal(0x1000): 0x2000 init/quit, 0x3000 stop
 (`FUN_01008c84`), 0x4000+n play n (`FUN_01008bb0`), 0x5000+n ensure n playing
@@ -767,7 +767,59 @@ then 0x45).
 
 Music mode `DAT_0114c30c`: 0 Off, 1 Radio, 2 Continuous, 3 Disabled (forced if the CD
 thread fails). **No music volume**; FX volume `DAT_0114c2a0` 0..100 step 10 (default
-100) scales hardware volume. `extracted/iso` is data-only, so track contents are unknown.
+100) scales hardware volume.
+
+**Track list (C).** Every CD track the game asks for, by number. Sources: the Mac's
+`CD_CheckForTrackEnd__Fi` @ 100fb000 callers (13 from `DoTitleScreen` @ 100a2e70,
+`DoGameMenu` @ 100a05e0, `SelectLevel` @ 1009b620, `DoCDAudioSetup` @ 100a1500, the
+multiplayer/Rampage setups, load/save, replays and the other menu screens; 16 from
+`DoGameOver` @ 10098150; 8 from `DoGameComplete` @ 10098e10 and `DoLevelCompleted`
+@ 10099eb0; 0 from `ShowOptions` @ 10093240 and `amiga_levelloop` @ 10100f50) and the
+radio field type `+0x8194` set in `InitStructures` @ 1005ffb0, played by
+`GetInOutVehicles__Fi` @ 10066140 (`CD_Play`) and requested each frame by `do_Other__Fv`
+@ 10146280 / `do_Person__Fv` @ 1013fbd0. The radio values are the same in OS4 `FUN_0104e13c`
+(`+0x4938`, §4.4) and the 68k loader `FUN_000d7874`. Vehicle names are the type's name
+phrase (2330–2355, `Global.English.phrases`).
+
+| CD track | Plays |
+|---|---|
+| 1 | nothing: the data track (I: no request names it; the radio and menu numbers are 2–16) |
+| 2 | radio: Limo, Hotrod |
+| 3 | radio: Taxi |
+| 4 | radio: Vapour |
+| 5 | radio: Diblo, Pug Racer, Vapour GT |
+| 6 | radio: Pug GTI |
+| 7 | radio: Mundaneo, Fjord |
+| 8 | Level Complete, Game Complete; radio: Boat |
+| 9 | radio: Evo |
+| 10 | radio: Scooby |
+| 11 | radio: Pug |
+| 12 | radio: Truck, Rocket car (all three rocket car types) |
+| 13 | every front-end menu (title, game menu, level select, setups, load/save, replays) |
+| 14 | radio: Pickup truck |
+| 15 | radio: Van |
+| 16 | Game Over; radio: RC truck (`bombtruck`), Remote controlled car |
+
+No radio (field −1, the CD is stopped on getting in): Bus, Police car (all colours), Police
+van (all colours), Tank, Ice cream van, Helicopter; on foot (I, §4.7).
+Continuous mode plays the tracks in number order: the Amiga starts at a random track drawn
+over the TOC range (OS4 `FUN_0100872c`: `first + rand % (last + 1 − first)`, TOC first and
+last track numbers, so the data track can be drawn; I) and wraps; the Mac starts after the
+last track played (`UCDAudio::Next` @ 101042a0: track + 1 while below the audio track count,
+no wrap). The port follows the Mac (§4.7). No other track numbers occur, so the 15 audio
+tracks 2–16 are all the game uses; the disc's track count past 16 is not known.
+
+**Track titles: none in the release.** The manuals (`extracted/mac/Manuals/*.pdf`), the Mac
+`Payback Read Me`, Update 7 `Notes.txt` and the `Docs/*.guide` files do not list the tracks.
+The credits (`Global.English.phrases` 2235–2244) name "Music score – Pelto Records" and a
+"Soundtrack" list of artists without track numbers: Anomos, Chuckie Dogg Fresh, Cynic Guru,
+Dispatch, eH Factor, Gigas, JED, mellow26, The Oldominion, Seeds of Labor, Venom Records,
+Pelto Records. Which artist is on which track is not recorded.
+
+**Port** (`music.rs`): one file per track in `Music/` next to the executable, named by
+track number: `13.ogg`, `13 - <anything>.flac`, `Track13.wav`, `Payback (Track 13).mp3`
+(leading number, else the last number). Rip tracks 2–16; skip the data track 1, which
+Continuous mode would otherwise play first.
 
 
 ### 4.7 Mac release: what the port follows (C; docs/re/mac/audio_platform.md §1–§2)
@@ -833,8 +885,9 @@ Manager. `audio.rs` and `music.rs` follow the Mac (decisions in `docs/re/mac_ver
   @ 1013fbd0 request player 1's type track every frame in mode 1, so it loops (C); on foot the
   person type's field is taken as −1 (stop) (I). The setup menu cycles Off → Radio →
   Continuous → Off and leaves Disabled alone (C, `DoCDAudioSetup` @ 100a1500). Default mode
-  Radio. The port reads ripped tracks from `Music/` (working directory, data root or Mac
-  folder), numbered by CD track; with none the mode is Disabled.
+  Radio. The port reads ripped tracks from `Music/` next to the executable (then `Music/` in
+  the working directory, which is also the web build's packed folder), numbered by CD track
+  (§4.6 track list); with none the mode is Disabled.
 
 ## 5. Intro video — `Videos/intro.video` + `intro.audio`
 
@@ -980,8 +1033,9 @@ at the HUD canvas scale (`hud/loading.rs`): native size with the hi-res HUD.
 
 ## 7. Open questions
 
-* The CD audio track contents (`extracted/iso` holds no audio tracks); the
-  `CD_Audio_Handler` protocol is decoded (§4.6).
+* The CD audio itself (`extracted/iso` holds no audio tracks) and which credited artist is on
+  which track; the track numbers and their uses are known (§4.6 track list), as is the
+  `CD_Audio_Handler` protocol.
 * ~~§4.4 water test~~ Resolved: cube `+9` is the top face type (Mac `LoadMap` @ 100b3a60).
 
 Resolved (C):

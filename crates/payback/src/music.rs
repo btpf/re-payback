@@ -5,18 +5,47 @@
 //! @ 10103fc0). Game-side logic follows the Mac (docs/re/mac/audio_platform.md
 //! §2, docs/re/frontend_audio.md §4.6).
 //!
-//! **Files.** Put the tracks in a `Music` folder in the working directory,
-//! the saves folder (`frontend::progress::saves_dir`, e.g.
-//! `Saves\Music` next to the executable), the data root or the Mac data folder, one
-//! file per CD track, numbered by CD track: a name starting with the number
-//! (`13.ogg`, `13 - Payback.mp3`) or with the number last
+//! **Files.** Put the tracks in a `Music` folder next to the executable
+//! (`<exe dir>/Music`, beside `UserMaps/` and `Saves/`); a `Music` folder
+//! in the working directory is read too (the web build's packed `Music/`,
+//! or `cargo run` from the repository root). The staged data folders are
+//! never searched (the build deletes unknown files there), nor is
+//! `Saves/Music` any more (a warning names it if it still holds tracks).
+//! One file per CD track, numbered by CD track: a name starting with the
+//! number (`13.ogg`, `13 - Payback.mp3`) or with the number last
 //! (`Track13.flac`, `Payback (Track 13).wav`). Any format the decoder
 //! reads: WAV, Ogg Vorbis, MP3, FLAC. With no files the music is Disabled
 //! and everything stays silent; the CD Audio Setup screen then says where
-//! the files go ([`NO_MUSIC_HINT`]) and the log lists the folders searched.
+//! the files go ([`NO_MUSIC_HINT`]) and the log names the folder.
 //! The disc images (`Payback.iso`, ISO 9660, and `PaybackMac.toast`, HFS)
 //! hold only the data track, so the tracks cannot be extracted from them:
 //! rip them from the CD (docs/status.md, the Audio row).
+//!
+//! **Tracks** (docs/re/frontend_audio.md §4.6; CONFIRMED, Mac callers of
+//! `CD_CheckForTrackEnd` @ 100fb000 and `InitStructures` @ 1005ffb0 type
+//! `+0x8194`, the same as OS4 `FUN_0104e13c` `+0x4938`). Track 1 is the
+//! data track (INFERRED: nothing requests it); rip 2-16:
+//!
+//! | Track | Plays |
+//! |---|---|
+//! | 2 | radio: Limo, Hotrod |
+//! | 3 | radio: Taxi |
+//! | 4 | radio: Vapour |
+//! | 5 | radio: Diblo, Pug Racer, Vapour GT |
+//! | 6 | radio: Pug GTI |
+//! | 7 | radio: Mundaneo, Fjord |
+//! | 8 | Level Complete, Game Complete; radio: Boat |
+//! | 9 | radio: Evo |
+//! | 10 | radio: Scooby |
+//! | 11 | radio: Pug |
+//! | 12 | radio: Truck, Rocket car |
+//! | 13 | every front-end menu |
+//! | 14 | radio: Pickup truck |
+//! | 15 | radio: Van |
+//! | 16 | Game Over; radio: RC truck, Remote controlled car |
+//!
+//! No radio: Bus, Police car, Police van, Tank, Ice cream van, Helicopter.
+//! Continuous plays every track found in number order from the lowest.
 //!
 //! **Modes** (`Settings.cd_mode`, `DAT_0114c30c` / Mac `DAT_10188fb0`):
 //! 0 Off, 1 Radio (the Mac default), 2 Continuous, 3 Disabled (forced
@@ -57,7 +86,6 @@
 
 use crate::audio::FxVolume;
 use crate::camera::CameraTarget;
-use crate::data::GameData;
 use crate::frontend::progress::Settings;
 use crate::level::AppState;
 use crate::sim::Obj;
@@ -130,21 +158,40 @@ pub struct MusicLibrary {
 /// phrase; the original's setup just dims the mode when `CD_Init` fails).
 pub const NO_MUSIC_HINT: [&str; 4] = [
     "No CD music found. Rip the game",
-    "CD's audio tracks into a Music",
-    "folder next to the game or the",
-    "saves, named by track: 13.ogg ...",
+    "CD's audio tracks (2-16) into",
+    "the Music folder next to the",
+    "game, named by track: 13.ogg ...",
 ];
 
-/// The track folders, in search order.
-fn folders(data: Option<&GameData>) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("Music"), crate::frontend::progress::saves_dir().join("Music")];
-    if let Some(data) = data {
-        dirs.push(data.root.join("Music"));
-        if let Some(mac) = &data.mac {
-            dirs.push(mac.join("Music"));
-        }
+/// The folder next to the executable (`<exe dir>/Music`), beside
+/// `UserMaps/` and `Saves/`.
+fn exe_music() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|d| d.join("Music"))
+}
+
+/// The track folders, in search order: `<exe dir>/Music`, then `Music` in
+/// the working directory (the web build's packed `Music/`, and `cargo run`
+/// from the repository root), unless that is the same folder. Never the
+/// data roots: the build regenerates them and deletes unknown files.
+fn folders() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = exe_music().into_iter().collect();
+    let cwd = PathBuf::from("Music");
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if !dirs.iter().any(|d| same(d, &cwd)) {
+        dirs.push(cwd);
     }
     dirs
+}
+
+/// The track files in `dir`, by CD track number (first name in order wins).
+fn tracks_in(dir: &Path) -> Vec<(u32, PathBuf)> {
+    let Ok(entries) = crate::vfs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries.flatten().filter(|e| e.is_file()).map(|e| e.path()).collect();
+    files.sort();
+    files.into_iter().filter_map(|f| Some((track_number(&f)?, f))).collect()
 }
 
 /// The CD track number in a file name: its leading number, or else its
@@ -167,25 +214,33 @@ pub fn track_number(path: &Path) -> Option<u32> {
 }
 
 impl MusicLibrary {
-    fn scan(data: Option<&GameData>) -> MusicLibrary {
+    fn scan() -> MusicLibrary {
+        let dirs = folders();
         let mut tracks = BTreeMap::new();
-        for dir in folders(data) {
-            let Ok(entries) = crate::vfs::read_dir(&dir) else { continue };
-            let mut files: Vec<PathBuf> = entries.flatten().filter(|e| e.is_file()).map(|e| e.path()).collect();
-            files.sort();
-            for f in files {
-                if let Some(n) = track_number(&f) {
-                    tracks.entry(n).or_insert(f);
-                }
+        for dir in &dirs {
+            for (n, f) in tracks_in(dir) {
+                tracks.entry(n).or_insert(f);
             }
         }
         if !tracks.is_empty() {
             info!("music: {} tracks ({:?})", tracks.len(), tracks.keys().collect::<Vec<_>>());
         } else {
             info!(
-                "music: no CD tracks found; rip the game CD's audio tracks (e.g. 13.ogg, Track13.flac) into one of {:?}",
-                folders(data)
+                "music: no CD tracks found; rip the game CD's audio tracks 2-16 (e.g. 13.ogg, Track13.flac) into {:?}",
+                dirs.first().unwrap_or(&PathBuf::from("Music"))
             );
+        }
+        // Earlier builds also read `Saves/Music`; say where those files go now.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let old = crate::frontend::progress::saves_dir().join("Music");
+            if !tracks_in(&old).is_empty() {
+                warn!(
+                    "music: {} is no longer searched; move its tracks to {:?}",
+                    old.display(),
+                    dirs.first().unwrap_or(&PathBuf::from("Music"))
+                );
+            }
         }
         AVAILABLE.store(!tracks.is_empty(), Ordering::Relaxed);
         MusicLibrary { tracks, loaded: BTreeMap::new() }
@@ -309,8 +364,8 @@ impl Plugin for MusicPlugin {
         app.init_resource::<MusicCue>()
             .init_resource::<Cd>()
             .init_resource::<MusicLibrary>()
-            .add_systems(Startup, |mut commands: Commands, data: Option<Res<GameData>>| {
-                commands.insert_resource(MusicLibrary::scan(data.as_deref()));
+            .add_systems(Startup, |mut commands: Commands| {
+                commands.insert_resource(MusicLibrary::scan());
             })
             .add_systems(OnExit(AppState::Playing), stop_on_exit)
             .add_systems(Update, run_music.after(crate::frontend::FrontendRun));
