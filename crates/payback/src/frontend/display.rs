@@ -157,6 +157,9 @@ pub enum Item {
     Gouraud,
     /// "Rotating view: " 1602 (`DAT_0114c7dc`).
     Rotating,
+    /// "Perspective: " original / experimental
+    /// (`Settings::experimental_perspective`, port-added; no phrase).
+    Perspective,
     /// "3D minimap: " on / off (`Settings::minimap_3d`, port-added; no
     /// phrase): the rotating view's tilted minimap, also without it.
     Minimap3d,
@@ -217,13 +220,14 @@ pub const MORE: &str = "More graphics options";
 /// controls in its order (display, then rendering), then the HUD and
 /// framing, then the Mac/Amiga content choices. ("Unlock all levels" is
 /// on the main menu, `menus::MainMenu`.)
-pub const SETUP_ITEMS: [Item; 21] = [
+pub const SETUP_ITEMS: [Item; 22] = [
     Item::Resolution,
     Item::WindowMode,
     Item::Vsync,
     Item::FrameLimit,
     Item::SmoothMotion,
     Item::Hardware,
+    Item::Perspective,
     Item::Rotating,
     Item::Minimap3d,
     Item::Gouraud,
@@ -253,6 +257,9 @@ impl Item {
             Item::Gouraud => format!("{}{}", cx.g(1601), on_off(s.gouraud)),
             Item::Rotating => format!("{}{}", cx.g(1602), on_off(s.rotating_view)),
             Item::Minimap3d => format!("3D minimap: {}", on_off(s.minimap_3d_on())),
+            Item::Perspective => {
+                format!("Perspective: {}", if s.experimental_perspective { "Experimental" } else { "Original" })
+            }
             Item::Hardware => format!("{}{}", cx.g(1603), on_off(s.hardware)),
             Item::Resolution => {
                 let (w, h) = cx.display.shown(s);
@@ -359,6 +366,7 @@ impl Item {
             "gouraud" => Item::Gouraud,
             "rotating_view" | "rotating" => Item::Rotating,
             "minimap_3d" | "minimap" => Item::Minimap3d,
+            "perspective" => Item::Perspective,
             "hardware" => Item::Hardware,
             "resolution" => Item::Resolution,
             "window_mode" => Item::WindowMode,
@@ -395,6 +403,8 @@ impl Item {
             Item::Resolution => cfg!(target_arch = "wasm32") || s.window_mode == WindowChoice::Borderless,
             // Forced on by the rotating view (`Settings::minimap_3d_on`).
             Item::Minimap3d => s.rotating_view,
+            // The experimental perspective replaces the rotating view.
+            Item::Rotating => s.experimental_perspective,
             _ => false,
         }
     }
@@ -425,6 +435,10 @@ impl Item {
             }
             Item::Minimap3d => {
                 s.minimap_3d = !s.minimap_3d;
+                true
+            }
+            Item::Perspective => {
+                s.experimental_perspective = !s.experimental_perspective;
                 true
             }
             Item::Hardware => {

@@ -825,6 +825,13 @@ enum Sprite {
 }
 
 impl Effect {
+    /// Drawn on the ground (blood, gas, dirt, skid marks, shadows,
+    /// shockwaves): stays flat in the experimental perspective.
+    fn lies_flat(&self) -> bool {
+        self.kind == 10
+            || matches!(self.tex, Tex::Blood | Tex::Gas | Tex::Dirt | Tex::DirtSkidmark | Tex::Shad | Tex::Shockwave)
+    }
+
     /// Sprite, world half-size and pass.
     fn sprite(&self) -> (Sprite, f32, Pass) {
         let size = self.size as f32;
@@ -1285,7 +1292,12 @@ impl Quads {
 
     /// Emit the sprite of `e` (`FUN_010386e8` draw part).
     fn effect(&mut self, view: &ViewInfo, e: &Effect, sprite: Sprite, half: f32, rain: [f32; 4]) {
-        let axes = view.axes;
+        // Experimental perspective: sprites stand up facing the camera,
+        // except the ground decals.
+        let axes = match view.upright {
+            Some(up) if !e.lies_flat() => up,
+            _ => view.axes,
+        };
         let centre = to_render(e.pos.as_vec3()) + Vec3::Y * NEARER;
         let h = half / SQUARE;
         match sprite {
@@ -1355,6 +1367,9 @@ struct ViewInfo {
     forward: Vec3,
     /// Sprite axes: right and down the screen, horizontal.
     axes: (Vec3, Vec3),
+    /// Experimental perspective (`camera::Chase`): the camera's right and
+    /// down axes, for sprites that face it.
+    upright: Option<(Vec3, Vec3)>,
     /// tan of half the vertical field of view.
     tan_half: f32,
 }
@@ -1464,6 +1479,7 @@ fn build_meshes(
     )>,
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
+    chase: Res<crate::camera::Chase>,
     city: Option<Res<City>>,
     render_mode: Res<crate::render_mode::RenderMode>,
     occluders: Res<crate::objects::FlareOccluders>,
@@ -1529,6 +1545,7 @@ fn build_meshes(
             pos: cam_tf.translation(),
             forward: cam_tf.forward().into(),
             axes: (right, right.cross(Vec3::Y)),
+            upright: chase.on.then(|| (cam_tf.right().into(), -Vec3::from(cam_tf.up()))),
             tan_half,
         };
         let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();

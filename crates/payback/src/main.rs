@@ -8,13 +8,14 @@
 //!                 [--autoplay [--autoplay-ticks <n>]] [--fast <n>]`
 //!
 //! Also: `--mac-only` (ignore the Amiga data), `--hardware` / `--software`
-//! (render mode), `--seed <n>`, `--intro` / `--no-intro`, `--pad-debug`,
+//! (render mode), `--perspective original|experimental` (`camera::Chase`),
+//! `--seed <n>`, `--intro` / `--no-intro`, `--pad-debug`,
 //! `--cheat-menu`; the rest are test switches read where they are used.
 //!
 //! The game data is searched for (env, `--data`, `data/` next to the
 //! executable, `payback-data.cfg`, `extracted/` above the executable or the
-//! working directory, else a folder picker; `locate.rs`).
-//! `PAYBACK_NO_DIALOG=1` disables the picker and message boxes.
+//! working directory, else a message to run `payback-extract`; `locate.rs`).
+//! `PAYBACK_NO_DIALOG=1` disables the message boxes.
 //! `--record`/`--play` are the replay determinism check (see `replay.rs`).
 //! `--autoplay` plays the story level's missions (see `autoplay.rs`);
 //! `--fast n` runs the game n times faster.

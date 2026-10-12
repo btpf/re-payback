@@ -17,6 +17,11 @@
 //! playback the rotating view becomes the Mac's roaming "TV camera"
 //! ([`TvCamera`], `DrawMap` @ 1005a260).
 //!
+//! Experimental perspective (port-added, `Settings::experimental_perspective`;
+//! [`Chase`]): instead of the overhead camera, a chase camera behind the
+//! driven vehicle and an over-the-shoulder camera on foot, render-only like
+//! the rotating view (the simulation keeps its top-down [`GameCam`]).
+//!
 //! The game views render in palette space (`postfx.rs`): HDR targets that
 //! hold palette-encoded RGB, snapped to the palette, motion-blurred and
 //! flashed by one final pass.
@@ -310,6 +315,9 @@ pub struct ViewEyes {
     /// View 0 is the replay TV camera (its visible range is 3 squares
     /// larger, `DrawMap` @ 1005a260).
     pub tv: bool,
+    /// The experimental perspective ([`Chase`]) sees towards the horizon:
+    /// at least this many squares either side are drawn (lights, effects).
+    pub wide: Option<i32>,
 }
 
 impl ViewEyes {
@@ -318,7 +326,8 @@ impl ViewEyes {
     pub fn visible_squares(&self, i: usize, rotating: bool) -> (i32, i32) {
         let (x, y) = self.cams[i].visible_squares(self.cams.len(), rotating);
         let extra = if self.tv && i == 0 { 3 } else { 0 };
-        (x + extra, y + extra)
+        let wide = self.wide.unwrap_or(0);
+        ((x + extra).max(wide), (y + extra).max(wide))
     }
 }
 
@@ -341,10 +350,158 @@ fn forced_rotating() -> Option<bool> {
 fn follow_settings(
     settings: Option<Res<crate::frontend::progress::Settings>>,
     mut rotating: ResMut<RotatingView>,
+    mut chase: ResMut<Chase>,
 ) {
     let Some(settings) = settings else { return };
-    if settings.is_changed() && forced_rotating().is_none() && rotating.0 != settings.rotating_view {
-        rotating.0 = settings.rotating_view;
+    if !settings.is_changed() {
+        return;
+    }
+    let on = forced_perspective().unwrap_or(settings.experimental_perspective);
+    if chase.on != on {
+        chase.on = on;
+    }
+    // The experimental perspective replaces the rotating view.
+    let want = forced_rotating().unwrap_or(settings.rotating_view) && !on;
+    if rotating.0 != want {
+        rotating.0 = want;
+    }
+}
+
+/// `--perspective original|experimental`, overriding the setting.
+fn forced_perspective() -> Option<bool> {
+    crate::arg("--perspective").map(|v| v == "experimental")
+}
+
+/// The experimental perspective (port-added, `Settings::experimental_perspective`,
+/// "Perspective: Experimental" in the graphics options): a chase camera as
+/// in modern third-person driving games behind the driven vehicle (it
+/// swings round after the car's heading with some lag, faster with speed,
+/// and pulls back as the car speeds up), and a close camera over the right
+/// shoulder on foot. Render-only, like the rotating view: the simulation's
+/// [`GameCam`] / [`ViewCams`] still follow top-down, so the people and
+/// traffic spawn windows, replays and determinism do not change (streets
+/// further than the top-down window stay emptier than the view suggests).
+/// The camera pulls in towards the followed object rather than enter a
+/// building ([`crate::world::City::blocked`]). Effect sprites that are not
+/// ground decals face the camera (`effects.rs`).
+#[derive(Resource, Default)]
+pub struct Chase {
+    pub on: bool,
+    views: Vec<ChaseState>,
+    /// The transform each view is drawn from this frame; None until the
+    /// view has something to follow.
+    eyes: Vec<Option<Transform>>,
+}
+
+impl Chase {
+    /// View `i`'s chase transform, when the experimental perspective is on.
+    pub fn eye(&self, i: usize) -> Option<Transform> {
+        if self.on { self.eyes.get(i).copied().flatten() } else { None }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChaseState {
+    /// Direction the camera looks along, radians about +Y (0 = +z, south).
+    yaw: f32,
+    /// How far out the camera sits, 0..1 of its wanted distance (pulled in
+    /// at once by walls, eased back out).
+    reach: f32,
+    init: bool,
+}
+
+/// Squares either side drawn in the experimental perspective (lights,
+/// effects; the city meshes are whole).
+const CHASE_RANGE: i32 = 24;
+
+/// Camera placement, in squares: (behind, above, right, look-ahead, look
+/// height, pivot height).
+struct ChaseRig {
+    back: f32,
+    up: f32,
+    right: f32,
+    ahead: f32,
+    look_up: f32,
+    pivot: f32,
+}
+
+const CHASE_DRIVING: ChaseRig = ChaseRig { back: 1.7, up: 0.62, right: 0.0, ahead: 1.6, look_up: 0.1, pivot: 0.3 };
+const CHASE_ON_FOOT: ChaseRig = ChaseRig { back: 0.72, up: 0.36, right: 0.2, ahead: 2.0, look_up: 0.2, pivot: 0.3 };
+
+/// One frame of the experimental perspective's cameras ([`Chase`]).
+fn chase_views(
+    time: Res<Time>,
+    mut chase: ResMut<Chase>,
+    mut eyes: ResMut<ViewEyes>,
+    city: Option<Res<crate::world::City>>,
+    target: Query<(&Obj, &Transform, Has<Vehicle>), With<CameraTarget>>,
+) {
+    if !chase.on {
+        if eyes.wide.is_some() {
+            eyes.wide = None;
+        }
+        chase.views.clear();
+        chase.eyes.clear();
+        return;
+    }
+    if eyes.wide != Some(CHASE_RANGE) {
+        eyes.wide = Some(CHASE_RANGE);
+    }
+    let n = eyes.cams.len().max(1);
+    let chase = &mut *chase;
+    chase.views.resize(n, ChaseState::default());
+    chase.eyes.resize(n, None);
+    let dt = time.delta_secs().min(0.1);
+    for p in 0..n {
+        // A view without a followed object (dead player) keeps its last eye.
+        let Some((obj, tf, driving)) = target.iter().find(|(o, ..)| n == 1 || o.player == Some(p as u8)) else {
+            continue;
+        };
+        let rig = if driving { &CHASE_DRIVING } else { &CHASE_ON_FOOT };
+        let heading = (tf.rotation * Vec3::Z).with_y(0.0).normalize_or(Vec3::Z);
+        let want = heading.x.atan2(heading.z);
+        let st = &mut chase.views[p];
+        // Speed as a fraction of a fast car's (the rotating view's pitch
+        // saturates near 0x100).
+        let speed = (obj.speed.unsigned_abs() as f32 / 300.0).min(1.0);
+        if !st.init {
+            st.yaw = want;
+            st.reach = 1.0;
+            st.init = true;
+        }
+        // Swing round after the heading: the car's camera lags, more when
+        // slow; on foot it turns with the player.
+        let rate = if driving { 1.5 + 4.5 * speed } else { 12.0 };
+        let d = (want - st.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        st.yaw += d * (1.0 - (-rate * dt).exp());
+        let dir = Vec3::new(st.yaw.sin(), 0.0, st.yaw.cos());
+        let right = dir.cross(Vec3::Y);
+        let back = if driving { rig.back * (1.0 + 0.45 * speed) } else { rig.back };
+        let pivot = tf.translation + Vec3::Y * rig.pivot + right * rig.right;
+        let wanted = tf.translation - dir * back + Vec3::Y * rig.up + right * rig.right;
+        // Pull in towards the pivot rather than go into a building; ease
+        // back out once clear.
+        let mut free = 1.0f32;
+        if let Some(city) = city.as_deref() {
+            const STEPS: usize = 24;
+            for i in 1..=STEPS {
+                let t = i as f32 / STEPS as f32;
+                let q = pivot.lerp(wanted, t);
+                let (x, y, h) = (
+                    q.x * crate::world::SQUARE,
+                    q.z * crate::world::SQUARE,
+                    q.y * H_PER_SQUARE,
+                );
+                if city.blocked(x, y, h - 12.0, 24.0, 0.0) {
+                    free = ((i - 1) as f32 / STEPS as f32).max(0.1);
+                    break;
+                }
+            }
+        }
+        st.reach = if free < st.reach { free } else { (st.reach + 2.0 * dt).min(free) };
+        let eye = pivot.lerp(wanted, st.reach);
+        let look = tf.translation + dir * rig.ahead + Vec3::Y * rig.look_up + right * rig.right;
+        chase.eyes[p] = Some(Transform::from_translation(eye).looking_at(look, Vec3::Y));
     }
 }
 
@@ -432,6 +589,7 @@ impl Plugin for CameraPlugin {
             .init_resource::<MinimapYaw>()
             .init_resource::<ViewEyes>()
             .init_resource::<TvCamera>()
+            .init_resource::<Chase>()
             .add_plugins(postfx::PostFxPlugin)
             .add_systems(PreUpdate, follow_settings)
             .add_systems(Update, view_size_keys.run_if(in_state(AppState::Playing)))
@@ -489,6 +647,7 @@ impl Plugin for CameraPlugin {
                     toggle_mode,
                     turn_views,
                     tv_camera,
+                    chase_views,
                     place_game_camera,
                     place_extra_views,
                     free_controls,
@@ -945,11 +1104,17 @@ fn place_game_camera(
     rotating: Res<RotatingView>,
     angles: Res<ViewAngles>,
     tv: Res<TvCamera>,
+    chase: Res<Chase>,
     cam: Single<(&mut GameCamera, &mut Transform)>,
 ) {
     let (mut cam, mut transform) = cam.into_inner();
     let pos = eye(eyes.cams.first().unwrap_or(&GameCam::default()));
-    if cam.mode == CameraMode::Follow {
+    if cam.mode == CameraMode::Follow
+        && let Some(t) = chase.eye(0)
+    {
+        *transform = t;
+        cam.free.focus = Vec3::new(pos.x, 1.0, pos.z);
+    } else if cam.mode == CameraMode::Follow {
         let angle = if tv.active {
             Some(ViewAngle {
                 yaw: tv.yaw,
@@ -967,10 +1132,13 @@ fn place_extra_views(
     eyes: Res<ViewEyes>,
     rotating: Res<RotatingView>,
     angles: Res<ViewAngles>,
+    chase: Res<Chase>,
     mut q: Query<(&ExtraView, &mut Transform)>,
 ) {
     for (v, mut transform) in &mut q {
-        if let Some(game) = eyes.cams.get(v.0 as usize) {
+        if let Some(t) = chase.eye(v.0 as usize) {
+            *transform = t;
+        } else if let Some(game) = eyes.cams.get(v.0 as usize) {
             let angle = rotating
                 .0
                 .then(|| angles.0.get(v.0 as usize).copied().unwrap_or_default());

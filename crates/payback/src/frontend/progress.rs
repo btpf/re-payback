@@ -31,6 +31,7 @@
 //! | `frame_limit` | frames a second, 0 = none (port-added; 30, 60, 120, 144) |
 //! | `zoom_in_map` | 0 / 1: the level-start zoom-in map of software rendering (`hud::zoom`, default 1) |
 //! | `view_size` | 3-D view size /256, 176..256 in steps of 16 (config field 12, `DAT_0114c310`; '-' / '=' in game, software rendering) |
+//! | `perspective` | `original` (the game's overhead camera, default) or `experimental` (port-added: a chase camera behind the vehicle, over the shoulder on foot; `camera::chase`) |
 //! | `minimap_3d` | 0 / 1: the rotating view's tilted minimap, also without the rotating view (port-added, default 0; forced on by the rotating view) |
 //! | `hardware` | 0 software / 1 hardware renderer (config field 19, `DAT_0114c7d8`; forces `gouraud = 1`, `motion_blur = 0`) |
 //! | `resolution` | window size in physical pixels, `<w>x<h>`; absent = the default window |
@@ -439,6 +440,10 @@ pub struct Settings {
     /// rotating view always uses it, as in the original; see
     /// [`Settings::minimap_3d_on`].
     pub minimap_3d: bool,
+    /// "Perspective: Experimental" (port-added, default off): a render-only
+    /// chase camera behind the vehicle and over the shoulder on foot
+    /// (`camera::chase`); the rotating view does not apply while it is on.
+    pub experimental_perspective: bool,
     /// Hardware (Warp3D) rendering, config field 19 (`DAT_0114c7d8`).
     pub hardware: bool,
     /// Window size in physical pixels (PaybackSetup's screen mode); None =
@@ -555,6 +560,7 @@ impl Default for Settings {
             gouraud: true,
             rotating_view: false,
             minimap_3d: false,
+            experimental_perspective: false,
             // Port default (user choice); the original starts in software.
             hardware: true,
             resolution: None,
@@ -615,6 +621,7 @@ impl Settings {
                 "gouraud" => s.gouraud = v == "1",
                 "rotating_view" => s.rotating_view = v == "1",
                 "minimap_3d" => s.minimap_3d = v == "1",
+                "perspective" => s.experimental_perspective = v == "experimental",
                 "hardware" => s.hardware = v == "1",
                 "resolution" => s.resolution = super::display::parse_size(v).or(s.resolution),
                 "window_mode" => s.window_mode = super::display::WindowChoice::parse(v).unwrap_or(s.window_mode),
@@ -685,6 +692,10 @@ impl Settings {
         t += &format!("gouraud = {}\n", b(self.gouraud));
         t += &format!("rotating_view = {}\n", b(self.rotating_view));
         t += &format!("minimap_3d = {}\n", b(self.minimap_3d));
+        t += &format!(
+            "perspective = {}\n",
+            if self.experimental_perspective { "experimental" } else { "original" }
+        );
         t += &format!("hardware = {}\n", b(self.hardware));
         if let Some((w, h)) = self.resolution {
             t += &format!("resolution = {w}x{h}\n");

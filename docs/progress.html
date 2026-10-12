@@ -36,6 +36,7 @@ const DATA = {
     { name: "City rendering, water, weather, effects and lens flares", status: "partial", pct: 93, weight: 14,
       notes: [
         "Cubes, slopes, alpha and genlocked faces, original units and camera; water as displaced screen-space sky; rotating view, motion blur, per-view effects in split screen.",
+        "Experimental perspective (port-added setting, off by default): a render-only chase camera behind the driven vehicle and over the shoulder on foot, pulled in by walls, effect sprites facing it; the simulation keeps its top-down camera, so spawns and replays are unchanged.",
         "Weather, lightning and palette flash, lens flares with ghosts (occluded by the city and other models), explosions, smoke, debris, traffic-light and crossing swaps; direction arrows and checkpoint marker.",
         "Gouraud lighting, on by default: sun shadows, static lamps, up to 1000 dynamic lights (510 on WebGL2); night headlight polygons (parts below the car's ground drawn at road depth); object face modes 3/4/5.",
         "Palette-space blending (additive, subtract, average, shine) with a palette snap; hardware (Warp3D-style) mode with 16-bit dithered output, now the default renderer (port choice); free aspect by default.",
