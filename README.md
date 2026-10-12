@@ -4,7 +4,7 @@ A reverse-engineered reimplementation of [Payback](https://en.wikipedia.org/wiki
 
 If there are any issues, please open an issue or PR with screenshot preferably and I would happily review the changes. 
 
-![](https://private-user-images.githubusercontent.com/61168382/670853452-1c722d22-5d59-4d39-82ff-dae729981208.png)
+![](https://github.com/user-attachments/assets/1c722d22-5d59-4d39-82ff-dae729981208)
 ### Features
 
 - A from-scratch Rust and Bevy reimplementation of *Payback* (Apex Designs, 2001), built from reverse-engineering the original Amiga and Mac releases.
