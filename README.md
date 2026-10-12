@@ -4,7 +4,7 @@ A reverse-engineered reimplementation of [Payback](https://en.wikipedia.org/wiki
 
 If there are any issues, please open an issue or PR with screenshot preferably and I would happily review the changes. 
 
-![](https://private-user-images.githubusercontent.com/61168382/670853452-1c722d22-5d59-4d39-82ff-dae729981208.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3OTE3NDUxNzMsIm5iZiI6MTc5MTc0NDg3MywicGF0aCI6Ii82MTE2ODM4Mi82NzA4NTM0NTItMWM3MjJkMjItNWQ1OS00ZDM5LTgyZmYtZGFlNzI5OTgxMjA4LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjEwMTElMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYxMDExVDE4NTQzM1omWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPWUyNzY1N2RlMTU2ZWI4MmY3Njk3OTQ2YTNkZTk0NGE1NDE0NzAyODAwYmNjYjFmMWExMDU2NjE3ZTQyNGZkNmUmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0JnJlc3BvbnNlLWNvbnRlbnQtdHlwZT1pbWFnZSUyRnBuZyJ9.76XErXQMsCwFO921Fcbcs0kime2i8l1Se8DYzYqQalI)
+![](https://private-user-images.githubusercontent.com/61168382/670853452-1c722d22-5d59-4d39-82ff-dae729981208.png)
 ### Features
 
 - A from-scratch Rust and Bevy reimplementation of *Payback* (Apex Designs, 2001), built from reverse-engineering the original Amiga and Mac releases.
