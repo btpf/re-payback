@@ -447,9 +447,11 @@ pub(crate) fn eject(
         }
     });
     commands.entity(ve).remove::<(CameraTarget, Arsenal)>();
+    // Parked (`+0x910 = 5`), door open; the speed is kept, so a car left
+    // at speed rolls on and slows with no throttle (`GetOutVehicle` @
+    // 10065660 / OS4 `FUN_01052398` zero only the new person's `+0x18`).
     v.state = State::Parked;
     v.player = None;
-    v.speed = 0;
     drive.door = DOOR_OPEN;
     Some(pe)
 }
