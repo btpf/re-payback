@@ -188,6 +188,16 @@ impl Dialog {
         }
     }
 
+    /// Port addition (the cheat menu's mission select): drop everything
+    /// queued and the rest of the message being typed, and close the box.
+    pub fn cut(&mut self) {
+        self.queue.clear();
+        self.pending.clear();
+        if self.open.is_some() {
+            self.queue.push_back(Entry::Close);
+        }
+    }
+
     /// `Dialog_Flush` (68k `FUN_00035f76`, OS4 `FUN_01015ce4`): drop the
     /// queued entries from the first queued Open on; what is already shown
     /// and the last-message list stay.

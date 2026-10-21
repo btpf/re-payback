@@ -32,6 +32,7 @@ pub mod display;
 mod levels;
 mod menus;
 mod misc;
+mod missions;
 mod model;
 mod multiplayer;
 pub mod progress;
@@ -694,11 +695,12 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
     }
     // F12 in a single-player level opens the cheat menu (port addition,
     // `crate::cheats`; debug `--cheat-menu [--menu-item <n>]` /
-    // `--cheat-vehicle <type>` after 3 s), pausing the game like the pause
-    // menu.
+    // `--cheat-vehicle <type>` / `--mission-menu` after 3 s), pausing the
+    // game like the pause menu.
+    let debug_missions = crate::args().any(|a| a == "--mission-menu");
     let debug_cheats = playing
         && !fe.debug_cheats
-        && (crate::args().any(|a| a == "--cheat-menu") || crate::arg("--cheat-vehicle").is_some())
+        && (crate::args().any(|a| a == "--cheat-menu") || crate::arg("--cheat-vehicle").is_some() || debug_missions)
         && env.time.elapsed_secs() > 3.0;
     if playing
         && fe.stack.is_empty()
@@ -710,7 +712,14 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         fe.debug_cheats = true;
         env.virtual_time.pause();
         let item = crate::arg("--menu-item").and_then(|v| v.parse().ok()).filter(|_| debug_cheats);
-        fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, item.unwrap_or(0))));
+        let missions = env.spec.map.parse::<u8>().ok().filter(|_| matches!(*env.mode, GameMode::Story));
+        let missions = missions.map_or(&[][..], |c| crate::mission::levels::missions(c, env.spec.level));
+        if debug_cheats && debug_missions {
+            fe.stack.push(Box::new(cheats::CheatMenu::new(&env.cheats, missions)));
+            fe.stack.push(Box::new(missions::MissionMenu::new(&env.data, &env.texts, missions, item.unwrap_or(0))));
+        } else {
+            fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, missions, item.unwrap_or(0))));
+        }
         if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
             fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));
         }

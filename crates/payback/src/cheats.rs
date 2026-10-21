@@ -1,7 +1,8 @@
 //! Cheats (port addition, not in the original; docs/re/frontend_menus.md
 //! "Cheat menu"): F12 in a single-player level opens a menu
 //! (`crate::frontend::cheats`) with God mode, Vehicle god mode, All
-//! weapons, Spawn vehicle and the wanted level (clear, up, down).
+//! weapons, Spawn vehicle, the wanted level (clear, up, down) and Mission
+//! select.
 //!
 //! Every cheat changes the simulation, so the menu only queues it
 //! ([`Cheats::queue`]); [`apply`] takes the queue at the start of the next
@@ -49,10 +50,19 @@
 //!   react to the new level as to any other change: pursuit from 3,
 //!   police in traffic from 4, roadblocks from 5, cops on foot from 3.
 //!
+//! - **Start mission** ("Mission select", `crate::frontend::missions`): the
+//!   chosen mission's phone event goes to the level script as if its phone
+//!   had been answered ([`Cheat::Mission`]). A mission in progress is ended
+//!   first without a result ([`crate::mission::Script::abort_mission`]).
+//!   With "Take me there" the player (on foot, or the vehicle they drive)
+//!   is first moved to a free spot by the mission's phone, or by the car
+//!   level 2-1's first mission starts in ([`travel_to`]), and the cameras
+//!   snap there; otherwise the mission starts where the player is.
+//!
 //! Debug: `--cheat-script <tick>:<cheat>,...` queues cheats at those ticks
 //! of a recorded game (`god`, `nogod`, `vgod`, `novgod`, `weapons`,
 //! `vehicle=<type>[:<paint>]`,
-//! `wanted+`, `wanted-`, `wanted0`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
+//! `wanted+`, `wanted-`, `wanted0`, `mission=<event>[:go]`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
 //! menus (`crate::frontend`).
 
 use crate::camera::CameraTarget;
@@ -92,6 +102,10 @@ const EV_WANTED: u32 = 4;
 const EV_CLEAR_WANTED: u32 = 5;
 /// Argument: 1 on, 0 off.
 const EV_VEHICLE_GOD: u32 = 6;
+/// Argument: the phone event that starts the mission, plus
+/// [`MISSION_TRAVEL`] when the player is taken to its start.
+const EV_MISSION: u32 = 7;
+const MISSION_TRAVEL: i32 = 1 << 30;
 
 /// One cheat action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +121,10 @@ pub enum Cheat {
     /// Wanted level up (+1) or down (-1).
     Wanted(i32),
     ClearWanted,
+    /// Start the mission of this phone event (`mission::levels::missions`),
+    /// as if its phone had been answered; with `travel`, at its phone (or
+    /// the car it starts in).
+    Mission { event: i32, travel: bool },
 }
 
 impl Cheat {
@@ -118,6 +136,7 @@ impl Cheat {
             Cheat::Vehicle(k, c) => (EV_VEHICLE, k as i32 | (c as i32) << 8),
             Cheat::Wanted(d) => (EV_WANTED, d.signum()),
             Cheat::ClearWanted => (EV_CLEAR_WANTED, 0),
+            Cheat::Mission { event, travel } => (EV_MISSION, event | if travel { MISSION_TRAVEL } else { 0 }),
         };
         CheatEvent { tick, kind, arg }
     }
@@ -130,6 +149,7 @@ impl Cheat {
             EV_VEHICLE => vehicle(e.arg & 0xff, e.arg >> 8)?,
             EV_WANTED if e.arg != 0 => Cheat::Wanted(e.arg.signum()),
             EV_CLEAR_WANTED => Cheat::ClearWanted,
+            EV_MISSION => Cheat::Mission { event: e.arg & !MISSION_TRAVEL, travel: e.arg & MISSION_TRAVEL != 0 },
             _ => return None,
         })
     }
@@ -146,6 +166,11 @@ impl Cheat {
             "wanted+" => Cheat::Wanted(1),
             "wanted-" => Cheat::Wanted(-1),
             "wanted0" => Cheat::ClearWanted,
+            v if v.starts_with("mission=") => {
+                let v = &v["mission=".len()..];
+                let (ev, travel) = v.strip_suffix(":go").map_or((v, false), |e| (e, true));
+                Cheat::Mission { event: ev.parse().ok()?, travel }
+            }
             v => {
                 let v = v.strip_prefix("vehicle=")?;
                 let (k, c) = v.split_once(':').unwrap_or((v, "0"));
@@ -219,6 +244,7 @@ pub struct CheatsPlugin;
 impl Plugin for CheatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Cheats>()
+
             .add_systems(OnEnter(AppState::Playing), |mut c: ResMut<Cheats>| *c = Cheats::default());
     }
 }
@@ -274,6 +300,7 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
             }
             Cheat::Wanted(d) => set_wanted(world, |w| w + d),
             Cheat::ClearWanted => set_wanted(world, |_| 0),
+            Cheat::Mission { event, travel } => start_mission(world, event, travel),
         }
     }
     let wanted = player(world).and_then(|(e, ..)| world.get::<Obj>(e)).map_or(0, |o| o.wanted);
@@ -289,6 +316,108 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
             o.god = want;
         }
     }
+}
+
+/// Send the phone event `ev` to the level script with no mission running,
+/// as answering its phone does (`mission::eval`): the script's phone
+/// handler briefs the mission, sets it up and makes it the current one. A
+/// mission in progress is ended first, without a result.
+fn start_mission(world: &mut World, ev: i32, travel: bool) {
+    let Some(mut level) = world.resource_mut::<crate::mission::ActiveLevel>().0.take() else {
+        warn!("mission {ev}: no level script");
+        return;
+    };
+    {
+        let mut s = crate::mission::Script::new(world);
+        if s.cur_slot() != -1 {
+            s.abort_mission();
+        }
+    }
+    if travel {
+        travel_to(world, ev);
+    }
+    level.event(&mut crate::mission::Script::new(world), ev);
+    world.resource_mut::<crate::mission::ActiveLevel>().0 = Some(level);
+}
+
+/// Take the player to where mission `ev` starts
+/// (`mission::levels::MissionInfo::from`): a free spot by its phone (on
+/// foot within the half square a phone is answered from, `mission::eval`),
+/// or by the car it starts in. The player's vehicle goes with them (the
+/// driver is part of the vehicle object while driving). Speed is zeroed and
+/// the cameras snap to the new place (`camera::snap`). Nothing happens when
+/// there is no free spot.
+fn travel_to(world: &mut World, ev: i32) {
+    let spec = world.resource::<crate::level::LevelSpec>().clone();
+    let Some(city) = spec.map.parse::<u8>().ok() else { return };
+    let Some(info) = crate::mission::levels::missions(city, spec.level).iter().find(|m| m.event == ev) else {
+        return;
+    };
+    let target = {
+        let mut s = crate::mission::Script::new(world);
+        if info.from >= 0 {
+            s.phone_coords(info.from).map(|(p, _)| p)
+        } else {
+            let actor = s.actors(-info.from).first().copied();
+            actor.and_then(|e| world.get::<Obj>(e)).map(|o| o.pos)
+        }
+    };
+    let Some(target) = target else {
+        warn!("mission {ev}: no start point");
+        return;
+    };
+    let Some((player, _, heading)) = player(world) else { return };
+    let vehicle = world.get::<Vehicle>(player).map(|v| v.kind);
+    let body = match vehicle {
+        Some(kind) => {
+            let model = world.get::<Obj>(player).map(|o| o.model).unwrap_or_default();
+            let info = world.resource::<ObjectLibrary>().model(model).info.clone();
+            Body {
+                hw: if kind == vk::HELICOPTER { info.radius } else { info.radius.max(0x100) },
+                front: info.max_y.max(0x100),
+                rear: info.min_y.max(0x100),
+            }
+        }
+        // A person, as the boarding code's door clearance.
+        None => Body { hw: 0x80, front: 0x80, rear: 0x80 },
+    };
+    let slot = world.get::<Obj>(player).map(|o| o.slot);
+    let mut others: Vec<(u32, IVec3, i32)> = {
+        let mut q = world.query_filtered::<&Obj, With<Vehicle>>();
+        let lib = world.resource::<ObjectLibrary>();
+        q.iter(world)
+            .filter(|o| Some(o.slot) != slot)
+            .map(|o| {
+                let i = &lib.model(o.model).info;
+                (o.slot, o.pos, i.radius.max(i.max_y).max(i.min_y))
+            })
+            .collect()
+    };
+    others.sort_unstable_by_key(|o| o.0);
+    let others: Vec<(IVec3, i32)> = others.into_iter().map(|o| (o.1, o.2)).collect();
+    let boat = vehicle == Some(vk::BOAT);
+    let spot = {
+        let city = world.get_resource::<City>();
+        let trig = world.resource::<Trig>();
+        city.and_then(|c| find_spot(c, trig, target, heading, &body, boat, &others))
+    };
+    let Some((at, level, water)) = spot else {
+        warn!("mission {ev}: no free spot by its start");
+        return;
+    };
+    if let Some(mut o) = world.get_mut::<Obj>(player) {
+        o.pos = at;
+        o.prev_pos = at;
+        o.floor_z = at.z;
+        o.level = level;
+        o.in_water = water;
+        o.vel = IVec3::ZERO;
+        o.speed = 0;
+    }
+    if let Some(mut t) = world.get_mut::<Transform>(player) {
+        t.translation = object_to_render(at.as_vec3());
+    }
+    crate::camera::snap(world);
 }
 
 /// The single player's object (on foot or driving): (entity, position,
@@ -493,6 +622,8 @@ mod tests {
             Cheat::Wanted(1),
             Cheat::Wanted(-1),
             Cheat::ClearWanted,
+            Cheat::Mission { event: 1100, travel: false },
+            Cheat::Mission { event: 20, travel: true },
         ] {
             let e = c.event(42);
             assert_eq!(e.tick, 42);
@@ -508,6 +639,8 @@ mod tests {
         assert_eq!(Cheat::parse("vehicle=11:3"), Some(Cheat::Vehicle(11, 3)));
         assert_eq!(Cheat::parse("vehicle=11:8"), None);
         assert_eq!(Cheat::parse("nogod"), Some(Cheat::God(false)));
+        assert_eq!(Cheat::parse("mission=200"), Some(Cheat::Mission { event: 200, travel: false }));
+        assert_eq!(Cheat::parse("mission=200:go"), Some(Cheat::Mission { event: 200, travel: true }));
         assert_eq!(Cheat::parse("vgod"), Some(Cheat::VehicleGod(true)));
         assert_eq!(Cheat::parse("novgod"), Some(Cheat::VehicleGod(false)));
         assert_eq!(Cheat::parse("wanted+"), Some(Cheat::Wanted(1)));

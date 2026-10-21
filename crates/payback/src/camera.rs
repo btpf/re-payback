@@ -847,6 +847,22 @@ fn follow_tick(
     *cam = views.0[0];
 }
 
+/// The cameras jump to the followed object on the next tick instead of
+/// easing there (the cheat menu's mission select moving the player,
+/// `crate::cheats`): every simulation camera and view eye starts afresh, as
+/// at level start.
+pub fn snap(world: &mut World) {
+    world.resource_mut::<GameCam>().initialised = false;
+    for c in &mut world.resource_mut::<ViewCams>().0 {
+        c.initialised = false;
+    }
+    let mut eyes = world.resource_mut::<ViewEyes>();
+    let eyes = &mut *eyes;
+    for c in eyes.follow.iter_mut().chain(eyes.prev.iter_mut()) {
+        c.initialised = false;
+    }
+}
+
 /// What the camera follows.
 #[derive(Clone, Copy)]
 enum Mode {

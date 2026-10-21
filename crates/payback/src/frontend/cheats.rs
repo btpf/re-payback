@@ -21,26 +21,30 @@ use crate::vehicles::TYPES;
 use bevy::math::{EulerRot, Quat, Vec3};
 
 /// The menu panel, as the pause menu's (virtual 50..269 × 26..229).
-fn panel(ui: &mut Ui) {
+pub(super) fn panel(ui: &mut Ui) {
     let (x0, x1) = (ui.vx(50), ui.vx(269));
     ui.back.darken(x0, 26, x1, 229);
 }
 
-const TITLE_Y: i32 = 34;
+pub(super) const TITLE_Y: i32 = 34;
 
 /// Menu lines.
-const ITEMS: usize = 7;
+const ITEMS: usize = 8;
+
+/// The "Mission select" line (`super::missions`).
+const MISSIONS: usize = 7;
 
 /// Line spacing of the items (virtual 200-line units).
-const LINE: i32 = 12;
+const LINE: i32 = 11;
 
-/// First item line (virtual 200-line units): seven items and the wanted
+/// First item line (virtual 200-line units): eight items and the wanted
 /// level above the "Esc" line at 0x9a.
-const TOP: i32 = 0x3a;
+const TOP: i32 = 0x37;
 
 /// Main cheat menu: God mode (On/Off), Vehicle god mode (On/Off), All
-/// weapons, Spawn vehicle, Clear wanted, Wanted up, Wanted down, and the
-/// wanted level below them.
+/// weapons, Spawn vehicle, Clear wanted, Wanted up, Wanted down, Mission
+/// select (dimmed where the level has no missions: Rampage, the
+/// jailbreak), and the wanted level below them.
 pub struct CheatMenu {
     sel: usize,
     /// God mode as it will be after the queued cheats.
@@ -49,22 +53,25 @@ pub struct CheatMenu {
     vehicle_god: bool,
     /// The wanted level as it will be after the queued cheats.
     wanted: i32,
+    /// The level's missions (`mission::levels::missions`).
+    missions: &'static [crate::mission::levels::MissionInfo],
 }
 
 impl CheatMenu {
     /// Showing the cheats as they will be once the queue is applied.
-    pub fn new(cheats: &Cheats) -> CheatMenu {
+    pub fn new(cheats: &Cheats, missions: &'static [crate::mission::levels::MissionInfo]) -> CheatMenu {
         CheatMenu {
             sel: 0,
             god: cheats.god_pending(),
             vehicle_god: cheats.vehicle_god_pending(),
             wanted: cheats.wanted_pending(),
+            missions,
         }
     }
 
     /// Debug (`--cheat-menu`, on line `--menu-item <n>`).
-    pub fn at(cheats: &Cheats, sel: usize) -> CheatMenu {
-        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats) }
+    pub fn at(cheats: &Cheats, missions: &'static [crate::mission::levels::MissionInfo], sel: usize) -> CheatMenu {
+        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats, missions) }
     }
 
     fn label(&self, cx: &Ctx, i: usize) -> String {
@@ -75,7 +82,8 @@ impl CheatMenu {
             3 => "Spawn vehicle".into(),
             4 => "Clear wanted".into(),
             5 => "Wanted up".into(),
-            _ => "Wanted down".into(),
+            6 => "Wanted down".into(),
+            _ => "Mission select".into(),
         }
     }
 
@@ -109,7 +117,9 @@ impl Screen for CheatMenu {
             return Step::Stay;
         }
         if (self.sel <= 1 && (input.left || input.right)) || input.fire {
-            cx.sound(Sfx::Select);
+            if !(self.sel == MISSIONS && self.missions.is_empty()) {
+                cx.sound(Sfx::Select);
+            }
             match self.sel {
                 0 => {
                     self.god = !self.god;
@@ -126,7 +136,16 @@ impl Screen for CheatMenu {
                 3 => return Step::Push(Box::new(VehicleSelect::new(cx.data, 0))),
                 4 => self.wanted(cx, Cheat::ClearWanted),
                 5 => self.wanted(cx, Cheat::Wanted(1)),
-                _ => self.wanted(cx, Cheat::Wanted(-1)),
+                6 => self.wanted(cx, Cheat::Wanted(-1)),
+                _ if self.missions.is_empty() => cx.sound(Sfx::Refuse),
+                _ => {
+                    return Step::Push(Box::new(super::missions::MissionMenu::new(
+                        cx.data,
+                        cx.texts,
+                        self.missions,
+                        0,
+                    )));
+                }
             }
         }
         Step::Stay
@@ -136,8 +155,13 @@ impl Screen for CheatMenu {
         panel(ui);
         ui.heading("CHEATS", TITLE_Y);
         for i in 0..ITEMS {
-            let c = if i == self.sel { ui.flash() } else { 1 };
-            ui.centred(&self.label(cx, i), ui.hy(TOP + LINE * i as i32), c);
+            let y = ui.hy(TOP + LINE * i as i32);
+            if i == MISSIONS && self.missions.is_empty() {
+                ui.centred_dim(&self.label(cx, i), y, 1);
+            } else {
+                let c = if i == self.sel { ui.flash() } else { 1 };
+                ui.centred(&self.label(cx, i), y, c);
+            }
         }
         let w = format!("Wanted level: {}/{}", self.wanted, MAX_WANTED);
         ui.centred(&w, ui.hy(TOP + LINE * ITEMS as i32), 2);
@@ -155,13 +179,66 @@ const DISTANCE: f32 = 4.4;
 const ELEVATION: f32 = 0.42;
 
 /// Spin per menu tick (a turn in 120 ticks, 4 s).
-const SPIN: i32 = 0x30;
+pub(super) const SPIN: i32 = 0x30;
 
 /// A vehicle model's bounding box centre and half diagonal, in model units.
 #[derive(Clone, Copy, Debug)]
-struct Size {
+pub(super) struct Size {
     centre: Vec3,
     radius: f32,
+}
+
+/// The bounding box of `Objects/<model>` and whether it has paintable
+/// faces (`objects::paintable`).
+pub(super) fn model_size(data: &GameData, model: &str) -> (Size, bool) {
+    let obj = data
+        .read(format!("Objects/{model}"))
+        .ok()
+        .and_then(|b| payback_formats::Obj::parse(&b).ok());
+    let paint = obj.as_ref().is_some_and(paintable);
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for v in obj.iter().flat_map(|o| o.vertices.iter()) {
+        let p = Vec3::new(v.x as f32, v.y as f32, v.z as f32);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    if lo.x > hi.x {
+        return (Size { centre: Vec3::ZERO, radius: 100.0 }, paint);
+    }
+    (Size { centre: (lo + hi) / 2.0, radius: ((hi - lo) / 2.0).length().max(1.0) }, paint)
+}
+
+/// A vehicle model turning on its vertical axis by `spin`, seen from above
+/// at [`ELEVATION`], its bounding box centred below the menu title,
+/// `slide` quarters of its distance to the side; `near` scales its
+/// distance (1: the vehicle selection's) and `drop` its offset below the
+/// screen centre, in model distances (the vehicle selection's: 0.09).
+pub(super) fn turning_model(
+    path: &'static str,
+    size: Size,
+    spin: i32,
+    slide: i32,
+    paint: Option<u8>,
+    near: f32,
+    drop: f32,
+) -> ModelView {
+    let z = size.radius * MODEL_UNIT * DISTANCE * near;
+    let a = |v: i32| v as f32 / TURN as f32 * std::f32::consts::TAU;
+    // The model's vertical (z) is the render z axis: spin about it,
+    // then tip it back so the roof faces up and towards the camera.
+    let q = Quat::from_rotation_x(-(std::f32::consts::FRAC_PI_2 - ELEVATION)) * Quat::from_rotation_z(a(spin));
+    let (rz, ry, rx) = q.to_euler(EulerRot::ZYX);
+    let unit = |r: f32| (r / std::f32::consts::TAU * TURN as f32).round() as i32;
+    // `frontend::model::rotation`: Rz(-[5]) · Ry(-[4]) · Rx([3]).
+    let rot = [unit(rx).rem_euclid(TURN), unit(-ry).rem_euclid(TURN), unit(-rz).rem_euclid(TURN)];
+    let target = Vec3::new(slide as f32 * z / 4.0, drop * z, z);
+    let pos = target - flip(q * flip(size.centre * MODEL_UNIT));
+    ModelView {
+        path,
+        pos: [pos.x.round() as i32, pos.y.round() as i32, pos.z.round() as i32],
+        rot,
+        paint,
+    }
 }
 
 /// Choose a vehicle: its name over the rotating model, left/right to
@@ -191,21 +268,8 @@ impl VehicleSelect {
         let (sizes, paints) = VEHICLES
             .iter()
             .map(|&k| {
-                let obj = data
-                    .read(format!("Objects/{}", TYPES[k].model))
-                    .ok()
-                    .and_then(|b| payback_formats::Obj::parse(&b).ok());
-                let paints = if obj.as_ref().is_some_and(paintable) { PAINT_COUNT as u8 } else { 1 };
-                let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-                for v in obj.iter().flat_map(|o| o.vertices.iter()) {
-                    let p = Vec3::new(v.x as f32, v.y as f32, v.z as f32);
-                    lo = lo.min(p);
-                    hi = hi.max(p);
-                }
-                if lo.x > hi.x {
-                    return (Size { centre: Vec3::ZERO, radius: 100.0 }, paints);
-                }
-                (Size { centre: (lo + hi) / 2.0, radius: ((hi - lo) / 2.0).length().max(1.0) }, paints)
+                let (size, paint) = model_size(data, TYPES[k].model);
+                (size, if paint { PAINT_COUNT as u8 } else { 1 })
             })
             .unzip();
         VehicleSelect {
@@ -298,23 +362,8 @@ impl Screen for VehicleSelect {
     /// The vehicle turning on its vertical axis, seen from above at
     /// [`ELEVATION`], its bounding box centred below the name.
     fn model(&self) -> Option<ModelView> {
-        let size = self.sizes.get(self.shown)?;
-        let z = size.radius * MODEL_UNIT * DISTANCE;
-        let a = |v: i32| v as f32 / TURN as f32 * std::f32::consts::TAU;
-        // The model's vertical (z) is the render z axis: spin about it,
-        // then tip it back so the roof faces up and towards the camera.
-        let q = Quat::from_rotation_x(-(std::f32::consts::FRAC_PI_2 - ELEVATION)) * Quat::from_rotation_z(a(self.spin));
-        let (rz, ry, rx) = q.to_euler(EulerRot::ZYX);
-        let unit = |r: f32| (r / std::f32::consts::TAU * TURN as f32).round() as i32;
-        // `frontend::model::rotation`: Rz(-[5]) · Ry(-[4]) · Rx([3]).
-        let rot = [unit(rx).rem_euclid(TURN), unit(-ry).rem_euclid(TURN), unit(-rz).rem_euclid(TURN)];
-        let target = Vec3::new(self.slide as f32 * z / 4.0, 0.09 * z, z);
-        let pos = target - flip(q * flip(size.centre * MODEL_UNIT));
-        Some(ModelView {
-            path: TYPES[VEHICLES[self.shown]].model,
-            pos: [pos.x.round() as i32, pos.y.round() as i32, pos.z.round() as i32],
-            rot,
-            paint: (self.paints[self.shown] > 1).then_some(self.colours[self.shown]),
-        })
+        let size = *self.sizes.get(self.shown)?;
+        let paint = (self.paints[self.shown] > 1).then_some(self.colours[self.shown]);
+        Some(turning_model(TYPES[VEHICLES[self.shown]].model, size, self.spin, self.slide, paint, 1.0, 0.09))
     }
 }

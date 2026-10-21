@@ -726,6 +726,49 @@ impl<'w> Script<'w> {
         }
     }
 
+    /// Port addition (the cheat menu's mission select, `crate::cheats`): end
+    /// the running mission without a result, so another can start where
+    /// the player is. Its triggers go (and with them its timer and target
+    /// arrow), the message box (`Dialog::cut`), the checkpoint marker, lap and race lights,
+    /// forced traffic, bomb id and script sounds; its actors are removed,
+    /// apart from the level set-up's own ([`MissionState::level_ids`]) and
+    /// the player's object (a mission vehicle the player drives is released
+    /// to them). The level script's own variables are reset by the next
+    /// mission's set-up, as when its phone is answered.
+    ///
+    /// [`MissionState::level_ids`]: super::MissionState::level_ids
+    pub fn abort_mission(&mut self) {
+        self.kill_all_mt();
+        self.world.resource_mut::<Dialog>().cut();
+        self.show_checkpoint_marker(false);
+        self.set_lap(0, 0);
+        self.set_race_lights(-1);
+        self.set_forced_traffic(-1);
+        self.set_projectile_id(-1);
+        for slot in 0..10 {
+            self.delete_sound(slot);
+        }
+        let keep = self.state().level_ids.clone();
+        let player = self.player();
+        let actors = crate::sim::table_order(
+            self.world
+                .query::<(Entity, &Obj)>()
+                .iter(self.world)
+                .filter(|(_, o)| o.script_id != -1 && !keep.contains(&o.script_id)),
+        );
+        for e in actors {
+            let mine = Some(e) == player || self.world.get::<Obj>(e).is_some_and(|o| o.state == State::Player);
+            if mine {
+                if let Some(mut o) = self.world.get_mut::<Obj>(e) {
+                    o.script_id = -1;
+                }
+            } else {
+                self.world.entity_mut(e).despawn();
+            }
+        }
+        self.set_cur_slot(-1);
+    }
+
     /// `Actor_Kill(id)`: health -71 (blown apart).
     pub fn actor_kill(&mut self, id: i32) {
         self.for_actors(id, |o| o.health = -71);

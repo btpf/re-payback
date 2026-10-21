@@ -68,6 +68,9 @@ pub struct MissionState {
     /// ~49717) and at level start, and every exit flips it first, so the
     /// first alternating exit of a frame is on the driver's door side.
     pub exit_toggle: bool,
+    /// Script ids of the actors the level's own set-up created (port
+    /// addition, kept by [`Script::abort_mission`]).
+    pub level_ids: Vec<i32>,
 }
 
 impl Default for MissionState {
@@ -86,6 +89,7 @@ impl Default for MissionState {
             forced_traffic: -1,
             projectile_id: -1,
             exit_toggle: true,
+            level_ids: Vec::new(),
         }
     }
 }
@@ -210,6 +214,14 @@ fn start_level(world: &mut World) {
         };
     }
     script.init(&mut Script::new(world));
+    // The level's own actors, for `Script::abort_mission`.
+    let ids: Vec<i32> = world
+        .query::<&crate::sim::Obj>()
+        .iter(world)
+        .map(|o| o.script_id)
+        .filter(|&id| id != -1)
+        .collect();
+    world.resource_mut::<MissionState>().level_ids = ids;
     world.resource_mut::<ActiveLevel>().0 = Some(script);
 }
 

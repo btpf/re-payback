@@ -10,7 +10,9 @@
 //! Also: `--mac-only` (ignore the Amiga data), `--hardware` / `--software`
 //! (render mode), `--perspective original|experimental` (`camera::Chase`),
 //! `--seed <n>`, `--intro` / `--no-intro`, `--pad-debug`,
-//! `--cheat-menu`; the rest are test switches read where they are used.
+//! `--cheat-menu`, `--mission-menu`; the rest are test switches read where
+//! they are used. F12 in a single-player level opens the cheat menu, with
+//! the mission selector (`frontend::missions`) in it.
 //!
 //! The game data is searched for (env, `--data`, `data/` next to the
 //! executable, `payback-data.cfg`, `extracted/` above the executable or the

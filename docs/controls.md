@@ -65,8 +65,12 @@ share one keyboard).
 
 ## Menus
 
-Every front-end screen, the pause menu, the cheat menu and the graphics
-options take the pad: d-pad or left stick moves (held directions repeat
+F12 in a single-player level opens the cheat menu (port addition); its
+"Mission select" picks any mission of a story level and starts it, by
+default taking the player to its phone first (`docs/re/frontend_menus.md` §12, §13).
+
+Every front-end screen, the pause menu, the cheat menu, the mission
+selector and the graphics options take the pad: d-pad or left stick moves (held directions repeat
 after 0.4 s, every 0.1 s), A / Cross (or Start) confirms, B / Circle goes
 back. In a level, Start opens the pause menu and Start or B resumes.
 The keyboard keeps its original behaviour (no auto-repeat). Triggers,
