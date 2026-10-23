@@ -50,6 +50,11 @@
 //!   react to the new level as to any other change: pursuit from 3,
 //!   police in traffic from 4, roadblocks from 5, cops on foot from 3.
 //!
+//! - **Lives**: up or down one, 0..[`MAX_LIVES`] (`PlayerSession::lives`,
+//!   what `AddLives` changes).
+//! - **Teleport to target**: the player (on foot, or the vehicle they
+//!   drive) to a free spot by the objective arrow's target
+//!   (`arrow::Seek::target`), as "Take me there" does ([`move_player_near`]).
 //! - **Start mission** ("Mission select", `crate::frontend::missions`): the
 //!   chosen mission's phone event goes to the level script as if its phone
 //!   had been answered ([`Cheat::Mission`]). A mission in progress is ended
@@ -62,7 +67,7 @@
 //! Debug: `--cheat-script <tick>:<cheat>,...` queues cheats at those ticks
 //! of a recorded game (`god`, `nogod`, `vgod`, `novgod`, `weapons`,
 //! `vehicle=<type>[:<paint>]`,
-//! `wanted+`, `wanted-`, `wanted0`, `mission=<event>[:go]`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
+//! `wanted+`, `wanted-`, `wanted0`, `lives+`, `lives-`, `teleport`, `mission=<event>[:go]`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
 //! menus (`crate::frontend`).
 
 use crate::camera::CameraTarget;
@@ -87,6 +92,9 @@ pub const VEHICLES: [usize; 26] = [
 /// Ammo per weapon after "All weapons" (shown as 00999 on the HUD).
 pub const FULL_AMMO: i32 = 999;
 
+/// Most lives the cheat menu gives.
+pub const MAX_LIVES: i32 = 99;
+
 /// Highest wanted level (six sirens on the HUD; the crime tables top out
 /// at 6, `sim::police`).
 pub const MAX_WANTED: i32 = 6;
@@ -106,6 +114,9 @@ const EV_VEHICLE_GOD: u32 = 6;
 /// [`MISSION_TRAVEL`] when the player is taken to its start.
 const EV_MISSION: u32 = 7;
 const MISSION_TRAVEL: i32 = 1 << 30;
+/// Argument: +1 up, -1 down.
+const EV_LIVES: u32 = 8;
+const EV_TELEPORT: u32 = 9;
 
 /// One cheat action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +136,10 @@ pub enum Cheat {
     /// as if its phone had been answered; with `travel`, at its phone (or
     /// the car it starts in).
     Mission { event: i32, travel: bool },
+    /// Lives up (+1) or down (-1).
+    Lives(i32),
+    /// To the objective arrow's target.
+    Teleport,
 }
 
 impl Cheat {
@@ -137,6 +152,8 @@ impl Cheat {
             Cheat::Wanted(d) => (EV_WANTED, d.signum()),
             Cheat::ClearWanted => (EV_CLEAR_WANTED, 0),
             Cheat::Mission { event, travel } => (EV_MISSION, event | if travel { MISSION_TRAVEL } else { 0 }),
+            Cheat::Lives(d) => (EV_LIVES, d.signum()),
+            Cheat::Teleport => (EV_TELEPORT, 0),
         };
         CheatEvent { tick, kind, arg }
     }
@@ -150,6 +167,8 @@ impl Cheat {
             EV_WANTED if e.arg != 0 => Cheat::Wanted(e.arg.signum()),
             EV_CLEAR_WANTED => Cheat::ClearWanted,
             EV_MISSION => Cheat::Mission { event: e.arg & !MISSION_TRAVEL, travel: e.arg & MISSION_TRAVEL != 0 },
+            EV_LIVES if e.arg != 0 => Cheat::Lives(e.arg.signum()),
+            EV_TELEPORT => Cheat::Teleport,
             _ => return None,
         })
     }
@@ -166,6 +185,9 @@ impl Cheat {
             "wanted+" => Cheat::Wanted(1),
             "wanted-" => Cheat::Wanted(-1),
             "wanted0" => Cheat::ClearWanted,
+            "lives+" => Cheat::Lives(1),
+            "lives-" => Cheat::Lives(-1),
+            "teleport" => Cheat::Teleport,
             v if v.starts_with("mission=") => {
                 let v = &v["mission=".len()..];
                 let (ev, travel) = v.strip_suffix(":go").map_or((v, false), |e| (e, true));
@@ -198,6 +220,8 @@ pub struct Cheats {
     pub vehicle_god: bool,
     /// The player's wanted level after the last tick (a copy, for the menu).
     pub wanted: i32,
+    /// The lives after the last tick (a copy, for the menu).
+    pub lives: i32,
     pub queue: Vec<Cheat>,
 }
 
@@ -209,6 +233,15 @@ impl Cheats {
             Cheat::Wanted(d) => (w + d).clamp(0, MAX_WANTED),
             Cheat::ClearWanted => 0,
             _ => w,
+        })
+    }
+
+    /// The lives as they will be once the queue is applied (the menu
+    /// shows this).
+    pub fn lives_pending(&self) -> i32 {
+        self.queue.iter().fold(self.lives, |l, c| match c {
+            Cheat::Lives(d) => (l + d).clamp(0, MAX_LIVES),
+            _ => l,
         })
     }
 
@@ -301,10 +334,23 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
             Cheat::Wanted(d) => set_wanted(world, |w| w + d),
             Cheat::ClearWanted => set_wanted(world, |_| 0),
             Cheat::Mission { event, travel } => start_mission(world, event, travel),
+            Cheat::Lives(d) => {
+                let mut s = world.resource_mut::<crate::sim::people::PlayerSession>();
+                s.lives = (s.lives + d).clamp(0, MAX_LIVES);
+            }
+            Cheat::Teleport => {
+                let target = world.resource::<crate::arrow::Seek>().target;
+                if let Some(t) = target.and_then(|t| ground_point(world, t)) {
+                    move_player_near(world, t);
+                }
+            }
         }
     }
     let wanted = player(world).and_then(|(e, ..)| world.get::<Obj>(e)).map_or(0, |o| o.wanted);
-    world.resource_mut::<Cheats>().wanted = wanted;
+    let lives = world.resource::<crate::sim::people::PlayerSession>().lives;
+    let mut c = world.resource_mut::<Cheats>();
+    c.wanted = wanted;
+    c.lives = lives;
     let (god, vehicle_god) = {
         let c = world.resource::<Cheats>();
         (c.god, c.vehicle_god)
@@ -362,10 +408,25 @@ fn travel_to(world: &mut World, ev: i32) {
             actor.and_then(|e| world.get::<Obj>(e)).map(|o| o.pos)
         }
     };
-    let Some(target) = target else {
-        warn!("mission {ev}: no start point");
-        return;
-    };
+    match target {
+        Some(t) => move_player_near(world, t),
+        None => warn!("mission {ev}: no start point"),
+    }
+}
+
+/// The seek target (square x, y in object units, floor) as a point on top
+/// of that floor's cube.
+fn ground_point(world: &World, t: IVec3) -> Option<IVec3> {
+    let city = world.get_resource::<City>()?;
+    let (sx, sy, fx, fy) = City::locate(t.x as f32, t.y as f32)?;
+    let top = city.square_cubes(sx, sy)[(t.z as usize).min(2)].top_at(fx, fy);
+    Some(IVec3::new(t.x, t.y, crate::world::z_of_h(top) as i32))
+}
+
+/// Move the player (on foot, or the vehicle they drive) to a free spot by
+/// `target` ([`find_spot`]), stopped, and snap the cameras there
+/// (`camera::snap`). Nothing happens when there is no free spot.
+fn move_player_near(world: &mut World, target: IVec3) {
     let Some((player, _, heading)) = player(world) else { return };
     let vehicle = world.get::<Vehicle>(player).map(|v| v.kind);
     let body = match vehicle {
@@ -402,7 +463,7 @@ fn travel_to(world: &mut World, ev: i32) {
         city.and_then(|c| find_spot(c, trig, target, heading, &body, boat, &others))
     };
     let Some((at, level, water)) = spot else {
-        warn!("mission {ev}: no free spot by its start");
+        warn!("cheat: no free spot by {target}");
         return;
     };
     if let Some(mut o) = world.get_mut::<Obj>(player) {
@@ -624,6 +685,9 @@ mod tests {
             Cheat::ClearWanted,
             Cheat::Mission { event: 1100, travel: false },
             Cheat::Mission { event: 20, travel: true },
+            Cheat::Lives(1),
+            Cheat::Lives(-1),
+            Cheat::Teleport,
         ] {
             let e = c.event(42);
             assert_eq!(e.tick, 42);

@@ -569,6 +569,8 @@ fn gather_input(
 #[derive(SystemParam)]
 struct Env<'w, 's> {
     commands: Commands<'w, 's>,
+    /// The objective arrow's target (the cheat menu's teleport).
+    seek: Res<'w, crate::arrow::Seek>,
     time: Res<'w, Time<Real>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     typed: MessageReader<'w, 's, KeyboardInput>,
@@ -714,11 +716,12 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         let item = crate::arg("--menu-item").and_then(|v| v.parse().ok()).filter(|_| debug_cheats);
         let missions = env.spec.map.parse::<u8>().ok().filter(|_| matches!(*env.mode, GameMode::Story));
         let missions = missions.map_or(&[][..], |c| crate::mission::levels::missions(c, env.spec.level));
+        let target = env.seek.target.is_some();
         if debug_cheats && debug_missions {
-            fe.stack.push(Box::new(cheats::CheatMenu::new(&env.cheats, missions)));
+            fe.stack.push(Box::new(cheats::CheatMenu::new(&env.cheats, target, missions)));
             fe.stack.push(Box::new(missions::MissionMenu::new(&env.data, &env.texts, missions, item.unwrap_or(0))));
         } else {
-            fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, missions, item.unwrap_or(0))));
+            fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, target, missions, item.unwrap_or(0))));
         }
         if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
             fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));

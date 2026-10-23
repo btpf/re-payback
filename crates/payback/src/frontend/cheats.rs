@@ -14,7 +14,7 @@
 //! them in its next fixed tick and records them in the replay.
 
 use super::ui::*;
-use crate::cheats::{Cheat, Cheats, MAX_WANTED, VEHICLES};
+use crate::cheats::{Cheat, Cheats, MAX_LIVES, MAX_WANTED, VEHICLES};
 use crate::objects::{PAINT_COUNT, paintable};
 use crate::data::GameData;
 use crate::vehicles::TYPES;
@@ -31,20 +31,31 @@ pub(super) const TITLE_Y: i32 = 34;
 /// Menu lines.
 const ITEMS: usize = 8;
 
+const GOD: usize = 0;
+const VEHICLE_GOD: usize = 1;
+const WEAPONS: usize = 2;
+const VEHICLE: usize = 3;
+/// "Wanted level: n/6": left/right step it, Enter clears it.
+const WANTED: usize = 4;
+/// "Lives: n": left/right step it.
+const LIVES: usize = 5;
+/// "Teleport to target" (the objective arrow's, `arrow::Seek`).
+const TELEPORT: usize = 6;
 /// The "Mission select" line (`super::missions`).
 const MISSIONS: usize = 7;
 
 /// Line spacing of the items (virtual 200-line units).
 const LINE: i32 = 11;
 
-/// First item line (virtual 200-line units): eight items and the wanted
-/// level above the "Esc" line at 0x9a.
+/// First item line (virtual 200-line units): eight items above the hint
+/// and "Esc" lines.
 const TOP: i32 = 0x37;
 
 /// Main cheat menu: God mode (On/Off), Vehicle god mode (On/Off), All
-/// weapons, Spawn vehicle, Clear wanted, Wanted up, Wanted down, Mission
-/// select (dimmed where the level has no missions: Rampage, the
-/// jailbreak), and the wanted level below them.
+/// weapons, Spawn vehicle, Wanted level (left/right, Enter clears), Lives
+/// (left/right), Teleport to target (dimmed with no objective arrow) and
+/// Mission select (dimmed where the level has no missions: Rampage, the
+/// jailbreak).
 pub struct CheatMenu {
     sel: usize,
     /// God mode as it will be after the queued cheats.
@@ -53,38 +64,54 @@ pub struct CheatMenu {
     vehicle_god: bool,
     /// The wanted level as it will be after the queued cheats.
     wanted: i32,
+    /// The lives as they will be after the queued cheats.
+    lives: i32,
+    /// There is an objective arrow to teleport to.
+    target: bool,
     /// The level's missions (`mission::levels::missions`).
     missions: &'static [crate::mission::levels::MissionInfo],
 }
 
 impl CheatMenu {
     /// Showing the cheats as they will be once the queue is applied.
-    pub fn new(cheats: &Cheats, missions: &'static [crate::mission::levels::MissionInfo]) -> CheatMenu {
+    pub fn new(cheats: &Cheats, target: bool, missions: &'static [crate::mission::levels::MissionInfo]) -> CheatMenu {
         CheatMenu {
             sel: 0,
             god: cheats.god_pending(),
             vehicle_god: cheats.vehicle_god_pending(),
             wanted: cheats.wanted_pending(),
+            lives: cheats.lives_pending(),
+            target,
             missions,
         }
     }
 
     /// Debug (`--cheat-menu`, on line `--menu-item <n>`).
-    pub fn at(cheats: &Cheats, missions: &'static [crate::mission::levels::MissionInfo], sel: usize) -> CheatMenu {
-        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats, missions) }
+    pub fn at(
+        cheats: &Cheats,
+        target: bool,
+        missions: &'static [crate::mission::levels::MissionInfo],
+        sel: usize,
+    ) -> CheatMenu {
+        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats, target, missions) }
     }
 
     fn label(&self, cx: &Ctx, i: usize) -> String {
         match i {
-            0 => format!("God mode: {}", cx.g(if self.god { 2081 } else { 2080 })),
-            1 => format!("Vehicle god mode: {}", cx.g(if self.vehicle_god { 2081 } else { 2080 })),
-            2 => "All weapons".into(),
-            3 => "Spawn vehicle".into(),
-            4 => "Clear wanted".into(),
-            5 => "Wanted up".into(),
-            6 => "Wanted down".into(),
+            GOD => format!("God mode: {}", cx.g(if self.god { 2081 } else { 2080 })),
+            VEHICLE_GOD => format!("Vehicle god mode: {}", cx.g(if self.vehicle_god { 2081 } else { 2080 })),
+            WEAPONS => "All weapons".into(),
+            VEHICLE => "Spawn vehicle".into(),
+            WANTED => format!("Wanted level: {}/{}", self.wanted, MAX_WANTED),
+            LIVES => format!("Lives: {}", self.lives),
+            TELEPORT => "Teleport to target".into(),
             _ => "Mission select".into(),
         }
+    }
+
+    /// The line can't be chosen now.
+    fn dimmed(&self, i: usize) -> bool {
+        (i == MISSIONS && self.missions.is_empty()) || (i == TELEPORT && !self.target)
     }
 
     /// Queue a wanted-level change (the menu stays open, showing the
@@ -116,36 +143,54 @@ impl Screen for CheatMenu {
             cx.sound(Sfx::Move);
             return Step::Stay;
         }
-        if (self.sel <= 1 && (input.left || input.right)) || input.fire {
-            if !(self.sel == MISSIONS && self.missions.is_empty()) {
-                cx.sound(Sfx::Select);
-            }
+        let step = if input.right { 1 } else if input.left { -1 } else { 0 };
+        if step != 0 {
             match self.sel {
-                0 => {
-                    self.god = !self.god;
-                    cx.requests.push(Request::Cheat(Cheat::God(self.god)));
+                GOD | VEHICLE_GOD => {}
+                WANTED => {
+                    cx.sound(Sfx::Move);
+                    self.wanted(cx, Cheat::Wanted(step));
+                    return Step::Stay;
                 }
-                1 => {
-                    self.vehicle_god = !self.vehicle_god;
-                    cx.requests.push(Request::Cheat(Cheat::VehicleGod(self.vehicle_god)));
+                LIVES => {
+                    cx.sound(Sfx::Move);
+                    self.lives = (self.lives + step).clamp(0, MAX_LIVES);
+                    cx.requests.push(Request::Cheat(Cheat::Lives(step)));
+                    return Step::Stay;
                 }
-                2 => {
-                    cx.requests.push(Request::Cheat(Cheat::AllWeapons));
-                    cx.requests.push(Request::Resume);
-                }
-                3 => return Step::Push(Box::new(VehicleSelect::new(cx.data, 0))),
-                4 => self.wanted(cx, Cheat::ClearWanted),
-                5 => self.wanted(cx, Cheat::Wanted(1)),
-                6 => self.wanted(cx, Cheat::Wanted(-1)),
-                _ if self.missions.is_empty() => cx.sound(Sfx::Refuse),
-                _ => {
-                    return Step::Push(Box::new(super::missions::MissionMenu::new(
-                        cx.data,
-                        cx.texts,
-                        self.missions,
-                        0,
-                    )));
-                }
+                _ => return Step::Stay,
+            }
+        }
+        if step == 0 && !input.fire {
+            return Step::Stay;
+        }
+        if self.dimmed(self.sel) {
+            cx.sound(Sfx::Refuse);
+            return Step::Stay;
+        }
+        cx.sound(Sfx::Select);
+        match self.sel {
+            GOD => {
+                self.god = !self.god;
+                cx.requests.push(Request::Cheat(Cheat::God(self.god)));
+            }
+            VEHICLE_GOD => {
+                self.vehicle_god = !self.vehicle_god;
+                cx.requests.push(Request::Cheat(Cheat::VehicleGod(self.vehicle_god)));
+            }
+            WEAPONS => {
+                cx.requests.push(Request::Cheat(Cheat::AllWeapons));
+                cx.requests.push(Request::Resume);
+            }
+            VEHICLE => return Step::Push(Box::new(VehicleSelect::new(cx.data, 0))),
+            WANTED => self.wanted(cx, Cheat::ClearWanted),
+            LIVES => {}
+            TELEPORT => {
+                cx.requests.push(Request::Cheat(Cheat::Teleport));
+                cx.requests.push(Request::Resume);
+            }
+            _ => {
+                return Step::Push(Box::new(super::missions::MissionMenu::new(cx.data, cx.texts, self.missions, 0)));
             }
         }
         Step::Stay
@@ -156,15 +201,17 @@ impl Screen for CheatMenu {
         ui.heading("CHEATS", TITLE_Y);
         for i in 0..ITEMS {
             let y = ui.hy(TOP + LINE * i as i32);
-            if i == MISSIONS && self.missions.is_empty() {
+            if self.dimmed(i) {
                 ui.centred_dim(&self.label(cx, i), y, 1);
             } else {
                 let c = if i == self.sel { ui.flash() } else { 1 };
                 ui.centred(&self.label(cx, i), y, c);
             }
         }
-        let w = format!("Wanted level: {}/{}", self.wanted, MAX_WANTED);
-        ui.centred(&w, ui.hy(TOP + LINE * ITEMS as i32), 2);
+        if matches!(self.sel, WANTED | LIVES) {
+            let hint = if self.sel == WANTED { "Left/Right: change  Enter: clear" } else { "Left/Right: change" };
+            ui.centred(hint, ui.hy(0x90), 2);
+        }
         ui.centred("Esc: back to the game", ui.hy(0x9a), 2);
     }
 }
