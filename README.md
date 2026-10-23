@@ -160,6 +160,16 @@ web build see [`docs/web.md`](docs/web.md).
 3. **Web build** (optional): `tools/web/build_web.sh`, then serve `web/dist/`
    ([`docs/web.md`](docs/web.md)).
 
+## Custom maps
+
+Community maps (e.g. from <https://www.apex-designs.net/payback_maps/>) work
+as the Apex site describes: unzip the map and copy its files
+(`<name>.map`, `.route`, `.vehicles`, `.mini`, `.thumb`, and `.textures` /
+`.scores` when present; not the `__MACOSX` folder) into a `UserMaps/` folder
+next to `payback.exe`. The map is then offered after the three cities in
+Rampage and multiplayer. A map installed there replaces a bundled one of the
+same name (the Mac release ships 31 community maps).
+
 ## Music
 
 The game's music is the Red Book audio on the game CD; `Payback.iso` and

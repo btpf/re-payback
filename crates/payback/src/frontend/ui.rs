@@ -44,6 +44,9 @@ pub struct Input {
     pub pad: Vec<GamepadButton>,
     /// Gamepad axis ends newly pushed (`bindings::PadAxes`).
     pub pad_axes: Vec<super::bindings::PadInput>,
+    /// Arrow keys held now (x right, y down; port addition, for the
+    /// teleport picker's cursor, `super::teleport`).
+    pub held: bevy::math::IVec2,
 }
 
 /// Menu sounds (Amiga `FUN_010053c4(id, period)`, Mac `PlaySound__Fii`

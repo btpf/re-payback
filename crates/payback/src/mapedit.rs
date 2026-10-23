@@ -251,7 +251,7 @@ fn cull_above_limit(
     if limit >= 3 && hidden.0.is_empty() {
         return;
     }
-    let mut set = |e: Entity, vis: &mut Visibility, hide: bool, hidden: &mut LayerHidden| {
+    let set = |e: Entity, vis: &mut Visibility, hide: bool, hidden: &mut LayerHidden| {
         if hide {
             if *vis != Visibility::Hidden {
                 *vis = Visibility::Hidden;

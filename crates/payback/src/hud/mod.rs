@@ -496,7 +496,7 @@ fn reset_hud(mut commands: Commands, mut node: Query<&mut Visibility, With<HudNo
 }
 
 /// Minimap: 65x65 cropped to 64x64, red north arrow at the top centre.
-fn load_minimap(data: &GameData, path: &std::path::Path) -> Option<Icon> {
+pub(crate) fn load_minimap(data: &GameData, path: &std::path::Path) -> Option<Icon> {
     data.read(path).ok().map(|b| {
         let mut px = vec![0u8; 64 * 64];
         for y in 0..64 {

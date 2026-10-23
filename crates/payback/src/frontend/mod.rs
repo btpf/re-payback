@@ -37,6 +37,7 @@ mod model;
 mod multiplayer;
 pub mod progress;
 mod rampage;
+mod teleport;
 mod replays;
 pub mod ui;
 pub mod usermaps;
@@ -543,6 +544,10 @@ fn gather_input(
     input.right |= keys.just_pressed(KeyCode::ArrowRight);
     input.up |= keys.just_pressed(KeyCode::ArrowUp);
     input.down |= keys.just_pressed(KeyCode::ArrowDown);
+    input.held = IVec2::new(
+        keys.pressed(KeyCode::ArrowRight) as i32 - keys.pressed(KeyCode::ArrowLeft) as i32,
+        keys.pressed(KeyCode::ArrowDown) as i32 - keys.pressed(KeyCode::ArrowUp) as i32,
+    );
     for k in [KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp, KeyCode::ArrowDown] {
         if keys.just_pressed(k) {
             bindings::pad_log(format_args!("menu nav from keyboard {k:?}"));
@@ -571,6 +576,8 @@ struct Env<'w, 's> {
     commands: Commands<'w, 's>,
     /// The objective arrow's target (the cheat menu's teleport).
     seek: Res<'w, crate::arrow::Seek>,
+    /// The player's and the objective's positions (the teleport picker).
+    hud: Res<'w, crate::hud::HudData>,
     time: Res<'w, Time<Real>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     typed: MessageReader<'w, 's, KeyboardInput>,
@@ -717,11 +724,21 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         let missions = env.spec.map.parse::<u8>().ok().filter(|_| matches!(*env.mode, GameMode::Story));
         let missions = missions.map_or(&[][..], |c| crate::mission::levels::missions(c, env.spec.level));
         let target = env.seek.target.is_some();
+        let view = cheats::MapView {
+            mini: crate::hud::load_minimap(&env.data, &env.spec.path("mini")),
+            player: env.hud.player_pos,
+            target: env.hud.target_pos,
+        };
         if debug_cheats && debug_missions {
-            fe.stack.push(Box::new(cheats::CheatMenu::new(&env.cheats, target, missions)));
+            fe.stack.push(Box::new(cheats::CheatMenu::new(&env.cheats, target, missions, view)));
             fe.stack.push(Box::new(missions::MissionMenu::new(&env.data, &env.texts, missions, item.unwrap_or(0))));
         } else {
-            fe.stack.push(Box::new(cheats::CheatMenu::at(&env.cheats, target, missions, item.unwrap_or(0))));
+            let menu = cheats::CheatMenu::at(&env.cheats, target, missions, view, item.unwrap_or(0));
+            let picker = crate::args().any(|a| a == "--teleport-menu").then(|| menu.picker());
+            fe.stack.push(Box::new(menu));
+            if let Some(p) = picker {
+                fe.stack.push(Box::new(p));
+            }
         }
         if let Some(kind) = crate::arg("--cheat-vehicle").and_then(|v| v.parse().ok()).filter(|_| debug_cheats) {
             fe.stack.push(Box::new(cheats::VehicleSelect::of_kind(&env.data, kind)));

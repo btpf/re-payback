@@ -55,6 +55,8 @@
 //! - **Teleport to target**: the player (on foot, or the vehicle they
 //!   drive) to a free spot by the objective arrow's target
 //!   (`arrow::Seek::target`), as "Take me there" does ([`move_player_near`]).
+//! - **Teleport to...**: the same, to a square picked on the map
+//!   (`frontend::teleport`), on its ground floor.
 //! - **Start mission** ("Mission select", `crate::frontend::missions`): the
 //!   chosen mission's phone event goes to the level script as if its phone
 //!   had been answered ([`Cheat::Mission`]). A mission in progress is ended
@@ -67,7 +69,7 @@
 //! Debug: `--cheat-script <tick>:<cheat>,...` queues cheats at those ticks
 //! of a recorded game (`god`, `nogod`, `vgod`, `novgod`, `weapons`,
 //! `vehicle=<type>[:<paint>]`,
-//! `wanted+`, `wanted-`, `wanted0`, `lives+`, `lives-`, `teleport`, `mission=<event>[:go]`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
+//! `wanted+`, `wanted-`, `wanted0`, `lives+`, `lives-`, `teleport`, `teleport=<x>:<y>`, `mission=<event>[:go]`), e.g. for the replay check; `--cheat-menu` / `--cheat-vehicle <type>` open the
 //! menus (`crate::frontend`).
 
 use crate::camera::CameraTarget;
@@ -117,6 +119,8 @@ const MISSION_TRAVEL: i32 = 1 << 30;
 /// Argument: +1 up, -1 down.
 const EV_LIVES: u32 = 8;
 const EV_TELEPORT: u32 = 9;
+/// Argument: square x | square y << 8.
+const EV_TELEPORT_TO: u32 = 10;
 
 /// One cheat action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +144,8 @@ pub enum Cheat {
     Lives(i32),
     /// To the objective arrow's target.
     Teleport,
+    /// To map square (x, y) ("Teleport to...", `frontend::teleport`).
+    TeleportTo(u8, u8),
 }
 
 impl Cheat {
@@ -154,6 +160,7 @@ impl Cheat {
             Cheat::Mission { event, travel } => (EV_MISSION, event | if travel { MISSION_TRAVEL } else { 0 }),
             Cheat::Lives(d) => (EV_LIVES, d.signum()),
             Cheat::Teleport => (EV_TELEPORT, 0),
+            Cheat::TeleportTo(x, y) => (EV_TELEPORT_TO, x as i32 | (y as i32) << 8),
         };
         CheatEvent { tick, kind, arg }
     }
@@ -169,6 +176,7 @@ impl Cheat {
             EV_MISSION => Cheat::Mission { event: e.arg & !MISSION_TRAVEL, travel: e.arg & MISSION_TRAVEL != 0 },
             EV_LIVES if e.arg != 0 => Cheat::Lives(e.arg.signum()),
             EV_TELEPORT => Cheat::Teleport,
+            EV_TELEPORT_TO => Cheat::TeleportTo((e.arg & 0x7f) as u8, (e.arg >> 8 & 0x7f) as u8),
             _ => return None,
         })
     }
@@ -188,6 +196,10 @@ impl Cheat {
             "lives+" => Cheat::Lives(1),
             "lives-" => Cheat::Lives(-1),
             "teleport" => Cheat::Teleport,
+            v if v.starts_with("teleport=") => {
+                let (x, y) = v["teleport=".len()..].split_once(':')?;
+                Cheat::TeleportTo(x.parse::<u8>().ok()?.min(127), y.parse::<u8>().ok()?.min(127))
+            }
             v if v.starts_with("mission=") => {
                 let v = &v["mission=".len()..];
                 let (ev, travel) = v.strip_suffix(":go").map_or((v, false), |e| (e, true));
@@ -341,6 +353,13 @@ pub fn apply(world: &mut World, mut script_cache: Local<Option<Vec<(u32, Cheat)>
             Cheat::Teleport => {
                 let target = world.resource::<crate::arrow::Seek>().target;
                 if let Some(t) = target.and_then(|t| ground_point(world, t)) {
+                    move_player_near(world, t);
+                }
+            }
+            Cheat::TeleportTo(x, y) => {
+                // The square's centre, on its ground (floor 0).
+                let c = IVec3::new((x as i32) << 11 | 0x400, (y as i32) << 11 | 0x400, 0);
+                if let Some(t) = ground_point(world, c) {
                     move_player_near(world, t);
                 }
             }
@@ -688,6 +707,7 @@ mod tests {
             Cheat::Lives(1),
             Cheat::Lives(-1),
             Cheat::Teleport,
+            Cheat::TeleportTo(127, 3),
         ] {
             let e = c.event(42);
             assert_eq!(e.tick, 42);

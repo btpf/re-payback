@@ -15,6 +15,7 @@
 
 use super::ui::*;
 use crate::cheats::{Cheat, Cheats, MAX_LIVES, MAX_WANTED, VEHICLES};
+use crate::hud::icons::Icon;
 use crate::objects::{PAINT_COUNT, paintable};
 use crate::data::GameData;
 use crate::vehicles::TYPES;
@@ -29,7 +30,7 @@ pub(super) fn panel(ui: &mut Ui) {
 pub(super) const TITLE_Y: i32 = 34;
 
 /// Menu lines.
-const ITEMS: usize = 8;
+const ITEMS: usize = 9;
 
 const GOD: usize = 0;
 const VEHICLE_GOD: usize = 1;
@@ -41,19 +42,22 @@ const WANTED: usize = 4;
 const LIVES: usize = 5;
 /// "Teleport to target" (the objective arrow's, `arrow::Seek`).
 const TELEPORT: usize = 6;
+/// "Teleport to...": pick a square on the map (`super::teleport`).
+const TELEPORT_TO: usize = 7;
 /// The "Mission select" line (`super::missions`).
-const MISSIONS: usize = 7;
+const MISSIONS: usize = 8;
 
 /// Line spacing of the items (virtual 200-line units).
 const LINE: i32 = 11;
 
-/// First item line (virtual 200-line units): eight items above the hint
-/// and "Esc" lines.
-const TOP: i32 = 0x37;
+/// First item line (virtual 200-line units): nine items above the "Esc"
+/// line.
+const TOP: i32 = 0x34;
 
 /// Main cheat menu: God mode (On/Off), Vehicle god mode (On/Off), All
 /// weapons, Spawn vehicle, Wanted level (left/right, Enter clears), Lives
-/// (left/right), Teleport to target (dimmed with no objective arrow) and
+/// (left/right; both between arrows when selected), Teleport to target
+/// (dimmed with no objective arrow), Teleport to... (a map picker) and
 /// Mission select (dimmed where the level has no missions: Rampage, the
 /// jailbreak).
 pub struct CheatMenu {
@@ -70,11 +74,28 @@ pub struct CheatMenu {
     target: bool,
     /// The level's missions (`mission::levels::missions`).
     missions: &'static [crate::mission::levels::MissionInfo],
+    /// The map for "Teleport to...".
+    view: MapView,
+}
+
+/// What the teleport picker shows (`super::teleport`).
+#[derive(Clone)]
+pub struct MapView {
+    /// The level's minimap picture (`hud::load_minimap`).
+    pub mini: Option<Icon>,
+    /// The player's and the objective's positions (`hud::HudData`).
+    pub player: Option<bevy::math::IVec2>,
+    pub target: Option<bevy::math::IVec2>,
 }
 
 impl CheatMenu {
     /// Showing the cheats as they will be once the queue is applied.
-    pub fn new(cheats: &Cheats, target: bool, missions: &'static [crate::mission::levels::MissionInfo]) -> CheatMenu {
+    pub fn new(
+        cheats: &Cheats,
+        target: bool,
+        missions: &'static [crate::mission::levels::MissionInfo],
+        view: MapView,
+    ) -> CheatMenu {
         CheatMenu {
             sel: 0,
             god: cheats.god_pending(),
@@ -83,7 +104,14 @@ impl CheatMenu {
             lives: cheats.lives_pending(),
             target,
             missions,
+            view,
         }
+    }
+
+    /// The "Teleport to..." screen.
+    pub fn picker(&self) -> super::teleport::TeleportPicker {
+        let v = self.view.clone();
+        super::teleport::TeleportPicker::new(v.mini, v.player, v.target)
     }
 
     /// Debug (`--cheat-menu`, on line `--menu-item <n>`).
@@ -91,9 +119,10 @@ impl CheatMenu {
         cheats: &Cheats,
         target: bool,
         missions: &'static [crate::mission::levels::MissionInfo],
+        view: MapView,
         sel: usize,
     ) -> CheatMenu {
-        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats, target, missions) }
+        CheatMenu { sel: sel.min(ITEMS - 1), ..CheatMenu::new(cheats, target, missions, view) }
     }
 
     fn label(&self, cx: &Ctx, i: usize) -> String {
@@ -105,6 +134,7 @@ impl CheatMenu {
             WANTED => format!("Wanted level: {}/{}", self.wanted, MAX_WANTED),
             LIVES => format!("Lives: {}", self.lives),
             TELEPORT => "Teleport to target".into(),
+            TELEPORT_TO => "Teleport to...".into(),
             _ => "Mission select".into(),
         }
     }
@@ -189,6 +219,7 @@ impl Screen for CheatMenu {
                 cx.requests.push(Request::Cheat(Cheat::Teleport));
                 cx.requests.push(Request::Resume);
             }
+            TELEPORT_TO => return Step::Push(Box::new(self.picker())),
             _ => {
                 return Step::Push(Box::new(super::missions::MissionMenu::new(cx.data, cx.texts, self.missions, 0)));
             }
@@ -208,9 +239,9 @@ impl Screen for CheatMenu {
                 ui.centred(&self.label(cx, i), y, c);
             }
         }
+        // Wanted level and lives change with left/right.
         if matches!(self.sel, WANTED | LIVES) {
-            let hint = if self.sel == WANTED { "Left/Right: change  Enter: clear" } else { "Left/Right: change" };
-            ui.centred(hint, ui.hy(0x90), 2);
+            ui.arrows(ui.hy(TOP + LINE * self.sel as i32));
         }
         ui.centred("Esc: back to the game", ui.hy(0x9a), 2);
     }
