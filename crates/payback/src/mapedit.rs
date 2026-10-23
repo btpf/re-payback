@@ -48,6 +48,9 @@ pub struct ChunkMesh {
     pub cx: usize,
     pub cy: usize,
     pub layer: usize,
+    /// Still drawn when `layer` equals the visible-layer limit (sides of
+    /// sloped cubes, tops of slope 2/5; `city::drawn_at_layer_limit`).
+    pub at_limit: bool,
 }
 
 /// Everything needed to (re)build city chunk meshes.
@@ -110,9 +113,14 @@ pub fn spawn_chunk(
         render.lighting.as_deref(),
         render.remap.as_deref(),
     );
-    for (layer, pass, mesh) in meshes_of {
+    for (layer, at_limit, pass, mesh) in meshes_of {
         let mesh = Mesh3d(meshes.add(mesh));
-        let tag = ChunkMesh { cx, cy, layer };
+        let tag = ChunkMesh {
+            cx,
+            cy,
+            layer,
+            at_limit,
+        };
         let e = if pass == Pass::Reflect {
             commands.spawn((mesh, MeshMaterial3d(render.water.clone()), tag, LevelEntity))
         } else {
@@ -217,14 +225,18 @@ fn face_type(v: u8) -> FaceType {
     }
 }
 
-/// Hide cube layers at or above the visible-layer limit.
+/// Visible-layer limit: cube layers below it draw whole, the layer equal to
+/// it only its `at_limit` part (sides of sloped cubes, tops of slope 2/5),
+/// layers above it nothing. Mac `DrawMap` @ 1005a260, OS4 `FUN_01049374`
+/// (rendering.md §1 "Layer limit").
 fn layer_visibility(render: Option<Res<CityRender>>, mut q: Query<(&ChunkMesh, &mut Visibility)>) {
     let Some(render) = render else { return };
     if !render.is_changed() {
         return;
     }
+    let limit = render.visible_layers;
     for (chunk, mut vis) in &mut q {
-        *vis = if chunk.layer < render.visible_layers {
+        *vis = if chunk.layer < limit || (chunk.layer == limit && chunk.at_limit) {
             Visibility::Inherited
         } else {
             Visibility::Hidden

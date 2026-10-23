@@ -328,7 +328,12 @@ impl LevelLoad {
                     materials: pass_materials,
                     water: water.clone(),
                     chunks: HashMap::new(),
-                    visible_layers: 3,
+                    // `--visible-layers N` (test switch, 0..=3): start with
+                    // a layer limit as if a script had called
+                    // `SetVisibleLayers(N)`; the original always starts at 3.
+                    visible_layers: crate::arg("--visible-layers")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .map_or(3, |n| n.min(3)),
                     lighting: None,
                     remap: None,
                 });

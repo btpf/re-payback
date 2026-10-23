@@ -289,9 +289,27 @@ fn top_uv(slope: Slope) -> [Vec2; 4] {
 pub const CHUNK: usize = 16;
 pub const CHUNKS: usize = MAP_SIZE / CHUNK;
 
-/// Meshes for one chunk (cx, cy), per cube layer and pass. With Gouraud
-/// lighting (`lighting.rs`), `light` gives the corner light of every cube and
-/// `remap` the `.CubeTextureRemapList` substitution.
+/// Which faces of a cube still draw when its layer equals the visible-layer
+/// limit (`SetVisibleLayers`): sides of every sloped cube (slope byte > 1:
+/// Vert, Horiz, RVert, RHoriz), tops only for slope 2 (Vert) and 5 (RHoriz).
+/// Returns (sides, top). Mac `DrawMap` @ 1005a260 (`slope != 0 && != 1` for
+/// `drawCubeSide`, `== 2 || == 5` for the top), OS4 `FUN_01049374`;
+/// rendering.md §1 "Layer limit".
+pub fn drawn_at_layer_limit(slope: Slope) -> (bool, bool) {
+    match slope {
+        Slope::Off | Slope::Flat => (false, false),
+        Slope::Vert | Slope::RHoriz => (true, true),
+        Slope::Horiz | Slope::RVert | Slope::Unknown(_) => (true, false),
+    }
+}
+
+/// One chunk mesh: cube layer, whether it still draws when the layer equals
+/// the visible-layer limit ([`drawn_at_layer_limit`]), pass, mesh.
+pub type ChunkPart = (usize, bool, Pass, Mesh);
+
+/// Meshes for one chunk (cx, cy), per cube layer, layer-limit subset and
+/// pass. With Gouraud lighting (`lighting.rs`), `light` gives the corner
+/// light of every cube and `remap` the `.CubeTextureRemapList` substitution.
 pub fn build_chunk_meshes(
     map: &Map,
     cube_texture_names: &[String],
@@ -299,17 +317,18 @@ pub fn build_chunk_meshes(
     cy: usize,
     light: Option<&CityLighting>,
     remap: Option<&[u16]>,
-) -> Vec<(usize, Pass, Mesh)> {
+) -> Vec<ChunkPart> {
     let tex = |t: u16| remap.and_then(|r| r.get(t as usize).copied()).unwrap_or(t);
-    // Indexed by [layer][Pass as usize].
-    let mut builders: [[MeshBuilder; 4]; 3] = Default::default();
+    // Indexed by [layer][drawn at the layer limit][Pass as usize].
+    let mut builders: [[[MeshBuilder; 4]; 2]; 3] = Default::default();
     let s = 1.0 / H_PER_SQUARE;
 
     for x in cx * CHUNK..(cx + 1) * CHUNK {
         for y in cy * CHUNK..(cy + 1) * CHUNK {
             let mut base = 0.0f32;
             for (layer, cube) in map.square(x, y).cubes.iter().enumerate() {
-                let builders = &mut builders[layer];
+                let (limit_sides, limit_top) = drawn_at_layer_limit(cube.slope);
+                let [rest, at_limit] = &mut builders[layer];
                 let lit = light.map_or([NEUTRAL; 8], |l| *l.cube(x, y, layer));
                 // Corner light in quad order.
                 let pick = |k: [usize; 4]| k.map(|i| lit[i]);
@@ -335,7 +354,8 @@ pub fn build_chunk_meshes(
                         let scrolls = cube_texture_names
                             .get(top.texture as usize)
                             .is_some_and(|n| n.starts_with('#'));
-                        builders[pass as usize].quad(
+                        let dst = if limit_top { &mut *at_limit } else { &mut *rest };
+                        dst[pass as usize].quad(
                             quad,
                             uv,
                             tex(top.texture),
@@ -406,7 +426,8 @@ pub fn build_chunk_meshes(
                             // Top-left, top-right, bottom-right, bottom-left
                             // seen from outside for N and E; mirrored for S, W.
                             let ccw = fi == map::NORTH || fi == map::EAST;
-                            builders[pass as usize].quad(quad, uv, tex(face.texture), false, pick(k), ccw);
+                            let dst = if limit_sides { &mut *at_limit } else { &mut *rest };
+                            dst[pass as usize].quad(quad, uv, tex(face.texture), false, pick(k), ccw);
                         }
                     }
                 }
@@ -415,10 +436,12 @@ pub fn build_chunk_meshes(
         }
     }
     let mut out = Vec::new();
-    for (layer, passes) in builders.into_iter().enumerate() {
-        for (pass, b) in Pass::ALL.into_iter().zip(passes) {
-            if !b.positions.is_empty() {
-                out.push((layer, pass, b.build()));
+    for (layer, parts) in builders.into_iter().enumerate() {
+        for (at_limit, passes) in parts.into_iter().enumerate() {
+            for (pass, b) in Pass::ALL.into_iter().zip(passes) {
+                if !b.positions.is_empty() {
+                    out.push((layer, at_limit == 1, pass, b.build()));
+                }
             }
         }
     }

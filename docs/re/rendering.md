@@ -146,10 +146,31 @@ S `FUN_010a9e64`, W `FUN_010afcc4`)
 
 ### Layer limit (interiors) — CONFIRMED
 
-`DAT_0114c728` (default 3, set by scripts via `FUN_01041064`, called from
-`FUN_010cf9f0`) limits drawing to cube layers `< limit`; at layer `== limit` only
-sloped cubes draw sides and only slope 2/5 cubes draw tops. Used to cut away upper
-storeys when the player is inside.
+`DAT_0114c728` (Mac `_DAT_1017c5e4`; default 3, set by scripts via `FUN_01041064`,
+called from `FUN_010cf9f0`) limits drawing to cube layers `< limit`. Used to cut away
+upper storeys when the player is inside. The layer loop of `FUN_01049374` (Mac
+`DrawMap` @ 1005a260) runs `L = 0 … min(limit, 2)`; per cube of layer L, with `s` = its
+slope byte (cube +8):
+
+| | L < limit | L == limit | L > limit |
+|---|---|---|---|
+| side faces (`FUN_010bb8f0` / `drawCubeSide`) | all | only if `s > 1` (Mac: `s != 0 && s != 1`): Vert, Horiz, RVert, RHoriz | none |
+| top (`FUN_010a3f1c`) | all | only if `s == 2 \|\| s == 5`: Vert, RHoriz | none |
+| cube scenery (`FUN_010c9360`, cube +1) | yes | no | no |
+| moving objects / sprite scenery of cube L−1, effects list L | `L <= limit` | | |
+
+(OS4 decompile lines ~38508, ~38638 sides; ~39214, ~39254 tops; ~39608 effects
+`iVar56 <= limit`; ~39660 scenery `iVar56 < limit`; loop bound ~39966. Mac lines
+~20053, ~20204, ~20783.) Flat cubes therefore lose all their faces at the limit
+layer; the map designers give walls and stairs that must stay visible indoors a
+sloped type (a Vert/Horiz cube with h1 = h2 is flat-topped). Layer 3 extras (cube 2
+scenery and objects above) draw only when `limit > 2`.
+
+Port: `city::build_chunk_meshes` splits each chunk layer's faces into the part
+drawn at the limit (`city::drawn_at_layer_limit`) and the rest (`ChunkMesh::at_limit`);
+`mapedit::layer_visibility` shows layers `< limit` whole and only the `at_limit` meshes
+of layer `== limit`. Objects and scenery are not culled by layer in the port (open).
+Test switch: `--visible-layers N` starts a level with limit N.
 
 ---
 
