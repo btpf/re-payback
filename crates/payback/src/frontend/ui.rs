@@ -534,6 +534,11 @@ pub trait Screen: Send + Sync + 'static {
     fn brightness(&self) -> f32 {
         1.0
     }
+    /// A map square the game camera should look down on while this screen
+    /// is up (the teleport picker; `camera::CameraPreview`).
+    fn camera_focus(&self) -> Option<bevy::math::IVec2> {
+        None
+    }
     /// The CD track this screen keeps playing (`CD_CheckForTrackEnd(n)`
     /// in its loop, Mac @ 100fb000; `crate::music`): 13 in the menus.
     fn cd_track(&self) -> i32 {

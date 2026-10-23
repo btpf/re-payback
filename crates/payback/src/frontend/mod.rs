@@ -578,6 +578,8 @@ struct Env<'w, 's> {
     seek: Res<'w, crate::arrow::Seek>,
     /// The player's and the objective's positions (the teleport picker).
     hud: Res<'w, crate::hud::HudData>,
+    /// Where the teleport picker points the camera.
+    preview: ResMut<'w, crate::camera::CameraPreview>,
     time: Res<'w, Time<Real>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     typed: MessageReader<'w, 's, KeyboardInput>,
@@ -908,6 +910,9 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         }
     }
     if close {
+        if env.preview.square.is_some() {
+            env.preview.square = None;
+        }
         fe.stack.clear();
         fe.layers_open = false;
         env.current.0 = None;
@@ -1015,6 +1020,10 @@ fn run_menus(mut fe: ResMut<Frontend>, env: &mut Env) {
         env.commands.insert_resource(crate::hud::loading::LoadingPanel(pieces));
     }
     let top = top.filter(|_| shown && !loading);
+    let focus = top.and_then(|t| t.camera_focus());
+    if env.preview.square != focus {
+        env.preview.square = focus;
+    }
     env.current.0 = top.and_then(|t| t.model());
     env.current.1 = top.and_then(|t| t.back_model());
 }

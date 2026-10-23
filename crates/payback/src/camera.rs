@@ -590,6 +590,7 @@ impl Plugin for CameraPlugin {
             .init_resource::<ViewEyes>()
             .init_resource::<TvCamera>()
             .init_resource::<Chase>()
+            .init_resource::<CameraPreview>()
             .add_plugins(postfx::PostFxPlugin)
             .add_systems(PreUpdate, follow_settings)
             .add_systems(Update, view_size_keys.run_if(in_state(AppState::Playing)))
@@ -863,6 +864,17 @@ pub fn snap(world: &mut World) {
     }
 }
 
+/// The cheat menu's teleport picker (`frontend::teleport`): while a square
+/// is set the game camera glides over to look straight down on it, at the
+/// height it was at, so the player sees where they would land. Render-only
+/// (the game is paused; the simulation's cameras are untouched).
+#[derive(Resource, Default)]
+pub struct CameraPreview {
+    pub square: Option<IVec2>,
+    /// The eye being eased towards the square.
+    pos: Option<Vec3>,
+}
+
 /// What the camera follows.
 #[derive(Clone, Copy)]
 enum Mode {
@@ -1115,16 +1127,32 @@ fn tv_camera(
     };
 }
 
+#[allow(clippy::too_many_arguments)]
 fn place_game_camera(
+    time: Res<Time<Real>>,
     eyes: Res<ViewEyes>,
     rotating: Res<RotatingView>,
     angles: Res<ViewAngles>,
     tv: Res<TvCamera>,
     chase: Res<Chase>,
+    mut preview: ResMut<CameraPreview>,
     cam: Single<(&mut GameCamera, &mut Transform)>,
 ) {
     let (mut cam, mut transform) = cam.into_inner();
     let pos = eye(eyes.cams.first().unwrap_or(&GameCam::default()));
+    // The teleport picker's view of its cursor square.
+    if let Some(sq) = preview.square.filter(|_| cam.mode == CameraMode::Follow) {
+        let want = Vec3::new(sq.x as f32 + 0.5, pos.y, sq.y as f32 + 0.5);
+        let at = preview.pos.unwrap_or(pos);
+        let k = 1.0 - (-12.0 * time.delta_secs()).exp();
+        let at = at.lerp(want, k);
+        preview.pos = Some(at);
+        *transform = view_transform(at, None);
+        return;
+    }
+    if preview.pos.is_some() {
+        preview.pos = None;
+    }
     if cam.mode == CameraMode::Follow
         && let Some(t) = chase.eye(0)
     {
