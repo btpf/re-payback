@@ -7,10 +7,11 @@
 //! preview `FUN_01027164` loads `<map>.thumb`), and their high scores are
 //! `<map>.scores` (`FUN_01029b3c`).
 //!
-//! Directories searched, in order (a name found twice is kept once):
-//! `UserMaps/` in the game data, in the Mac data (its 31 bundled maps, 12
-//! with custom `.textures`), next to the executable, and in the working
-//! directory. Junk files (`.DS_Store`, `*.rsrc`) are skipped.
+//! Directories searched, in order (a name found twice is kept once, so the
+//! first wins): `UserMaps/` next to the executable and in the working
+//! directory (the player's own; the original's `PROGDIR:UserMaps`, where
+//! the Apex site says to copy downloaded maps), then in the game data and
+//! the Mac data (its 31 bundled maps, 12 with custom `.textures`). Junk files (`.DS_Store`, `*.rsrc`) are skipped.
 //!
 //! Order: the original lists one directory in the order the file system
 //! returns it. On the Mac (CONFIRMED) `MatchFirst` @ 100fba20 /
@@ -57,16 +58,20 @@ pub struct UserMaps(pub Vec<UserMap>);
 
 impl UserMaps {
     pub fn scan(data: &GameData) -> UserMaps {
-        let mut dirs: Vec<(PathBuf, bool)> = vec![(data.root.join("UserMaps"), true)];
+        // The player's own folders first: a map installed there replaces a
+        // bundled one of the same name (e.g. a newer download of one of the
+        // Mac's community maps).
+        let mut dirs: Vec<(PathBuf, bool)> = Vec::new();
+        if let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+            dirs.push((exe.join("UserMaps"), false));
+        }
+        dirs.push((PathBuf::from("UserMaps"), false));
+        dirs.push((data.root.join("UserMaps"), true));
         // The 31 community maps bundled with the Mac release (read by
         // absolute path; their scores go to `Saves/UserMaps/`).
         if let Some(mac) = &data.mac {
             dirs.push((mac.join("UserMaps"), true));
         }
-        if let Some(exe) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-            dirs.push((exe.join("UserMaps"), false));
-        }
-        dirs.push((PathBuf::from("UserMaps"), false));
         let mut seen_dirs: Vec<PathBuf> = Vec::new();
         let mut maps: Vec<UserMap> = Vec::new();
         for (dir, in_data) in dirs {
