@@ -1480,6 +1480,7 @@ fn build_meshes(
     mut batches: Query<(Entity, &EffectBatch, Option<&Mesh3d>, &mut Visibility)>,
     mut meshes: ResMut<Assets<Mesh>>,
     chase: Res<crate::camera::Chase>,
+    render: Option<Res<crate::mapedit::CityRender>>,
     city: Option<Res<City>>,
     render_mode: Res<crate::render_mode::RenderMode>,
     occluders: Res<crate::objects::FlareOccluders>,
@@ -1533,6 +1534,7 @@ fn build_meshes(
         }
     }
 
+    let limit = render.as_ref().map_or(3, |r| r.visible_layers);
     let mut built: HashMap<usize, [[Quads; Pass::ORDER.len()]; LAYERS]> = HashMap::new();
     for &(view_index, cam, cam_tf, projection) in &views {
         // Sprites face up, with their top towards the top of the screen.
@@ -1550,6 +1552,11 @@ fn build_meshes(
         };
         let mut quads: [[Quads; Pass::ORDER.len()]; LAYERS] = Default::default();
         for (layer, list) in effects.lists.iter().enumerate() {
+            // The layer limit (`FUN_01049374`: effect list L draws while
+            // L <= limit; rendering.md §1).
+            if layer > limit {
+                continue;
+            }
             for e in list {
                 let (mut sprite, half, pass) = e.sprite();
                 if night && sprite == Sprite::Single(BLOOD_TILE) {

@@ -169,7 +169,10 @@ scenery and objects above) draw only when `limit > 2`.
 Port: `city::build_chunk_meshes` splits each chunk layer's faces into the part
 drawn at the limit (`city::drawn_at_layer_limit`) and the rest (`ChunkMesh::at_limit`);
 `mapedit::layer_visibility` shows layers `< limit` whole and only the `at_limit` meshes
-of layer `== limit`. Objects and scenery are not culled by layer in the port (open).
+of layer `== limit`. Objects (by `Obj::level`) and cube scenery on a layer `>= limit` are
+hidden (`mapedit::cull_above_limit`, which only ever re-shows what it hid itself, so a
+drowned player's hidden corpse stays hidden), and effect lists `> limit` are skipped
+(`effects::build_meshes`).
 Test switch: `--visible-layers N` starts a level with limit N.
 
 ---

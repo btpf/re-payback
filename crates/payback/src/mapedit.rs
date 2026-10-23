@@ -86,7 +86,8 @@ impl Plugin for MapEditPlugin {
         app.add_message::<MapEdit>()
             .init_resource::<Regions>()
             .add_systems(FixedPostUpdate, apply_edits)
-            .add_systems(Update, layer_visibility);
+            .init_resource::<LayerHidden>()
+            .add_systems(Update, (layer_visibility, cull_above_limit));
     }
 }
 
@@ -223,6 +224,55 @@ fn face_type(v: u8) -> FaceType {
         4 => FaceType::Reflect,
         n => FaceType::Unknown(n),
     }
+}
+
+/// Objects and scenery the layer limit hid ([`cull_above_limit`]), so only
+/// those are shown again: the simulation hides some objects for good (a
+/// drowned player's corpse, wrecks), which must stay hidden.
+#[derive(Resource, Default)]
+struct LayerHidden(HashSet<Entity>);
+
+/// The layer limit for what stands on the cubes (`FUN_01049374` / Mac
+/// `DrawMap` @ 1005a260, rendering.md §1 "Layer limit"): in the pass for
+/// cube layer L the moving objects of that layer (`FUN_010c9f28`) and the
+/// cube scenery (`FUN_010c9360`) are drawn only when L < limit, so
+/// everything on a floor at or above the limit is hidden indoors. (Effect
+/// list L draws while L <= limit, `effects::build_meshes`; lists are the
+/// object's floor + 1, the same cut.) Render-only: only `Visibility`
+/// changes, never components.
+fn cull_above_limit(
+    render: Option<Res<CityRender>>,
+    index: Option<Res<crate::objects::SceneryIndex>>,
+    mut hidden: ResMut<LayerHidden>,
+    mut objs: Query<(Entity, &crate::sim::Obj, &mut Visibility)>,
+    mut scenery: Query<&mut Visibility, (With<crate::objects::Scenery>, Without<crate::sim::Obj>)>,
+) {
+    let limit = render.as_ref().map_or(3, |r| r.visible_layers);
+    if limit >= 3 && hidden.0.is_empty() {
+        return;
+    }
+    let mut set = |e: Entity, vis: &mut Visibility, hide: bool, hidden: &mut LayerHidden| {
+        if hide {
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+                hidden.0.insert(e);
+            }
+        } else if hidden.0.remove(&e) {
+            *vis = Visibility::Inherited;
+        }
+    };
+    for (e, o, mut vis) in &mut objs {
+        set(e, &mut vis, o.level >= limit, &mut hidden);
+    }
+    if let Some(index) = index {
+        for (&(_, _, level), &e) in &index.0 {
+            if let Ok(mut vis) = scenery.get_mut(e) {
+                set(e, &mut vis, level >= limit, &mut hidden);
+            }
+        }
+    }
+    // Despawned entities.
+    hidden.0.retain(|&e| objs.contains(e) || scenery.contains(e));
 }
 
 /// Visible-layer limit: cube layers below it draw whole, the layer equal to
