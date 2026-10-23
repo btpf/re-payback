@@ -350,13 +350,14 @@ fn fire_weapons(
     mut hurt: MessageWriter<Hurt>,
     mut triggers: ResMut<Triggers>,
     mission: Res<MissionState>,
-    (mut crimes, mut debris, mut bystanders, mut cars, session, mode): (
+    (mut crimes, mut debris, mut bystanders, mut cars, session, mode, replay): (
         Option<ResMut<super::police::Crimes>>,
         ResMut<Parts>,
         Query<(Entity, &mut Obj), (With<Person>, Without<Arsenal>)>,
         Query<(Entity, &mut Obj), (With<CameraTarget>, Without<Person>)>,
         Res<super::people::PlayerSession>,
         Res<crate::level::GameMode>,
+        Res<crate::replay::ReplayState>,
     ),
 ) {
     let (Some(mut library), Some(city)) = (library, city) else {
@@ -557,7 +558,13 @@ fn fire_weapons(
                         .id();
                     ars.flame_sound = Some(s);
                 }
-                if ars.fire_timer % 3 == 0 {
+                // Every third game tick while held: the original counts
+                // its global tick (`_DAT_1017cb34`, +1 per level loop in
+                // `amiga_levelloop` @ 10100f50) plus the sub-tick, and
+                // spawns when that is a multiple of 3 (`do_Person` @
+                // 1013fbd0). The fire timer stops at 25 (the grenade's
+                // charge), so testing it stopped the flame after 24 ticks.
+                if replay.tick % 3 == 0 {
                     let jitter = IVec3::new(rng.rand(51) - 25, rng.rand(51) - 25, 0);
                     spawn_projectile(
                         &mut commands,
