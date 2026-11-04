@@ -16,6 +16,7 @@ If there are any issues, please open an issue or PR with screenshot preferably a
 - Quality Of Life Improvements
   - Smooth Motion Interpolation to any frame rate
   - A custom Cheat menu by pressing F12
+  - An Experimental Perspective setting in the graphics options: a chase camera behind your vehicle and an over-the-shoulder view on foot
   - Modern Controller Support
   - Ability to unlock all straight from the main menu
 
